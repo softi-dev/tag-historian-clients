@@ -42,9 +42,11 @@ Requires Python 3.10+ (newer than `python-client/`'s own 3.9+ floor - see the co
 
 Sign up at [taghistorian.com](https://taghistorian.com) and create an API key. A **Read**-scope
 key is enough for everything this server does by default. If you plan to enable the write tools
-(see below), you'll need a **Write**-scope (or higher) key instead - a Read-scope key will still
-show the write tools if you enable them, but every call will fail with a 403 from the API itself,
-which the tool surfaces back to the LLM as a clear error rather than a crash.
+(see below), a **Write**-scope key covers `write_measurement` and `write_batch_measurements` -
+`create_tag` needs **Admin**, the same as creating a tag anywhere else in the product, so even a
+Write key gets a 403 on that one call specifically. A Read-scope key will still show all three
+write tools if you enable them, but every call fails with a 403 from the API itself, which the
+tool surfaces back to the LLM as a clear error rather than a crash.
 
 ## Configuring your MCP host
 

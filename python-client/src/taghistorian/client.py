@@ -326,7 +326,12 @@ class TagHistorianClient:
         scale_min: float | None = None,
         scale_max: float | None = None,
     ) -> Tag:
-        """Create a tag. Requires Write scope.
+        """Create a tag. Requires Admin scope - unlike every other write in
+        this client, a Write-scope key gets a 403 here. Tag creation is the
+        one schema-changing operation the API reserves for Admin; if you only
+        need a tag to exist before writing to it, :meth:`write` and
+        :meth:`write_batch` create one implicitly on first write and only need
+        Write scope.
 
         :param tag_type: ``"Analog"`` or ``"Discrete"``.
         :param scale_min: Configured chart axis lower bound. Must be
