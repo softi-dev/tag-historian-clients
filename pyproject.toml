@@ -1,0 +1,36 @@
+# Python tooling for the Home Assistant integration (custom_components/ and
+# tests/ at this repository's root - the layout HACS and hassfest both
+# require).
+#
+# This file deliberately configures only the integration. python-client/ and
+# mcp-server/ each carry their own pyproject.toml, because the three ship on
+# their own cadences and pin different Python floors; pytest's testpaths
+# below is what keeps a root `pytest` from trying to collect the other two
+# packages' suites without their dependencies installed.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# pytest-homeassistant-custom-component requires this. Without it every async
+# test is collected and then skipped, silently, which looks exactly like a
+# green run.
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-q"
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+ignore = [
+  # Comments here carry the reasoning, which reads worse hard-wrapped; 100
+  # columns is the shared line length across all three packages in this
+  # repository.
+  "E501",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests assert on private helpers deliberately: the tag-name mirror and the
+# quota arithmetic are exactly the parts where being wrong is silent.
+"tests/*" = ["SLF001"]

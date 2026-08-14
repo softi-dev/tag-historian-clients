@@ -1,0 +1,109 @@
+# MCP (Model Context Protocol) stdio server for Tag Historian.
+#
+# Scoped to its own top-level directory on purpose, the same "own release
+# cadence without touching anything else" convention python-client/ uses.
+# This one additionally depends on python-client/ at runtime (it wraps
+# taghistorian.TagHistorianClient rather than re-implementing HTTP calls) -
+# see the taghistorian entry below for how that dependency is declared
+# before either package reaches PyPI.
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "taghistorian-mcp"
+version = "0.1.0"
+description = "MCP (Model Context Protocol) stdio server exposing Tag Historian to an LLM host"
+readme = "README.md"
+requires-python = ">=3.10"
+# Apache-2.0, the same as python-client/ - one licence covering every client
+# in this repository, not a separate call per package. The Tag Historian
+# product itself stays proprietary. Full text in the LICENSE file at the
+# repository root.
+license = { text = "Apache-2.0" }
+authors = [{ name = "Softi AB" }]
+keywords = ["taghistorian", "mcp", "model-context-protocol", "iot", "time-series", "llm-tools"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+# requires-python is 3.10+ here, not python-client/'s 3.9+: this package uses
+# PEP 604 `X | None` unions as actual runtime type annotations that FastMCP's
+# own schema builder introspects at import time (not just under
+# `from __future__ import annotations`, which python-client/ also uses but
+# never has FastMCP inspecting), and pydantic v2's tool-argument model
+# building wants a Python new enough to evaluate those natively. python-client/
+# has no such constraint since dataclasses there are never introspected by a
+# third-party schema generator - only ever hand-written `_from_json` code.
+dependencies = [
+  # TODO(PyPI decision pending): "taghistorian" (python-client/, in this same
+  # repository) belongs here as a real dependency and deliberately is NOT
+  # listed - it is not on PyPI yet, and an unpinned git dependency would make
+  # every `pip install -e .` here silently fetch python-client from the
+  # remote instead of using the sibling checkout two directories away. Until
+  # the PyPI publication happens:
+  #   pip install -e ../python-client   # from this directory
+  # is a required manual step before `pip install -e .` here will actually
+  # import - see __main__.py's top-level try/except, which turns a missing
+  # taghistorian into a one-line actionable message instead of a bare
+  # ModuleNotFoundError, and this package's own README for the full
+  # install sequence.
+  #
+  # Once python-client/ is on PyPI, replace this comment with:
+  #   "taghistorian>=0.1.0,<0.2"
+  #
+  # mcp itself IS pinned below to the 1.x line specifically: 2.0.0 (current on
+  # PyPI as of this writing) renamed the FastMCP convenience API this server
+  # is built on to `mcp.server.mcpserver.MCPServer` and restructured several
+  # of its other import paths - a real breaking change, released very
+  # recently relative to when this server was written. `mcp.server.fastmcp`
+  # (what nearly every existing FastMCP guide, and Claude Desktop's own
+  # examples, still reference) only exists on the 1.x line. Pinning below 2 is
+  # a deliberate choice to build against the API surface this file actually
+  # uses and that is documented everywhere today, not silent luck; revisit
+  # this pin (and this server's imports) once 2.x has been out long enough for
+  # the ecosystem to have moved.
+  "mcp>=1.2.0,<2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "pytest-asyncio>=0.23", "ruff>=0.4"]
+
+[project.scripts]
+# "taghistorian-mcp": matches the PyPI/import-name pattern this repo already
+# uses (package "taghistorian", CLI/import name for humans typing it is the
+# obvious noun) and is what actually goes in an MCP host's config `command`
+# field - see README.md for the exact JSON.
+taghistorian-mcp = "taghistorian_mcp.__main__:main"
+
+[project.urls]
+Repository = "https://github.com/softi-dev/tag-historian-clients"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+asyncio_mode = "auto"
+
+[tool.ruff]
+# Matches python-client/'s line-length/ignore choices; target-version is
+# py310 here (not py39) to match this package's own requires-python above.
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+ignore = [
+  "E501", # long lines with reasoning in the comment read worse hard-wrapped
+]

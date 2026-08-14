@@ -1,0 +1,135 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Tag Historian",
+        "description": "Paste an API key with the Write scope. Create one in the Tag Historian dashboard under API keys: press Create New Key, name it, and set Scope to Write. The dialog opens on Read, and a Read key cannot forward anything. The key is checked against your account now; no readings are sent until you have chosen which entities to keep history for.",
+        "data": {
+          "host": "Host",
+          "api_key": "API key"
+        },
+        "data_description": {
+          "host": "Leave this alone unless you run Tag Historian somewhere else.",
+          "api_key": "The scope has to be Write. A Read key can look at your history but is refused when this integration tries to add to it."
+        }
+      },
+      "select": {
+        "title": "Choose what to keep history for",
+        "description": "Your plan allows {tag_limit} tags. {tags_in_use} are already in use, leaving {tags_available}.\n\nOf the {entity_count} entities enabled in this Home Assistant, the {offered_count} listed below are the ones whose job is to report something: sensors, binary sensors, numbers, number helpers and counters, less the ones Home Assistant marks as configuration and the ones whose device class makes their state a date, a time or a category name. The other {hidden_count} are things you switch, run or look up rather than things that measure. Tick \"Show every entity\" to list all {entity_count} instead - that list is not filtered at all.\n\nThe list is chosen by what each entity IS, not by what it happens to read at this moment, so an entity that is unavailable right now is still here.\n\n{preselected} are ticked to start with: {breakdown}. {did_not_fit} more were worth ticking than the allowance could reach.\n\nNothing is sent until you finish.",
+        "data": {
+          "entities": "Entities to historise",
+          "min_interval": "Minimum seconds between readings",
+          "show_all": "Show every entity"
+        },
+        "data_description": {
+          "entities": "One entity costs one tag. Sensors with no device class and no state class are listed but left unticked, because Home Assistant knows nothing about them either way: most are hand-written template sensors reporting a number, but a few report a word - a house mode sitting at \"away\", a status sitting at \"idle\" - and those store nothing at all. Whatever stores nothing is counted on the \"readings dropped\" sensor and the entity is named there, so a series that stays empty says why. Anything you have already ticked stays in the list whatever else changes.",
+          "min_interval": "Readings arriving sooner than this after the previous one for the same entity are skipped. Your daily reading allowance is spent on everything sent, so this is the setting that keeps a chatty sensor from using it up.",
+          "show_all": "Puts every entity in the install in the list, unfiltered. Some of them store a 1 or a 0 - a light, a switch, a cover, an automation. The rest store nothing: a lock, a person, a climate mode and a media player all report words, and only entities whose state is a number or a plain on/off can become a reading."
+        }
+      },
+      "review": {
+        "title": "Review",
+        "description": "{selected} entities selected. {new_tags} of them need a new tag, and your plan has {tags_available} free, so the whole selection fits.\n\nAt one reading every {min_interval} seconds that is at most {readings_per_day} readings a day, about {percent}% of your plan's {daily_limit}.\n\nNothing else to decide - submit to finish."
+      },
+      "review_trim": {
+        "title": "Review - this needs more tags than you have",
+        "description": "{selected} entities selected. {new_tags} of them need a new tag and your plan has {tags_available} free, so {overflow} do not fit.\n\nAt one reading every {min_interval} seconds that is at most {readings_per_day} readings a day, about {percent}% of your plan's {daily_limit}.\n\nIf you continue without trimming, the readings for the entities needing those {overflow} tags will be refused and lost - everything else keeps flowing.",
+        "data": {
+          "trim_to_fit": "Trim the selection down to what fits"
+        },
+        "data_description": {
+          "trim_to_fit": "Removes the lowest-ranked entities that need a new tag, and only those - an entity whose tag already exists costs nothing and is never removed to make room. Turn it off to keep your selection and accept that the extras will be refused."
+        }
+      },
+      "reauth_confirm": {
+        "title": "Tag Historian needs a new API key",
+        "description": "The key this integration was using is no longer accepted. Create a new one in the Tag Historian dashboard - Create New Key, with Scope set to Write - and paste it here.",
+        "data": {
+          "api_key": "API key"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not reach that host. Check the address and that Home Assistant can get out to the internet.",
+      "invalid_auth": "Tag Historian did not accept that key. Check you copied all of it, and that it has not been revoked.",
+      "read_only_key": "That key's scope is Read. It can look at your data but not add to it - create a key with Scope set to Write instead.",
+      "account_inactive": "That key belongs to an account that is not active. Sign in to the Tag Historian dashboard to see why.",
+      "account_blocked": "Tag Historian refused the request for this account. Sign in to the dashboard to see what it needs.",
+      "email_not_verified": "This account's email address has not been confirmed, and the grace period has passed, so Tag Historian is refusing new data. Confirm the address from the signup email and try again.",
+      "select_at_least_one": "Pick at least one entity. An integration set up with an empty selection would sit there storing nothing and look exactly like a working one."
+    },
+    "abort": {
+      "already_configured": "This Tag Historian account is already set up. Adding it twice would send every reading twice and spend your allowance twice.",
+      "wrong_account": "That key belongs to a different Tag Historian account. Use a key for the account this integration was set up with, or add the other account separately.",
+      "reauth_successful": "Tag Historian accepted the new key.",
+      "no_tags_available": "Your account has no free tags, and every entity you chose would need one, so trimming the selection to fit leaves nothing to historise. Nothing has been set up. Free a tag in the Tag Historian dashboard or move to a larger plan, then add this integration again."
+    }
+  },
+  "options": {
+    "step": {
+      "select": {
+        "title": "Change what you keep history for",
+        "description": "Your plan allows {tag_limit} tags. {tags_in_use} are already in use, leaving {tags_available}.\n\nOf the {entity_count} entities enabled in this Home Assistant, the {offered_count} listed below are the ones whose job is to report something - sensors, binary sensors, numbers, number helpers and counters - plus everything you already had selected. The other {hidden_count} are things you switch, run or look up rather than things that measure; tick \"Show every entity\" to list all {entity_count} instead, unfiltered.\n\n{preselected} are ticked right now: {breakdown}. Another {did_not_fit} would be worth ticking if the allowance stretched to them.\n\nUnticking an entity stops new readings for it. History already stored in Tag Historian is untouched, and so is the tag - delete it in the dashboard to free the slot.",
+        "data": {
+          "entities": "Entities to historise",
+          "min_interval": "Minimum seconds between readings",
+          "show_all": "Show every entity"
+        },
+        "data_description": {
+          "entities": "One entity costs one tag. An entity that is currently unavailable or unknown stays in this list and stays selected - it is only the readings that pause, not the choice. An entity whose state is a word rather than a number stores nothing at all; those are counted and named on the \"readings dropped\" sensor.",
+          "min_interval": "Readings arriving sooner than this after the previous one for the same entity are skipped.",
+          "show_all": "Puts every entity in the install in the list, unfiltered - including ones that can store nothing."
+        }
+      },
+      "review": {
+        "title": "Review",
+        "description": "{selected} entities selected. {new_tags} of them need a new tag, and your plan has {tags_available} free, so the whole selection fits.\n\nAt one reading every {min_interval} seconds that is at most {readings_per_day} readings a day, about {percent}% of your plan's {daily_limit}.\n\nNothing else to decide - submit to save."
+      },
+      "review_trim": {
+        "title": "Review - this needs more tags than you have",
+        "description": "{selected} entities selected. {new_tags} of them need a new tag and your plan has {tags_available} free, so {overflow} do not fit.\n\nAt one reading every {min_interval} seconds that is at most {readings_per_day} readings a day, about {percent}% of your plan's {daily_limit}.\n\nIf you continue without trimming, the readings for the entities needing those {overflow} tags will be refused and lost - everything else keeps flowing.",
+        "data": {
+          "trim_to_fit": "Trim the selection down to what fits"
+        },
+        "data_description": {
+          "trim_to_fit": "Removes the lowest-ranked entities that need a new tag, and only those."
+        }
+      }
+    },
+    "error": {
+      "select_at_least_one": "Pick at least one entity. To stop forwarding altogether, disable this integration rather than emptying the list - an entry that is loaded and storing nothing looks exactly like a working one."
+    },
+    "abort": {
+      "cannot_connect": "Could not reach Tag Historian, so this screen cannot show you how much of your allowance is left. Try again in a moment.",
+      "no_tags_available": "Your account has no free tags, and every entity you chose would need one, so trimming the selection to fit leaves nothing to historise. Your existing selection has been left alone. Free a tag in the Tag Historian dashboard or move to a larger plan."
+    }
+  },
+  "issues": {
+    "tag_quota_exceeded": {
+      "title": "Tag Historian refused some readings",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Deselect down to your allowance",
+            "description": "Your account is using {tag_count} of {tag_limit} tags, so {dropped_points} readings were refused and lost. They needed these tags, which your plan has no room for: {refused_tags}\n\nEverything else is still being stored. Untick entities below until the selection fits, or upgrade your plan and leave it as it is.",
+            "data": {
+              "entities": "Entities to keep historising"
+            }
+          }
+        }
+      }
+    },
+    "daily_quota_exceeded": {
+      "title": "Tag Historian daily reading limit reached",
+      "description": "Your account has used its reading allowance for today, so Tag Historian is refusing new data until the limit resets, which is {when}. Readings are held in memory until then and the oldest are dropped if the wait is long.\n\nTwo ways out: raise the minimum interval in this integration's options so fewer readings are sent, or move to a plan with a larger allowance."
+    },
+    "write_forbidden": {
+      "title": "Tag Historian is not accepting data from this account",
+      "description": "Tag Historian refused the write and said:\n\n{message}"
+    },
+    "service_unavailable": {
+      "title": "Tag Historian has not been accepting data",
+      "description": "Writes have been failing for {minutes} minutes - Tag Historian is either unreachable or too busy to take them. Nothing about your account has changed. Readings are being held in memory and will be sent when it accepts them again; if this goes on the oldest are dropped and the dropped counter moves. Nothing needs doing at your end."
+    }
+  }
+}

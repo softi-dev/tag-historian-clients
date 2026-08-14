@@ -1,0 +1,12 @@
+{
+  "domain": "tag_historian",
+  "name": "Tag Historian",
+  "codeowners": ["@softi-dev"],
+  "config_flow": true,
+  "documentation": "https://taghistorian.com/docs/home-assistant",
+  "integration_type": "service",
+  "iot_class": "cloud_push",
+  "issue_tracker": "https://github.com/softi-dev/tag-historian-clients/issues",
+  "requirements": [],
+  "version": "2026.8.0"
+}

@@ -1,0 +1,75 @@
+# Python client for the Tag Historian API.
+#
+# This is scoped to its own directory on purpose: the file lives beside the
+# code it configures, so that publishing this package to PyPI on its own
+# release cadence stays a decision rather than a refactor. Nothing outside
+# python-client/ should ever need to import from here or vice versa. (The
+# directory started life inside the Tag Historian product repository and was
+# split out here exactly because of that scoping - a copy, not a rewrite.)
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "taghistorian"
+version = "0.1.0"
+description = "Synchronous Python client for the Tag Historian time-series API"
+readme = "README.md"
+requires-python = ">=3.9"
+# Apache-2.0, covering the clients in this repository only - the Tag
+# Historian product itself is separate and stays proprietary. Full text in
+# the LICENSE file at the repository root.
+license = { text = "Apache-2.0" }
+authors = [{ name = "Softi AB" }]
+keywords = ["taghistorian", "iot", "time-series", "historian", "scada", "plc"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+# requests only. Everything else this client needs (dataclasses, datetime,
+# json) is in the standard library, and this package is meant to be dropped
+# into a cron job or a PLC bridge without dragging in a dependency tree.
+dependencies = ["requests>=2.28"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "responses>=0.23", "ruff>=0.4"]
+
+[project.urls]
+Repository = "https://github.com/softi-dev/tag-historian-clients"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+taghistorian = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+# The Home Assistant integration at this repository's root targets py313
+# because that's what Home Assistant itself runs. This package has a
+# different constraint: it is meant to work for a hobbyist's Raspberry Pi
+# cron job or a plant engineer's box that isn't necessarily on the latest
+# interpreter, hence requires-python = ">=3.9" above and a matching target
+# here rather than literally copying py313. Line length and the lint
+# selection follow the house style in the root pyproject.toml.
+target-version = "py39"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+ignore = [
+  "E501", # long lines with reasoning in the comment read worse hard-wrapped
+]

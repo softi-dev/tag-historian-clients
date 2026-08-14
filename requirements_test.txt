@@ -1,0 +1,9 @@
+# The pinned version here IS the Home Assistant version this integration is
+# tested against: pytest-homeassistant-custom-component packages one release of
+# Home Assistant's own test plugins, and 0.13.236 carries 2025.4.4.
+#
+# Keep it in step with the "homeassistant" floor in hacs.json. That key is a
+# promise to anyone downloading through HACS, and a promise nothing tests is
+# just a number.
+pytest-homeassistant-custom-component==0.13.236
+ruff==0.11.6
