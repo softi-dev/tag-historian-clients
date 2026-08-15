@@ -133,10 +133,11 @@ The collector logs to stdout and nowhere else - `docker logs tag-collector` is t
 There is no HTTP health endpoint and no metrics port, because there is no listening socket at
 all. Instead, a health line per concern on a fixed cadence (60 s by default): the
 store-and-forward line with queue depth, delivery counters and backoff state, and a line per OPC
-UA server and Sparkplug source. The store-and-forward and OPC UA lines escalate to `Warning`
-when something needs attention (the Sparkplug line stays at `Information` and carries its
-counters instead), and everything that costs data - retention eviction, quarantine, an
-unreadable segment - logs at `Error` with exact counts. Nothing is dropped silently.
+UA server and Sparkplug source. The lines escalate to `Warning` when something needs attention
+(the Sparkplug line while its problem counters are actually growing - one sequence gap last
+week is history, not a standing alarm), and everything that costs data - retention eviction,
+quarantine, an unreadable segment - logs at `Error` with exact counts. Nothing is dropped
+silently.
 
 ## Image tags
 
