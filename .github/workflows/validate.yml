@@ -1,7 +1,11 @@
-# Validation for all three packages in this repository: the Home Assistant
-# integration at the root (hassfest + HACS structure + its test suite), and
-# the python-client/ and mcp-server/ packages (each package's own pytest and
-# ruff, on that package's own Python floor).
+# Validation for all three Python packages in this repository: the Home
+# Assistant integration at the root (hassfest + HACS structure + its test
+# suite), and the python-client/ and mcp-server/ packages (each package's own
+# pytest and ruff, on that package's own Python floor).
+#
+# collector/ is deliberately absent: it is documentation for the collector
+# container image, whose source and build live in the private product
+# repository. There is nothing here to lint or test.
 #
 # This file was written inside the Tag Historian product repository, staged
 # for exactly this split - it landed at this root when the clients moved to

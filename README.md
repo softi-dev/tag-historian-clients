@@ -13,8 +13,9 @@ your own account, so the numbers on screen are your numbers.
 This repository is the public home of Tag Historian's client-side
 integrations. Besides this Home Assistant integration it ships the official
 [Python client](python-client/) and an [MCP server](mcp-server/) for Claude
-Desktop and other AI assistants — see
-[Also in this repository](#also-in-this-repository).
+Desktop and other AI assistants, and it carries the documentation and public
+image name of the [collector](collector/) for MQTT, OPC UA and Sparkplug B —
+see [Also in this repository](#also-in-this-repository).
 
 ## Do I need this? You may not
 
@@ -263,9 +264,18 @@ themselves in place. CI runs Ubuntu, where neither is used.
   history, aggregates, alerts. **Read-only by default** — the three write
   tools don't exist as far as the host is concerned unless you explicitly
   enable them. Its README explains the write gate before you turn it on.
+- **[`collector/`](collector/)** —
+  `ghcr.io/softi-dev/tag-historian-clients/collector`, the container image
+  you run next to your MQTT broker, OPC UA server or Sparkplug B namespace.
+  It connects outward only and buffers to disk when the uplink drops.
+  **Source not included** — the collector is part of the proprietary
+  product, built in its private repository and published under this one so
+  that its image, documentation and issue tracker are somewhere public. What
+  lives here is its README.
 
-Each has its own README, test suite and Python floor; the three ship on their
-own cadences and only meet in this repository.
+The two Python packages each have their own README, test suite and Python
+floor, the collector has its README and nothing to build, and everything
+ships on its own cadence — they only meet in this repository.
 
 ## License
 
