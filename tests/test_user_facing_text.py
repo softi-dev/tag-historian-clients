@@ -51,6 +51,7 @@ from custom_components.tag_historian.const import (
     CONF_ENTITIES,
     CONF_HOST,
     CONF_MIN_INTERVAL,
+    DOCS_URL,
     DOMAIN,
     ISSUE_DAILY_QUOTA,
     ISSUE_SERVICE_UNAVAILABLE,
@@ -1026,3 +1027,28 @@ def test_the_scope_guard_is_not_one_nothing_can_satisfy() -> None:
     )
     assert instructs_creating_a_key(fixed)
     assert "Scope" in fixed and REQUIRED_SCOPE in fixed
+
+
+# --------------------------------------------------------------------------
+# One documentation page, named in two places
+# --------------------------------------------------------------------------
+
+
+def test_docs_url_is_the_page_the_manifest_links() -> None:
+    """The manifest's "documentation" is the link Home Assistant itself shows.
+
+    Both used to point at /docs/home-assistant, the guide to the built-in
+    influxdb integration, a different setup altogether, instead of at this
+    integration's own guide (/docs/home-assistant-hacs). They moved together,
+    and this keeps them together. Nothing reads the constant today, which is
+    exactly how a stale link waits for the first screen that does.
+    """
+    manifest = json.loads(
+        (
+            Path(__file__).resolve().parent.parent
+            / "custom_components"
+            / "tag_historian"
+            / "manifest.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert manifest["documentation"] == DOCS_URL
