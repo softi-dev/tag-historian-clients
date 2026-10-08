@@ -3,7 +3,7 @@
   "name": "Tag Historian",
   "codeowners": ["@softi-dev"],
   "config_flow": true,
-  "documentation": "https://taghistorian.com/docs/home-assistant",
+  "documentation": "https://taghistorian.com/docs/home-assistant-hacs",
   "integration_type": "service",
   "iot_class": "cloud_push",
   "issue_tracker": "https://github.com/softi-dev/tag-historian-clients/issues",

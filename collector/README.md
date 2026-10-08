@@ -13,6 +13,10 @@ Tag Historian API over HTTPS. No port forwarding, no inbound firewall rule, noth
 network exposed to the internet. The image opens no listening socket and exposes no ports, and it
 runs as a non-root user.
 
+The image is published for `linux/amd64` and `linux/arm64`, so the same commands run on a PC or a
+server, on Docker Desktop for Windows or macOS, and on ARM boxes with a 64-bit OS - a Raspberry Pi,
+a Siemens IOT2050, a Revolution Pi.
+
 A dropped uplink is not a lost reading: every measurement goes through a crash-durable disk queue
 before upload, and replays in order when the connection returns. The queue is bounded - 7 days /
 512 MiB by default, oldest evicted first, loudly in the log - and lives on the same volume as the
@@ -26,40 +30,81 @@ documentation.
 
 ## Install
 
-Everything lives in one mounted volume, `/config`: the configuration goes in; the offline queue
-and (for OPC UA) the certificate store come out. The image does not ship an `appsettings.json`
-and the process exits at startup without one, so the volume with a config file in it *is* the
-install:
+Everything lives in one Docker volume mounted at `/config`: the configuration goes in; the offline
+queue and (for OPC UA) the certificate store come out. You do not write the configuration from
+scratch - the first start puts a complete, commented example into the volume for you. Every
+command below is a single line, so it pastes the same into bash, zsh and PowerShell.
+
+**1. Start it once to get a config file.**
 
 ```bash
-docker run -d --name tag-collector \
-  -v mydata:/config \
-  -e TagHistorian__ApiKey="<your-api-key>" \
-  --restart unless-stopped \
-  ghcr.io/softi-dev/tag-historian-clients/collector:latest
+docker run --name tag-collector -v tag-collector:/config ghcr.io/softi-dev/tag-historian-clients/collector:latest
 ```
 
-Or as `docker-compose.yml`:
+On a new, empty volume this writes `/config/appsettings.json`, prints what to edit, and exits with
+code `78` (configuration required). That is the expected result here, not a failure: nothing has
+connected anywhere yet, and the stopped container stays behind so the next step can reach the
+volume through it.
+
+**2. Edit it.** Copy the file out and edit it with any editor:
+
+```bash
+docker cp tag-collector:/config/appsettings.json appsettings.json
+```
+
+Keep the source list you use - `MqttSources` or `OpcServers`, or both - fill in its values, and
+delete the example entry from the one you do not use. Every value still in `<angle brackets>` is a
+placeholder, and the collector will not start while one is left in; everything else is a default,
+with a comment saying what it does. Leave `ApiKey` empty: the key goes into the environment in
+step 3, so it is never stored on the volume. Then copy the file back and remove the first-start
+container:
+
+```bash
+docker cp appsettings.json tag-collector:/config/appsettings.json
+docker rm tag-collector
+```
+
+If you run docker with `sudo`, use it for all of these and edit the copied file with `sudo` too: a
+file docker copied out as root belongs to root.
+
+**3. Run it.**
+
+```bash
+docker run -d --name tag-collector --restart unless-stopped -v tag-collector:/config -e TagHistorian__ApiKey="<your-api-key>" ghcr.io/softi-dev/tag-historian-clients/collector:latest
+```
+
+Follow it with `docker logs -f tag-collector`. Put your key in place of `<your-api-key>`: left as it
+is, it stops the collector with exit code `78` and the name of the variable. To change the
+configuration later, copy it out and back in the same way and run `docker restart tag-collector`.
+
+Or as `docker-compose.yml`, once steps 1 and 2 have created the volume and put the config in it -
+the volume is `external` for exactly that reason, since a volume compose created would be a new,
+empty one:
 
 ```yaml
 services:
   collector:
     image: ghcr.io/softi-dev/tag-historian-clients/collector:latest
+    container_name: tag-collector
     restart: unless-stopped
     volumes:
-      - mydata:/config
+      - tag-collector:/config
     environment:
       TagHistorian__ApiKey: "<your-api-key>"
 
 volumes:
-  mydata:
+  tag-collector:
+    external: true
 ```
 
-Leave `ApiKey` empty in the file and pass it as the environment variable, as above. A collector
-with no key does not crash-loop: it logs a critical error naming `TagHistorian__ApiKey` and then
-sits idle, collecting nothing, until it is restarted with one. The same applies when every source
-list is empty - there has to be at least one of `MqttSources`, `OpcServers` or
-`SparkplugSources` with an entry in it, or there is nothing to do and the log says so.
+A collector with no key does not crash-loop: it logs a critical error naming
+`TagHistorian__ApiKey` and then sits idle, collecting nothing, until it is restarted with one. The
+same applies when every source list is empty - there has to be at least one of `MqttSources`,
+`OpcServers` or `SparkplugSources` with an entry in it, or there is nothing to do and the log says
+so. A key left at `<your-api-key>`, a placeholder left in the file, and a file that no longer parses
+after an edit each stop it at startup with exit code `78` and a message naming the setting, or the
+line and position where the parser gave up. Under `--restart unless-stopped` Docker keeps starting
+it again, so `docker ps` shows `Restarting (78)` until the configuration is fixed.
 
 ## Getting an API key
 
@@ -76,8 +121,9 @@ and a box sitting on a broker or plant network should not be holding it.
 
 ## Configuration
 
-A minimal `appsettings.json` - this one subscribes to an MQTT broker; the other two lists take
-the other two protocols:
+The example the first start writes lists every setting the collector reads, each with its default
+and a comment. Trimmed to what matters, an MQTT-only `appsettings.json` comes down to this; the
+other two lists take the other two protocols:
 
 ```json
 {
@@ -87,7 +133,7 @@ the other two protocols:
   },
   "MqttSources": [
     {
-      "Name": "home",
+      "Name": "broker",
       "Host": "192.168.1.10",
       "Topics": [ "zigbee2mqtt/+" ]
     }
@@ -96,6 +142,10 @@ the other two protocols:
   "SparkplugSources": []
 }
 ```
+
+Sparkplug B ships commented out in the example, because one edge node can announce thousands of
+tags: read its guide first, then remove the leading `// ` from the lines between the
+`SparkplugSources` brackets and fill it in.
 
 The full per-protocol guides - topic-to-tag mapping, payload shapes, OPC UA security policies and
 the certificate exchange, Sparkplug metric filtering - are the connector docs:
@@ -115,17 +165,42 @@ MqttSources__0__Host=192.168.1.10
 TagHistorian__StoreAndForward__MaxQueueBytes=1073741824
 ```
 
+That goes as far as having no file at all. A start whose environment configures at least one
+source runs without `appsettings.json` and writes no example. It then needs
+`TagHistorian__ApiUrl` as well, since the API address otherwise comes from the file. Keep the
+volume anyway: the queue lives on it.
+
+```bash
+docker run -d --name tag-collector --restart unless-stopped -v tag-collector:/config -e TagHistorian__ApiUrl=https://api.taghistorian.com -e TagHistorian__ApiKey="<your-api-key>" -e MqttSources__0__Host=192.168.1.10 -e MqttSources__0__Topics__0=zigbee2mqtt/+ ghcr.io/softi-dev/tag-historian-clients/collector:latest
+```
+
 ## What is on the volume
 
 | Path | Direction | What it is |
 |---|---|---|
-| `/config/appsettings.json` | you write it | The configuration. Required - the process exits without it. |
+| `/config/appsettings.json` | yours | The configuration. Written as a commented example by the first start when it is missing, and never touched by the collector after that. |
 | `/config/queue/` | the collector's | The store-and-forward queue. Bounded: 168 hours / 512 MiB by default (`TagHistorian:StoreAndForward`), oldest evicted first, every eviction logged at `Error` as data loss. |
 | `/config/queue/poison/` | the collector's | Records the API permanently rejected, quarantined as recoverable JSON lines rather than discarded. |
 | `/config/pki/` | the collector's | OPC UA certificate stores. The client certificate is generated on first start, and its identity is persisted so a container recreate does not regenerate it and break the trust you established on the PLC side. |
 | `/config/sparkplug-discovery/` | the collector's | One JSON inventory per Sparkplug edge node or device, rewritten at each birth, naming every metric it announced. |
 
 Keep the volume. It is the config, the buffer and the established trust, all three.
+
+The collector runs as the non-root user `appuser`, uid 999. A named volume needs nothing for that:
+Docker creates it writable for that user. A host directory mounted at `/config` instead has to be
+writable by uid 999 (`sudo chown 999 <directory>` on Linux; Docker Desktop's bind mounts already
+are), or the collector cannot create its queue - and a first start exits with code `73`. Where
+SELinux confines containers, a host directory also needs `:z` on its `-v` option.
+
+## Exit codes
+
+| Code | Meaning | What to do |
+|---|---|---|
+| `78` | Configuration required. The first start wrote the example `appsettings.json`; placeholders from it are still in the file; `TagHistorian__ApiKey` is still the guide's `<your-api-key>`; or `appsettings.json` does not parse. The output names each placeholder, or the line and position of the parse error. | Edit `/config/appsettings.json` and start the collector again. For the key, remove the container and run it again with your own key: a container's environment is fixed when it is created. |
+| `73` | There was no configuration, and the example could not be written to `/config`. The output names the cause: a directory the container user may not write, a read-only mount (`:ro`, or `--read-only` with nothing mounted at `/config`), root started without the `DAC_OVERRIDE` capability, or another error such as a full disk. | Do what the output says for that cause. For the commonest, a host directory owned by someone else, use a new named volume as in [Install](#install), without a `--user` option (the volume belongs to the image's own user, uid 999), or a host directory uid 999 can write. |
+
+The collector never overwrites an existing `appsettings.json`, and a configuration with at least
+one source and no placeholders starts the way it always has.
 
 ## The log is the diagnostic surface
 

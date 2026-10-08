@@ -74,4 +74,8 @@ ISSUE_SERVICE_UNAVAILABLE: Final = "service_unavailable"
 SERVICE_UNAVAILABLE_ISSUE_AFTER_SECONDS: Final = 1800
 
 PRICING_URL: Final = "https://taghistorian.com/pricing"
-DOCS_URL: Final = "https://taghistorian.com/docs/home-assistant"
+# This integration's own guide: the same page as "documentation" in
+# manifest.json, which is the link Home Assistant shows. /docs/home-assistant
+# is the guide to the built-in influxdb integration instead.
+# tests/test_user_facing_text.py holds the two together.
+DOCS_URL: Final = "https://taghistorian.com/docs/home-assistant-hacs"
