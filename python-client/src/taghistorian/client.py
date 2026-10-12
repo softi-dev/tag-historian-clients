@@ -58,19 +58,24 @@ __all__ = ["TagHistorianClient"]
 _DEFAULT_BASE_URL = "https://api.taghistorian.com"
 
 # The server's own limit (MeasurementsController.PostMeasurementBatch: "Batch
-# size exceeds maximum of 1000 measurements"), not a client guess. Checking it
-# here is the one client-side validation this package does, and the reason is
-# BEFORE a network call, not auto-chunk-and-retry: MeasurementIngestionService
-# commits a batch atomically (all rows or none, see its own comments on
-# reservation and rollback) and the response describes that single atomic
-# operation (totalCount/storedCount/processingTimeMs for the call that was
-# made). Silently splitting an over-limit call into several smaller ones would
-# turn one atomic operation the caller is reasoning about into several
-# non-atomic ones, and there would be no single honest response left to
-# hand back - a synthetic merge of N responses is not what the server did.
+# size exceeds maximum of 5000 measurements"), not a client guess. It was 1000
+# until Tag Historian 1.0.35; a server older than that refuses a batch of
+# 1001-5000 with a 400 carrying "Batch size exceeds maximum of 1000
+# measurements", which surfaces as TagHistorianAPIError and is never retried.
+#
+# Checking it here is the one client-side validation this package does, and
+# the reason is BEFORE a network call, not auto-chunk-and-retry:
+# MeasurementIngestionService commits a batch atomically (all rows or none,
+# see its own comments on reservation and rollback) and the response
+# describes that single atomic operation (totalCount/storedCount/
+# processingTimeMs for the call that was made). Silently splitting an
+# over-limit call into several smaller ones would turn one atomic operation
+# the caller is reasoning about into several non-atomic ones, and there
+# would be no single honest response left to hand back - a synthetic merge
+# of N responses is not what the server did.
 # Raising up front means the caller decides how to split their own batch,
 # with full knowledge of what "batch 3 of 5 failed" would mean for them.
-_MAX_BATCH_SIZE = 1000
+_MAX_BATCH_SIZE = 5000
 
 _CONTENT_DISPOSITION_FILENAME_RE = re.compile(r"filename\*?=(?:UTF-8'')?\"?([^\";]+)\"?")
 
@@ -164,9 +169,15 @@ class TagHistorianClient:
         return WriteResult._from_json(response.json())
 
     def write_batch(self, measurements: list[MeasurementInput]) -> BatchWriteResult:
-        """Write up to 1000 measurements in one call. Requires Write scope.
+        """Write up to 5000 measurements in one call. Requires Write scope.
 
-        :raises ValueError: if more than 1000 measurements are passed - the
+        5000 is the limit of Tag Historian 1.0.35 and later. An older server
+        (a self-hosted or staging ``base_url`` that has not been upgraded)
+        takes at most 1000 and refuses a bigger batch whole, with a 400 that
+        surfaces as :class:`~taghistorian.exceptions.TagHistorianAPIError`;
+        keep batches to 1000 when talking to one.
+
+        :raises ValueError: if more than 5000 measurements are passed - the
             server's exact limit (see the module-level comment on
             ``_MAX_BATCH_SIZE`` for why this raises instead of
             auto-chunking). Raised before any network call is made.

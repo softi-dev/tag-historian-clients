@@ -18,8 +18,10 @@ server, on Docker Desktop for Windows or macOS, and on ARM boxes with a 64-bit O
 a Siemens IOT2050, a Revolution Pi.
 
 A dropped uplink is not a lost reading: every measurement goes through a crash-durable disk queue
-before upload, and replays in order when the connection returns. The queue is bounded - 7 days /
-512 MiB by default, oldest evicted first, loudly in the log - and lives on the same volume as the
+before upload, and replays in order when the connection returns - oldest first, in uploads of up
+to 5 000 readings, at up to about 2 400 readings a second. The queue is bounded - 7 days / 512 MiB
+by default (about 1.5 to 1.7 million readings, seven to eight hours at a Business plan's full
+daily allowance), oldest evicted first, loudly in the log - and lives on the same volume as the
 config, so it survives a container restart or an image upgrade for free.
 
 **The source is not in this repository.** Unlike the Python packages next to this directory, the
@@ -174,12 +176,31 @@ volume anyway: the queue lives on it.
 docker run -d --name tag-collector --restart unless-stopped -v tag-collector:/config -e TagHistorian__ApiUrl=https://api.taghistorian.com -e TagHistorian__ApiKey="<your-api-key>" -e MqttSources__0__Host=192.168.1.10 -e MqttSources__0__Topics__0=zigbee2mqtt/+ ghcr.io/softi-dev/tag-historian-clients/collector:latest
 ```
 
+### Does your appsettings.json say "BatchSize": 100?
+
+That was the default until the image that raised it to 5000, and the first start writes
+`appsettings.json` once and never overwrites it, so an install that started on an older image
+keeps 100 through every upgrade. The API acknowledges an upload about every two seconds and the
+collector waits for each acknowledgement, so 100 holds it to about 50 readings a second - at a
+Business plan's daily average of 58 it falls further behind every hour, and any backlog drains at
+that rate.
+
+Pull the current image first, then change the line to `"BatchSize": 5000` or delete it - in that
+order, because older images send uploads uncompressed, and 5000 readings uncompressed are about
+1.1 MB, more than a slow uplink carries inside the collector's 30-second timeout. Lower it only if
+a proxy between the collector and the API limits the request size. While the batch size is what
+holds the collector back, the store-and-forward health line is followed by a warning that names
+the setting in effect.
+
+Uploads are gzip-compressed (`Content-Encoding: gzip`), about a fifteenth of the JSON; a proxy
+between the collector and the API must pass the body through unchanged.
+
 ## What is on the volume
 
 | Path | Direction | What it is |
 |---|---|---|
 | `/config/appsettings.json` | yours | The configuration. Written as a commented example by the first start when it is missing, and never touched by the collector after that. |
-| `/config/queue/` | the collector's | The store-and-forward queue. Bounded: 168 hours / 512 MiB by default (`TagHistorian:StoreAndForward`), oldest evicted first, every eviction logged at `Error` as data loss. |
+| `/config/queue/` | the collector's | The store-and-forward queue. Bounded by `TagHistorian:StoreAndForward`: 168 hours / 512 MiB by default (about 1.5 to 1.7 million readings), oldest evicted first, every eviction logged at `Error` as data loss. |
 | `/config/queue/poison/` | the collector's | Records the API permanently rejected, quarantined as recoverable JSON lines rather than discarded. |
 | `/config/pki/` | the collector's | OPC UA certificate stores. The client certificate is generated on first start, and its identity is persisted so a container recreate does not regenerate it and break the trust you established on the PLC side. |
 | `/config/sparkplug-discovery/` | the collector's | One JSON inventory per Sparkplug edge node or device, rewritten at each birth, naming every metric it announced. |
@@ -208,7 +229,10 @@ The collector logs to stdout and nowhere else - `docker logs tag-collector` is t
 There is no HTTP health endpoint and no metrics port, because there is no listening socket at
 all. Instead, a health line per concern on a fixed cadence (60 s by default): the
 store-and-forward line with queue depth, delivery counters and backoff state, and a line per OPC
-UA server and Sparkplug source. The lines escalate to `Warning` when something needs attention
+UA server and Sparkplug source. The store-and-forward line is followed by a warning when the
+collector is behind with every upload full at a `BatchSize` under 5000, naming the setting in
+effect (`TagHistorian:StoreAndForward:BatchSize` where it is set, otherwise
+`TagHistorian:BatchSize`). The lines escalate to `Warning` when something needs attention
 (the Sparkplug line while its problem counters are actually growing - one sequence gap last
 week is history, not a standing alarm), and everything that costs data - retention eviction,
 quarantine, an unreadable segment - logs at `Error` with exact counts. Nothing is dropped

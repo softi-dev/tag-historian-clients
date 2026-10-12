@@ -74,11 +74,15 @@ client.write_batch(
 )
 ```
 
-One call can carry up to 1000 measurements - the API's own limit, not a client guess. Pass more
+One call can carry up to 5000 measurements - the API's own limit, not a client guess. Pass more
 than that and `write_batch()` raises `ValueError` immediately, before any network call: batching
 is one atomic write on the server, so this client won't silently split an over-sized batch into
-several smaller, non-atomic ones on your behalf. If you have more than 1000 points to send,
+several smaller, non-atomic ones on your behalf. If you have more than 5000 points to send,
 chunk them yourself, in whatever grouping makes sense for your data (e.g. per second, per file).
+
+The limit was 1000 until Tag Historian 1.0.35. If you point `base_url` at a server older than
+that, keep batches to 1000: it refuses a bigger one whole, with an HTTP `400`
+(`TagHistorianAPIError`) saying the batch size exceeds its maximum of 1000.
 
 ## Reading data back
 

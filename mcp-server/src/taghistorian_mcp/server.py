@@ -53,8 +53,10 @@ logger = logging.getLogger("taghistorian_mcp")
 # description, so an LLM sees the cap before it tries to build an
 # over-sized call - the actual enforcement still happens once, in the
 # client, via the ValueError that errors.handle_client_errors turns into a
-# clean ToolError.
-_MAX_BATCH_SIZE = 1000
+# clean ToolError. The two numbers must stay equal - this one is only what
+# the LLM is told, the client's is what is enforced - and a test in
+# test_tools.py fails the moment they differ.
+_MAX_BATCH_SIZE = 5000
 
 
 class MeasurementItem(BaseModel):
@@ -309,7 +311,7 @@ def _register_write_tools(mcp: FastMCP, client: TagHistorianClient) -> None:
         )
         return format_write_result(tag_name, result)
 
-    # No max_length=1000 constraint on the field below, even though the cap
+    # No max_length=5000 constraint on the field below, even though the cap
     # is real: TagHistorianClient.write_batch already enforces it (see
     # _MAX_BATCH_SIZE in client.py) and raises a ValueError with a message
     # written for a human before any network call happens. Adding a second,
@@ -331,7 +333,7 @@ def _register_write_tools(mcp: FastMCP, client: TagHistorianClient) -> None:
         account in one call. Like write_measurement, this is a genuine,
         billable write against their stored data and tag quota, not a
         preview or dry run - it just does several at once, atomically (all
-        rows are stored, or none are). More than 1000 measurements in one
+        rows are stored, or none are). More than 5000 measurements in one
         call is rejected outright; split a larger batch into multiple calls
         yourself. Only available because the server operator explicitly
         enabled write tools for this connection."""

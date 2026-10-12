@@ -85,7 +85,7 @@ def test_write_includes_serialized_timestamp_when_given(make_client):
 # -- batch: over-limit raises before any network call ----------------------
 
 
-def test_batch_over_1000_raises_value_error_before_any_network_call(make_client):
+def test_batch_over_5000_raises_value_error_before_any_network_call(make_client):
     # No responses.add() at all: if the client tried to make an HTTP call
     # in this block, `responses` (via the decorator on other tests) would
     # normally intercept it, but here we deliberately do NOT activate
@@ -93,20 +93,20 @@ def test_batch_over_1000_raises_value_error_before_any_network_call(make_client)
     # rather than being silently swallowed by a mock, which is exactly the
     # guarantee this test needs: no request is attempted at all.
     client = make_client()
-    too_many = [MeasurementInput(tag_name="t", value=float(i)) for i in range(1001)]
+    too_many = [MeasurementInput(tag_name="t", value=float(i)) for i in range(5001)]
 
-    with pytest.raises(ValueError, match="1000"):
+    with pytest.raises(ValueError, match="5000"):
         client.write_batch(too_many)
 
 
 @responses.activate
-def test_batch_at_exactly_1000_is_sent_in_one_call(make_client):
+def test_batch_at_exactly_5000_is_sent_in_one_call(make_client):
     responses.add(
         responses.POST,
         BATCH_URL,
         json={
-            "totalCount": 1000,
-            "storedCount": 1000,
+            "totalCount": 5000,
+            "storedCount": 5000,
             "compressedCount": 0,
             "processingTimeMs": 12,
             "results": [],
@@ -115,13 +115,40 @@ def test_batch_at_exactly_1000_is_sent_in_one_call(make_client):
     )
 
     client = make_client()
-    exactly_1000 = [MeasurementInput(tag_name="t", value=float(i)) for i in range(1000)]
-    result = client.write_batch(exactly_1000)
+    exactly_5000 = [MeasurementInput(tag_name="t", value=float(i)) for i in range(5000)]
+    result = client.write_batch(exactly_5000)
 
-    assert result.total_count == 1000
+    assert result.total_count == 5000
     assert len(responses.calls) == 1
     sent = json.loads(responses.calls[0].request.body)
-    assert len(sent["measurements"]) == 1000
+    assert len(sent["measurements"]) == 5000
+
+
+@responses.activate
+def test_batch_over_1000_refused_by_a_pre_1_0_35_server_raises_api_error_without_retry(
+    make_client, sleeps
+):
+    # What the docstring promises for a server that still has the old 1000
+    # cap: the client sends the batch (it is within today's 5000), the server
+    # refuses it whole with its own 400, and that surfaces as an API error on
+    # the first answer - not a ValueError, and not a retry loop.
+    responses.add(
+        responses.POST,
+        BATCH_URL,
+        json={"error": "Batch size exceeds maximum of 1000 measurements"},
+        status=400,
+    )
+
+    client = make_client(max_retries=3)
+    batch = [MeasurementInput(tag_name="t", value=float(i)) for i in range(1001)]
+
+    with pytest.raises(TagHistorianAPIError) as excinfo:
+        client.write_batch(batch)
+
+    assert excinfo.value.status_code == 400
+    assert "maximum of 1000" in excinfo.value.message
+    assert len(responses.calls) == 1
+    assert sleeps == []
 
 
 # -- 429 retry honours Retry-After -----------------------------------------

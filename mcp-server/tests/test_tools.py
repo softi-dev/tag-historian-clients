@@ -19,6 +19,7 @@ from taghistorian import (
     TagListResult,
     WriteResult,
 )
+from taghistorian.client import _MAX_BATCH_SIZE as CLIENT_MAX_BATCH_SIZE
 
 from taghistorian_mcp.server import build_server
 
@@ -250,13 +251,13 @@ async def test_write_measurement_happy_path(mock_client):
 
 
 async def test_write_batch_measurements_over_cap_surfaces_clients_value_error_cleanly(mock_client):
-    # The real 1000-item cap lives in TagHistorianClient.write_batch itself
+    # The real 5000-item cap lives in TagHistorianClient.write_batch itself
     # (see _MAX_BATCH_SIZE in client.py, and python-client/'s own test for
     # the real over-limit behaviour) - this test only proves the MCP layer
     # does not duplicate that check and does not let the client's ValueError
     # escape as an unhandled exception.
     mock_client.write_batch.side_effect = ValueError(
-        "write_batch received 1001 measurements, but the server accepts at most 1000 per call."
+        "write_batch received 5001 measurements, but the server accepts at most 5000 per call."
     )
     mcp = build_server(mock_client, make_config(enable_write=True))
 
@@ -267,7 +268,21 @@ async def test_write_batch_measurements_over_cap_surfaces_clients_value_error_cl
     )
 
     assert result.isError is True
-    assert "1000" in result.content[0].text
+    assert "5000" in result.content[0].text
+
+
+async def test_write_batch_cap_the_llm_is_told_is_the_one_the_client_enforces(mock_client):
+    # server._MAX_BATCH_SIZE only feeds the text an LLM reads before it builds
+    # a call; TagHistorianClient.write_batch is what enforces the cap. If the
+    # two drift apart, the LLM either splits batches for no reason or builds
+    # ones that are refused - so both texts are checked against the client.
+    mcp = build_server(mock_client, make_config(enable_write=True))
+    tools = {t.name: t for t in await mcp.list_tools()}
+    tool = tools["write_batch_measurements"]
+
+    parameter = tool.inputSchema["properties"]["measurements"]["description"]
+    assert f"Up to {CLIENT_MAX_BATCH_SIZE} measurements" in parameter
+    assert f"More than {CLIENT_MAX_BATCH_SIZE} measurements" in (tool.description or "")
 
 
 async def test_create_tag_happy_path(mock_client):

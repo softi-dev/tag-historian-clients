@@ -17,7 +17,7 @@ holds itself to the second one.
 
 ``@handle_client_errors`` wraps a tool function and re-raises the three
 ``taghistorian`` exception types (plus ``ValueError``, for
-``write_batch_measurements``' over-1000-item check) as
+``write_batch_measurements``' over-5000-item check) as
 ``mcp.server.fastmcp.exceptions.ToolError`` with a purpose-written message.
 Anything else escapes unchanged and still hits FastMCP's own generic
 catch-all - this module does not need to be exhaustive to be safe, only to
@@ -64,7 +64,7 @@ def _describe(exc: Exception) -> str:
     if isinstance(exc, TagHistorianConnectionError):
         return f"Could not reach Tag Historian after {exc.attempts} attempt(s): {exc.message}"
 
-    # ValueError, currently only write_batch's own >1000-item guard - see
+    # ValueError, currently only write_batch's own >5000-item guard - see
     # TagHistorianClient.write_batch's module-level comment on _MAX_BATCH_SIZE
     # for why the client raises rather than silently chunking. Surfaced
     # as-is: the message it raises is already written for a human to read.
