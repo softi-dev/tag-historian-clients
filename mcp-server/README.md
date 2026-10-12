@@ -141,6 +141,12 @@ To enable it, add the variable to your host config alongside your API key:
 }
 ```
 
+`write_batch_measurements` takes up to 5000 measurements per call, stored atomically (all of them,
+or none) - the API's own limit, enforced by the `taghistorian` client before anything is sent and
+stated in the tool's description, so the LLM splits a larger batch itself. A server older than Tag
+Historian 1.0.35 (a `TAGHISTORIAN_BASE_URL` that has not been upgraded) takes at most 1000 and
+refuses a bigger batch whole with a `400`, which comes back to the LLM as a tool error.
+
 ## Error handling
 
 This process is meant to stay running for the life of an MCP host session - potentially hours -
