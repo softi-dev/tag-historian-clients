@@ -52,10 +52,11 @@ What this integration adds:
   copies them into Tag Historian with their original timestamps, and imported
   history does not count against your daily reading allowance. See
   [Import your history](#import-your-history).
-- **Nothing is lost to a restart or an outage.** Readings it could not deliver
-  are saved when Home Assistant stops and sent when it starts again, and
-  readings it had to let go of during a long outage are read back from the
-  recorder afterwards. See [When the connection or Home Assistant goes
+- **A restart or an outage does not cost you your readings.** Readings it
+  could not deliver are saved when Home Assistant stops and sent when it
+  starts again, and readings it had to let go of during an outage are read
+  back from the recorder while the recorder still has them. See [When the
+  connection or Home Assistant goes
   away](#when-the-connection-or-home-assistant-goes-away).
 
 What it does **not** do: read data back out of Tag Historian, replace the
@@ -164,11 +165,13 @@ own account, none of it is written into this integration:
   live readings carry on unaffected.
 - **Your plan's full-resolution window.** Readings older than it are skipped,
   so the import starts there.
-- **History only.** Readings older than the moment the import started, and for
-  an entity this integration already sends live, older than the first reading
-  Tag Historian received from it — everything after that is your live data and
-  is already there. That is also what keeps an import from being a way to send
-  live data around the daily allowance.
+- **History only.** Readings older than the moment the import started, older
+  than the first reading of the entity Tag Historian received live, and older
+  than the start of the first import of that entity. Everything after that is
+  your live data, which this integration sends itself — including readings
+  still waiting to be sent, so nothing arrives twice. Importing the same
+  history again works; feeding an entity fresh readings through imports does
+  not.
 - **The tag limit and the storage cap**, as for live data. An imported entity
   uses a series like a forwarded one, which is why only entities you keep
   history for can be imported.
@@ -250,7 +253,7 @@ reading can fail to become history:
 | Attribute | What it counts |
 |---|---|
 | `dropped_over_quota` | Refused because it needed a series your plan has no room for |
-| `dropped_queue_overflow` | Evicted from a full buffer during a long outage, oldest first — and read back from the recorder once Tag Historian answers again |
+| `dropped_queue_overflow` | Evicted from a full buffer, oldest first. During an outage they are read back from the recorder once Tag Historian answers again, while the recorder still has them; while today's reading allowance is spent they are over the allowance and are not |
 | `dropped_on_shutdown` | Neither delivered nor saved when the integration stopped: handed back too late to requeue, or a save that failed |
 | `dropped_mid_write` | Already in a request that never came back, because Home Assistant stopped or the entry was reloaded underneath it |
 | `dropped_not_a_number` | The entity reported a word this integration cannot store |
@@ -277,7 +280,7 @@ Everything below shows up in **Settings → Repairs**.
 |---|---|
 | Your API key was revoked | Asks for a new one through Home Assistant's normal re-authentication card, and stops retrying the dead key meanwhile |
 | Some readings exceed your plan's series count | Names the series, counts the readings that were lost, keeps sending everything else, and offers to reopen the picker so you can deselect |
-| Today's reading allowance is spent | Holds readings — through a restart too — and waits exactly as long as the API asks; it does not hammer a closed door |
+| Today's reading allowance is spent | Holds the newest readings — through a restart too — and waits exactly as long as the API asks; it does not hammer a closed door. What no longer fits in the buffer meanwhile is over the allowance: counted, not sent later |
 | Tag Historian is busy or briefly unreachable | Holds and retries quietly; only raises a card if it lasts, and that card never mentions your plan, because this is not about your plan |
 | Your account cannot write yet | Shows Tag Historian's own explanation, word for word |
 
@@ -325,13 +328,26 @@ against your daily reading allowance like any other reading; a long gap can
 take more than a day's allowance, and then it waits for the allowance like any
 reading does.
 
-It never re-sends a reading Tag Historian may already have. A request that was
-abandoned mid-write counts as delivered, never as a gap, and if Home Assistant
-did not shut down cleanly — a crash, a power cut — while writes were going
-through, nothing is read back: the last moment before it may be missing, and
-nothing is doubled. (The recorder loses its own last few seconds to a power
-cut too.) If writes were failing when it went down, nothing had been
-acknowledged since, and the whole outage is read back.
+What it reads back is what the recorder still has: Home Assistant purges
+states after 10 days by default, and an entity you have excluded from the
+recorder has nothing to read back. And readings let go of while today's
+allowance is spent are not read back at all. Those are over the allowance, not
+lost to an outage, and reading them back at midnight would put the new day's
+readings behind them — every day, for an account that sends more than its
+allowance. The buffer still holds the newest of them and sends those when the
+allowance resets. (One exception: an entity that is still catching up on an
+earlier outage when the allowance runs out has its readings read back as
+usual, so none of that outage is lost.)
+
+It does not re-send a reading Tag Historian may already have. A request that
+was abandoned mid-write counts as delivered, never as a gap, and if Home
+Assistant did not shut down cleanly — a crash, a power cut — while writes were
+going through, nothing is read back: the last moment before it may be missing,
+and nothing is doubled. (The recorder loses its own last few seconds to a power
+cut too.) If writes were failing when it went down, or it had not yet had an
+answer since it started, nothing had been acknowledged since, and the whole
+outage is read back — with the one exception of a retry Tag Historian took in
+the very moment of the crash, which then arrives twice.
 
 ## Development
 
