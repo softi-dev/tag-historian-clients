@@ -1,5 +1,5 @@
 {
-  "__comment": "Home Assistant history in Grafana, from Tag Historian: the dashboard people built on InfluxDB, pointed at the Infinity data source instead. Pick entities by entity id; each gets a chart whose series carries the friendly name Home Assistant gave it and is drawn in its unit, and a small panel saying whether the line is readings or hourly averages. The URLs are RELATIVE - the data source's Base URL supplies the host. Every url, root_selector and column selector below is run against a real Tag Historian API on every build of the product, and the copy published as grafana/home-assistant.json in github.com/softi-dev/tag-historian-clients is kept identical to the one that is tested.",
+  "__comment": "Home Assistant history in Grafana, from Tag Historian: the dashboard people built on InfluxDB, pointed at the Infinity data source instead. Pick entities by entity id; each gets a chart whose series carries the friendly name Home Assistant gave it and is drawn in the tag's unit when it has one, and a small panel saying whether the line is readings or hourly averages. The URLs are RELATIVE - the data source's Base URL supplies the host. Every url, root_selector and column selector below is run against a real Tag Historian API on every build of the product, and the copy published as grafana/home-assistant.json in github.com/softi-dev/tag-historian-clients is kept identical to the one that is tested.",
   "annotations": {
     "list": [
       {
@@ -13,7 +13,7 @@
       }
     ]
   },
-  "description": "Home Assistant entities stored in Tag Historian: one chart per entity, with its friendly name and unit.",
+  "description": "Home Assistant entities stored in Tag Historian: one chart per entity, with its friendly name, in its tag's unit.",
   "editable": true,
   "graphTooltip": 1,
   "id": null,
@@ -31,7 +31,7 @@
     },
     {
       "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "${datasource}" },
-      "description": "Query A is the series: maxPoints is a fixed 800, because Infinity cannot tell the server how wide a panel is, and decimation=lttb keeps a long window from returning every stored sample. Query B is the tag's own record: the description and unit Home Assistant sent with its readings, and a computed name that is the description, or the entity id when there is none. The 'Config from query results' transformation makes that name the series name and the unit this chart's unit. Drawn as steps because Home Assistant writes a state when it changes, and the state holds until the next one.",
+      "description": "Query A is the series: maxPoints is a fixed 800, because Infinity cannot tell the server how wide a panel is, and decimation=lttb keeps a long window from returning every stored sample. Query B is the tag's own record: its description and unit - both sent with the readings by the Tag Historian custom component and by the InfluxDB history copy; Home Assistant's built-in InfluxDB integration, on its default settings, sends the name only, so for its tags the unit is set once on the tag's page in Explorer - and a computed name that is the description, or the entity id when there is none. The 'Config from query results' transformation makes that name the series name and the unit this chart's unit. Drawn as steps because Home Assistant writes a state when it changes, and the state holds until the next one.",
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },

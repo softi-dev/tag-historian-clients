@@ -62,7 +62,11 @@ numbers. And it is a paid service past the free plan's tags.
    v2.x. [taghistorian.com/docs/home-assistant](https://taghistorian.com/docs/home-assistant)
    has both.
 3. **Import [`grafana/home-assistant.json`](grafana/)** into Grafana: an entity
-   dropdown and a chart per entity, in its unit and under its friendly name.
+   dropdown and a chart per entity, in its tag's unit and under its friendly
+   name. The copy gives every entity it copies its unit; for one you add to
+   Home Assistant later, set the unit once on the tag's page in Tag Historian
+   Explorer, because the built-in integration, on its default settings, does
+   not send it in a form Tag Historian reads.
 
 Every limit that decides how long step 1 takes — tags, readings a day — is read
 from your own account when the copy runs, and the dry run prints them.
@@ -327,8 +331,8 @@ themselves in place. CI runs Ubuntu, where neither is used.
   dependency; installed from this repository.
 - **[`grafana/`](grafana/)** — `home-assistant.json`, a Grafana dashboard for
   Home Assistant entities stored in Tag Historian: an entity dropdown and one
-  chart per entity, in its unit and under its friendly name, through Grafana
-  Labs' Infinity data source.
+  chart per entity, in its tag's unit and under its friendly name, through
+  Grafana Labs' Infinity data source.
 - **[`collector/`](collector/)** —
   `ghcr.io/softi-dev/tag-historian-clients/collector`, the container image
   you run next to your MQTT broker, OPC UA server or Sparkplug B namespace.
