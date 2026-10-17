@@ -16,7 +16,8 @@ runs as a non-root user.
 The image is published for `linux/amd64` and `linux/arm64`, so the same commands run on a PC or a
 server, on Docker Desktop for Windows or macOS, and on ARM boxes with a 64-bit OS - a Raspberry Pi,
 a Siemens IOT2050, a Revolution Pi. Where Docker is not allowed, the same collector also runs as a
-Windows service; that build is [not published for download yet](#windows-without-docker).
+Windows service, downloaded from [the latest release](https://github.com/softi-dev/tag-historian-clients/releases/latest)
+of this repository - [Windows, without Docker](#windows-without-docker) below.
 
 A dropped uplink is not a lost reading: every measurement goes through a crash-durable disk queue
 before upload, and replays in order when the connection returns - oldest first, in uploads of up
@@ -113,9 +114,18 @@ it again, so `docker ps` shows `Restarting (78)` until the configuration is fixe
 
 For the SCADA PC or the small plant server where IT does not allow Docker, the collector also
 builds as a Windows service: one self-contained `TagHistorianCollector.exe` for 64-bit Windows 10,
-11 or Server 2016 and later, with nothing else to install. **It is not published for download
-yet.** Until it is, Docker Desktop for Windows runs the container above. What follows is how the
-package installs, so you can hold it against your site's rules in the meantime.
+11 or Server 2016 and later, with nothing else to install.
+
+**Download** `TagHistorianCollector-<version>-win-x64.zip` and its `.sha256` from
+[the latest release](https://github.com/softi-dev/tag-historian-clients/releases/latest) of this
+repository - every release carries the current collector beside the Home Assistant integration -
+and check the zip before you run anything in it:
+
+```powershell
+Get-FileHash .\TagHistorianCollector-*-win-x64.zip -Algorithm SHA256
+```
+
+The hash must be the one in the `.sha256` file and in the release notes.
 
 The zip holds the program, `install.ps1`, `uninstall.ps1` and a `README.txt`. In an elevated
 PowerShell, in the folder it was extracted to:
