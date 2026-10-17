@@ -68,10 +68,9 @@ Copy `custom_components/tag_historian/` into your Home Assistant
 **Settings → Devices & services → Add integration → Tag Historian.**
 
 You will need an API key whose **Scope** is **Write**, created in the Tag
-Historian dashboard under API keys: press **Create New Key**, name it, and set
-**Scope** to **Write**. The dialog opens on **Read**, which is the right default
-for the product and the wrong choice here — a Read key is refused the moment
-this integration tries to forward anything. It is detected during setup and
+Historian dashboard under API keys: press **Create New Key**, name it, and leave
+**Scope** on **Write**, where the dialog opens. A Read key is refused the moment
+this integration tries to forward anything; it is detected during setup and
 named as such, rather than failing quietly later. The key list shows the scope
 beside every key, so you can check one you already have instead of issuing
 another.

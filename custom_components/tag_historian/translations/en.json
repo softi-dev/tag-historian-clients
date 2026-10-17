@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Connect to Tag Historian",
-        "description": "Paste an API key with the Write scope. Create one in the Tag Historian dashboard under API keys: press Create New Key, name it, and set Scope to Write. The dialog opens on Read, and a Read key cannot forward anything. The key is checked against your account now; no readings are sent until you have chosen which entities to keep history for.",
+        "description": "Paste an API key with the Write scope. Create one in the Tag Historian dashboard under API keys: press Create New Key, name it, and leave Scope on Write, where the dialog opens. A Read key cannot forward anything. The key is checked against your account now; no readings are sent until you have chosen which entities to keep history for.",
         "data": {
           "host": "Host",
           "api_key": "API key"
