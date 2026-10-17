@@ -76,6 +76,17 @@ def test_the_first_reading_is_found_without_walking_the_range(source):
     assert source.first_reading(LIVING_ROOM, END, END + MINUTE) is None
 
 
+def test_a_window_is_counted_without_being_read(source):
+    assert source.count(LIVING_ROOM, T0, T0 + 30 * MINUTE) == 3
+    assert source.count(LIVING_ROOM, T0, END) == 3 * 24 * 6
+    assert source.count(LIVING_ROOM, END, END + MINUTE) == 0
+    # A series that shares domain and entity_id but carries another tag is
+    # another series, and is not counted into this one.
+    plain = SeriesKey.of("°C", {"domain": "sensor", "entity_id": "outdoor_temperature"})
+    assert source.count(plain, T0, END) == 0
+    assert source.count(CABIN, T0, END) == 40
+
+
 def test_reading_returns_one_series_exactly_with_its_fields(source):
     points = source.read(LIVING_ROOM, T0, T0 + 30 * MINUTE)
     assert [p.timestamp_ns for p in points] == [

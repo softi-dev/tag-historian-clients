@@ -12,12 +12,15 @@ from pathlib import Path
 
 import pytest
 
-from taghistorian_influx_migrate.cli import main
+from taghistorian_influx_migrate import migrate
+from taghistorian_influx_migrate.checkpoint import StateLock
+from taghistorian_influx_migrate.cli import DESCRIPTION, main
 from taghistorian_influx_migrate.migrate import EXIT_DONE, EXIT_ERROR, EXIT_PAUSED, Runner
+from taghistorian_influx_migrate.taghistorian import TagHistorian
 from taghistorian_influx_migrate.timeutil import NS_PER_SECOND, parse_time_ns
 
 from .conftest import MINUTE, T0
-from .fakes import FakeTagHistorian
+from .fakes import FakeInflux, FakeTagHistorian, Point
 
 LIVING_ROOM_READINGS = 3 * 24 * 6
 ALL_READINGS = LIVING_ROOM_READINGS + 40 + 30 + 48 + 12
@@ -287,6 +290,58 @@ def test_a_batch_that_never_arrived_is_sent_again(harness):
     assert len(harness.th.write_requests) == 2
 
 
+def test_an_old_batch_that_arrived_and_left_the_buffer_is_not_sent_again(
+    influx, clock, out, tmp_path
+):
+    """History older than the full-resolution period reads back only from the write buffer.
+
+    The water meter's readings are sixteen days old, past a fourteen-day
+    full-resolution period, and the buffer is flushed within the 90 seconds
+    the copy waits before asking. Reading the window back then finds nothing
+    although the batch was stored; the tag's newest reading still says so.
+    """
+    th = FakeTagHistorian(clock=clock, full_resolution_days=14, flush_after_s=60)
+    try:
+        h = Harness(influx, th, clock, out, tmp_path)
+        th.script = ["drop-after-store"]
+        assert h.run("--end", END, "--entity", "sensor.water_used") == EXIT_DONE
+        assert len(th.values("sensor.water_used")) == 12
+        assert len(th.write_requests) == 1
+        assert "it had arrived" in out.getvalue()
+
+        # The read-back alone would have said "not there" and sent it again.
+        first, last = th.values("sensor.water_used")[0][0], th.values("sensor.water_used")[-1][0]
+        reader = TagHistorian(FakeTagHistorian.API_KEY, th.url)
+        try:
+            assert not reader.stored_between("sensor.water_used", first, last)
+        finally:
+            reader.close()
+    finally:
+        th.close()
+
+
+def test_an_old_batch_that_never_arrived_is_sent_again(influx, clock, out, tmp_path):
+    th = FakeTagHistorian(clock=clock, full_resolution_days=14, flush_after_s=60)
+    try:
+        h = Harness(influx, th, clock, out, tmp_path)
+        th.script = ["drop-before-store"]
+        assert h.run("--end", END, "--entity", "sensor.water_used") == EXIT_DONE
+        assert len(th.values("sensor.water_used")) == 12
+        assert len(th.write_requests) == 2
+    finally:
+        th.close()
+
+
+def test_with_include_older_live_readings_are_not_taken_for_the_batch(harness):
+    """The tag's newest reading is live data's there, and says nothing about the batch."""
+    harness.th.add_live("sensor.water_used", [(parse_time_ns(END), 99.0)])
+    harness.th.script = ["drop-before-store"]
+    argv = ("--end", END, "--entity", "sensor.water_used", "--include-older")
+    assert harness.run(*argv) == EXIT_DONE
+    assert len(harness.th.values("sensor.water_used")) == 1 + 12
+    assert len(harness.th.write_requests) == 2
+
+
 def test_an_unanswered_batch_left_by_a_crash_is_settled_first(harness):
     """The resume file says a batch went out and no answer came back."""
     harness.run("--end", END, "--entity", "sensor.water_used", "--dry-run")
@@ -406,6 +461,105 @@ def test_catch_up_moves_the_end_and_copies_what_arrived_since(harness):
 
     assert harness.run("--entity", "sensor.living_room_temperature", "--catch-up") == EXIT_DONE
     assert len(harness.th.values("sensor.living_room_temperature")) == LIVING_ROOM_READINGS
+
+
+def test_help_says_catch_up_first_and_switch_after():
+    """--help used to say "run once more with --catch-up after you switch"."""
+    assert "after you switch" not in DESCRIPTION
+    catch_up = DESCRIPTION.index("--catch-up")
+    assert DESCRIPTION.index("then point Home Assistant at Tag Historian") > catch_up
+
+
+def test_a_catch_up_after_the_switch_names_what_it_cannot_copy(harness):
+    """Switched first, then --catch-up: InfluxDB's readings in between are not copied, and it says so."""
+    entity = ("--entity", "sensor.living_room_temperature")
+    assert harness.run("--end", "2026-10-02T00:00:00Z", *entity) == EXIT_DONE
+    # Home Assistant was pointed at Tag Historian on the 4th: live readings
+    # from then on, and InfluxDB's history stops there.
+    switch = T0 + 3 * 24 * 60 * MINUTE
+    harness.th.add_live(
+        "sensor.living_room_temperature", [(switch + i * 10 * MINUTE, 25.0) for i in range(6)]
+    )
+
+    assert harness.run(*entity, "--catch-up") == EXIT_DONE
+    text = harness.out.getvalue()
+    assert "already holds newer readings, up to 2026-10-04 00:50 UTC" in text
+    assert "InfluxDB's readings after 2026-10-01 23:50 UTC are NOT copied" in text
+    assert (
+        "not copied, sensor.living_room_temperature: InfluxDB's readings after "
+        "2026-10-01 23:50 UTC" in text
+    )
+    assert len(harness.th.values("sensor.living_room_temperature")) == 24 * 6 + 6
+
+    # The way it names: --include-older brings the two days in between.
+    assert harness.run(*entity, "--catch-up", "--include-older") == EXIT_DONE
+    assert len(harness.th.values("sensor.living_room_temperature")) == 24 * 6 + 2 * 24 * 6 + 6
+
+
+def test_a_busy_sensor_after_a_long_silence_is_read_in_windows_that_fit(
+    clock, out, tmp_path, monkeypatch
+):
+    """Two months of nothing, then a reading a minute: no read may take the lot at once."""
+    monkeypatch.setattr(migrate, "TARGET_POINTS_PER_READ", 200)
+    tags = {"domain": "sensor", "entity_id": "heat_pump_power"}
+    start = T0 - 70 * 24 * 60 * MINUTE
+    back = T0 - 10 * 24 * 60 * MINUTE
+    points = [Point("W", tags, {"value": 1.0, "friendly_name_str": "Heat pump"}, start)]
+    points += [
+        Point(
+            "W", tags, {"value": float(i % 50), "friendly_name_str": "Heat pump"}, back + i * MINUTE
+        )
+        for i in range(2 * 24 * 60)
+    ]
+    influx = FakeInflux(points)
+    th = FakeTagHistorian(clock=clock)
+    try:
+        h = Harness(influx, th, clock, out, tmp_path)
+        assert h.run("--end", END) == EXIT_DONE
+        assert len(th.values("sensor.heat_pump_power")) == 1 + 2 * 24 * 60
+        assert max(influx.rows_read) <= 200, influx.rows_read
+    finally:
+        influx.close()
+        th.close()
+
+
+def test_a_unit_tag_historian_lost_after_the_copy_is_named_by_the_next_dry_run(harness):
+    entity = ("--entity", "sensor.living_room_temperature")
+    assert harness.run("--end", END, *entity) == EXIT_DONE
+    assert "--dry-run in ten minutes" in harness.out.getvalue()
+    assert harness.saved()["tags"]["sensor.living_room_temperature"]["unit"] == "°C"
+
+    harness.run("--dry-run", "--end", END, *entity)
+    assert "no longer has the unit" not in harness.out.getvalue()
+
+    # Tag Historian restarted before it saved the unit; live data from the
+    # built-in integration will never send one.
+    harness.th.tags["sensor.living_room_temperature"].units = None
+    harness.run("--dry-run", "--end", END, *entity)
+    assert "Tag Historian no longer has the unit °C this copy gave it" in harness.out.getvalue()
+
+
+def test_two_runs_cannot_use_one_resume_file_at_once(harness):
+    argv = ("--end", END, "--entity", "sensor.water_used")
+    with StateLock(harness.state):
+        assert harness.run(*argv) == EXIT_ERROR
+        assert "Another run of the copy is using" in harness.out.getvalue()
+        assert harness.th.write_requests == []
+        # A dry run only reads the file, and may look while a copy runs.
+        assert harness.run("--dry-run", *argv) == EXIT_DONE
+    assert harness.run(*argv) == EXIT_DONE
+    assert len(harness.th.values("sensor.water_used")) == 12
+
+
+def test_a_resume_file_from_another_account_is_refused(harness):
+    argv = ("--end", END, "--entity", "sensor.water_used")
+    assert harness.run(*argv) == EXIT_DONE
+    assert harness.saved()["account"] == FakeTagHistorian.CUSTOMER_ID
+
+    # Same address, a key for another account.
+    harness.th.customer_id = "99999999-8888-7777-6666-555555555555"
+    assert harness.run(*argv) == EXIT_ERROR
+    assert "another Tag Historian account" in harness.out.getvalue()
 
 
 def test_a_resume_file_from_another_copy_is_refused(harness):

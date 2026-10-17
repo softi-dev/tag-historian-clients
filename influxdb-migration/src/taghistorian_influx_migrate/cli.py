@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TextIO
 
 from . import __version__
-from .checkpoint import Checkpoint, CheckpointError
+from .checkpoint import Checkpoint, CheckpointError, StateLock
 from .influx import InfluxError, InfluxSource, InfluxV1Source, InfluxV2Source
 from .migrate import (
     EXIT_DONE,
@@ -36,8 +36,10 @@ readings each holds, and how many days your plan's daily allowance makes
 it take. Nothing is written until you run it without --dry-run.
 
 Copy the history BEFORE you point Home Assistant's InfluxDB integration at
-Tag Historian, then run once more with --catch-up after you switch. A tag
-only receives readings newer than the newest it already holds; see the
+Tag Historian. When it has finished, run it once more with --catch-up, and
+then point Home Assistant at Tag Historian straight away. A tag only
+receives readings newer than the newest it already holds, so a catch-up run
+after the switch copies nothing of what InfluxDB got in between; see the
 README for why that order matters.
 """
 
@@ -259,11 +261,20 @@ def main(
         )
 
     state_path = Path(args.state)
+    # Only a run that writes takes the lock: a dry run reads the resume file,
+    # which is always whole (see Checkpoint.save), and may look while a copy
+    # is running.
+    lock = None if args.dry_run else StateLock(state_path)
     try:
+        if lock is not None:
+            lock.acquire()
         checkpoint = Checkpoint.load(state_path)
         destination_url = destination.url if destination else args.url.rstrip("/")
+        account = destination.customer_id() if destination else None
         if checkpoint is not None:
-            checkpoint.check_same_copy(source.identity(), destination_url, options.frozen())
+            checkpoint.check_same_copy(
+                source.identity(), destination_url, options.frozen(), account
+            )
             if args.start and parse_time_ns(args.start) != checkpoint.start_ns:
                 raise SystemExit(
                     f"{state_path} copies a range that starts elsewhere; drop --start to resume it, "
@@ -302,6 +313,7 @@ def main(
                 start_ns=start_ns,
                 end_ns=end_ns,
                 options=options.frozen(),
+                account=account,
             )
         elif args.catch_up:
             checkpoint.end_ns = end_ns
@@ -320,6 +332,8 @@ def main(
         print(f"\nStopped: {exc}", file=out)
         return EXIT_ERROR
     finally:
+        if lock is not None:
+            lock.release()
         source.close()
         if destination is not None:
             destination.close()

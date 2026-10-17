@@ -110,7 +110,9 @@ above, "Already sending to an InfluxDB of your own?").
 
 **4. Import the Grafana dashboard.** [`../grafana/home-assistant.json`](../grafana/)
 is the dashboard people build on InfluxDB — an entity dropdown, a chart per
-entity in its unit and under its friendly name — pointed at Tag Historian.
+entity in its tag's unit and under its friendly name — pointed at Tag Historian.
+Every entity the copy brought across has its unit; one you add to Home Assistant
+later needs it set once on the tag's page in Explorer (see "Units" below).
 
 ## Why the order matters
 
@@ -129,15 +131,21 @@ catch-up and the switch. If you switched first, the dry run says which tags
 already hold newer readings; `--include-older` copies everything anyway, with
 exactly that cost. It is safest for sensors that keep changing, and worst for
 on/off ones. It also takes the resume file's word for what was already copied,
-so keep using the same one.
+so keep using the same one. If you switched in the middle of the copy, or ran
+the catch-up after the switch, every run names the tags whose readings from
+where the copy got to up to the switch are not copied; `--include-older` with
+the same resume file copies just those.
 
 ## What happens when something goes wrong
 
 | What happened | What the copy does |
 |---|---|
 | Interrupted — Ctrl-C, a reboot, a dropped connection | Run the same command again. The resume file says where every tag got to |
-| A request got no answer | Waits 90 seconds, then asks Tag Historian whether that batch arrived before sending it again: Tag Historian does not deduplicate, so a blind resend could double it |
+| A request got no answer | Waits 90 seconds, then asks Tag Historian whether that batch arrived — by the newest reading the tag has been sent, and by reading the batch's time window back — before sending it again: Tag Historian does not deduplicate, so a blind resend could double it |
 | Run twice, or the resume file was deleted | Nothing is written twice: a tag only receives readings newer than it already holds (with `--include-older`, only the resume file prevents it) |
+| Started again while a run is still going — cron firing during a `--wait` run | The second one refuses to start: two runs on one resume file would send the same readings twice |
+| The resume file used with a key for another account | Refuses to start: the file's positions belong to the account it was copying into |
+| A sensor silent for months, then reporting every few seconds | Counts each stretch of history before reading it, so no single read is bigger than about 20,000 readings |
 | `429` or `503` with `Retry-After` | Waits exactly as long as asked, and sends the same batch |
 | Today's allowance is spent | Stops for the day (exit status 3), or with `--wait` sleeps until midnight UTC |
 | A new tag the plan has no room for (`422`) | Skips that entity, says so, carries on with the rest, and tries it again on a later run once there is room. The dry run warns before you start, and the copy refuses to start a selection your plan cannot hold |
@@ -152,8 +160,16 @@ an entity's unit as a field — it makes the unit the measurement name (`°C`,
 the measurement as the unit, except where it is plainly something else: the
 entity id (an entity without a unit), the domain or `domain__device_class`
 (the `measurement_attr` setting). Live data from the built-in integration
-carries no unit, so the copy is what gives these tags theirs, and the tag
-keeps it afterwards.
+carries no unit, so the copy is what gives these tags theirs, and live data
+leaves it as it is.
+
+Tag Historian saves a tag's unit a few minutes after a batch brings it, and a
+restart of Tag Historian before then loses it — and the built-in integration
+never sends one to bring it back. So when a run finishes, run the same command
+with `--dry-run` ten minutes later: it compares every tag with the unit the
+copy gave it and names any that no longer has it. Set those on the tag's page
+in Tag Historian Explorer, or let a `--catch-up` that still has readings for
+the tag bring the unit along again.
 
 If your InfluxDB integration used a fixed measurement name
 (`default_measurement` or `override_measurement`), say so with `--not-a-unit

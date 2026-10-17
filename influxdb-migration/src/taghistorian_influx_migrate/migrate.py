@@ -68,7 +68,9 @@ DAY_NS = 86_400 * NS_PER_SECOND
 # the data: a window that comes back with more than TARGET points halves the
 # next one, an empty or thin one doubles it, so a sensor that reports every
 # second and one that reports twice a day both cost a sensible number of
-# queries - and a sensor that was unplugged for a winter costs a few.
+# queries - and a sensor that was unplugged for a winter costs a few. Each
+# window is also COUNTED before it is read and narrowed until it holds no more
+# than TARGET (see Runner._lines), because the doubling only ever looks back.
 INITIAL_WINDOW_NS = DAY_NS
 MIN_WINDOW_NS = 60 * NS_PER_SECOND
 MAX_WINDOW_NS = 366 * DAY_NS
@@ -128,6 +130,10 @@ class TagPlan:
     # Copy only readings strictly newer than this; None = from the start.
     floor_ns: int | None = None
     note: str = ""
+    # Set when the tag received newer readings from elsewhere after this copy
+    # last wrote to it: from where the copy got to, to the newest it holds.
+    # InfluxDB's readings in between are not copied (without --include-older).
+    gap_ns: tuple[int, int] | None = None
 
     @property
     def is_new(self) -> bool:
@@ -226,6 +232,7 @@ def build_plan(
             state = checkpoint.tags.get(tag.tag_name) if checkpoint else None
             ours = state.written_through_ns if state else None
             theirs = tag.existing.last_ns if tag.existing else None
+            unconfirmed = state.unconfirmed if state else None
             tag.floor_ns = ours
             # The server keeps time in 100 ns ticks (a .NET DateTime), so the
             # newest reading it reports is the copy's own last one cut down to
@@ -235,15 +242,51 @@ def build_plan(
             # floor taken from the server covers its whole tick, or the last
             # reading of a copy resumed without its resume file would be sent
             # a second time.
-            if (
-                theirs is not None
-                and not options.include_older
-                and (ours is None or theirs > ours // 100 * 100)
-            ):
+            newer = theirs is not None and (ours is None or theirs > ours // 100 * 100)
+            if newer and not options.include_older:
+                assert theirs is not None
                 tag.floor_ns = theirs + 99
-                tag.note = f"already holds readings up to {format_human(theirs)}; only newer ones are copied"
+                if ours is None:
+                    tag.note = (
+                        f"already holds readings up to {format_human(theirs)}; only newer ones "
+                        "are copied (--include-older copies the older ones too: read the README's "
+                        '"Why the order matters" first)'
+                    )
+                elif unconfirmed is not None and theirs <= unconfirmed["last_ns"]:
+                    # Newer than the copy's position only by the copy's own
+                    # batch that got no answer: it arrived. Runner._settle
+                    # confirms that before anything else is sent.
+                    tag.note = (
+                        f"copied up to {format_human(ours)} on an earlier run; its last batch got "
+                        "no answer and is checked first"
+                    )
+                else:
+                    # HOME ASSISTANT WAS SWITCHED BEFORE THE COPY FINISHED -
+                    # usually a --catch-up run after the switch rather than
+                    # before it, which is what --help used to tell people to
+                    # do. Live readings now sit past where the copy got to,
+                    # and only newer readings are copied, so InfluxDB's
+                    # readings in between are skipped. That used to happen in
+                    # silence: "only newer ones are copied", then "Finished: 0
+                    # readings copied", and the weeks between the first run
+                    # and the switch were simply never there. Said outright
+                    # now, with the way to bring them, here and at the end.
+                    tag.gap_ns = (ours, theirs)
+                    tag.note = (
+                        f"copied up to {format_human(ours)}, but the tag already holds newer "
+                        f"readings, up to {format_human(theirs)}: Home Assistant writes here live "
+                        f"now. InfluxDB's readings after {format_human(ours)} are NOT copied; "
+                        "--include-older copies them, behind the newer ones (the README's \"Why "
+                        'the order matters" says what that costs)'
+                    )
             elif ours is not None:
                 tag.note = f"copied up to {format_human(ours)} on an earlier run"
+                if newer:
+                    assert theirs is not None
+                    tag.note += (
+                        f"; the tag holds newer readings, up to {format_human(theirs)}, and "
+                        "--include-older copies the rest behind them"
+                    )
             elif tag.existing is not None and tag.existing.readings == 0:
                 tag.note = "exists in Tag Historian, still empty"
             elif theirs is not None:
@@ -254,6 +297,26 @@ def build_plan(
             if len(tag.units) > 1:
                 tag.note = (tag.note + "; " if tag.note else "") + (
                     "its unit changed in InfluxDB, and the tag keeps the newest"
+                )
+            # A UNIT THE COPY GAVE AND TAG HISTORIAN NO LONGER HAS. Tag
+            # Historian keeps a tag's unit in memory and saves it to its
+            # database every few minutes, and a restart between the two loses
+            # the change. Live data from Home Assistant's built-in integration
+            # never carries a unit to bring it back, so for those tags the copy
+            # is the only source of one - and a deploy just after a tag's last
+            # batch used to leave it without, with nothing anywhere saying so.
+            # Asked of the account on every run, the dry run included, so
+            # running the dry run again after the copy is the way to check.
+            if (
+                state is not None
+                and state.unit
+                and tag.existing is not None
+                and not tag.existing.units
+            ):
+                tag.note = (tag.note + "; " if tag.note else "") + (
+                    f"Tag Historian no longer has the unit {state.unit} this copy gave it (it "
+                    "restarted before saving it). Readings copied from here on bring it back; if "
+                    "none are left, set it on the tag's page in Explorer"
                 )
     return plan
 
@@ -435,6 +498,16 @@ class DailyBudget:
 class _Line:
     timestamp_ns: int
     text: str
+    # The unit the line gives the tag, if it gives one.
+    unit: str | None = None
+
+
+def _last_unit(batch: Sequence[_Line]) -> str | None:
+    """The unit a batch leaves the tag with: the newest one it carries."""
+    for line in reversed(batch):
+        if line.unit:
+            return line.unit
+    return None
 
 
 @dataclass
@@ -443,6 +516,8 @@ class Report:
     tags_done: int = 0
     refused: list[tuple[str, str]] = field(default_factory=list)
     failed: list[tuple[str, str]] = field(default_factory=list)
+    # Tags this run gave a unit to, for the reminder at the end.
+    units_given: set[str] = field(default_factory=set)
 
 
 class Runner:
@@ -485,6 +560,31 @@ class Runner:
         window = INITIAL_WINDOW_NS
         while cursor < end_ns:
             stop = min(end_ns, cursor + window)
+
+            # COUNTED BEFORE IT IS READ, and narrowed until it holds no more
+            # than a read should. The window used to be sized only by the reads
+            # before it, which cannot see what is coming: a sensor silent for
+            # weeks - a flat battery, a device taken down - doubles the window
+            # through every empty read, and when it starts reporting every few
+            # seconds again the next read asks for all of it at once. After
+            # sixty quiet days one read came back with 25,920 points against a
+            # target of 20,000; after four months the window is 128 days, a
+            # million points and more, materialised whole before anything
+            # shrinks - a timeout or an out-of-memory on a Pi, and the resume
+            # walked back into the same gap every run. A count is one cheap
+            # query against the same series, and an empty one skips the read.
+            count = self._count(tag, cursor, stop)
+            while count > TARGET_POINTS_PER_READ and stop - cursor > MIN_WINDOW_NS:
+                span = stop - cursor
+                # At least halved; straight to the right size when far over.
+                window = max(MIN_WINDOW_NS, min(span // 2, span * TARGET_POINTS_PER_READ // count))
+                stop = min(end_ns, cursor + window)
+                count = self._count(tag, cursor, stop)
+            if count == 0:
+                cursor = stop
+                window = min(MAX_WINDOW_NS, window * 2)
+                continue
+
             try:
                 batch: list[_Line] = []
                 for key in tag.sources:
@@ -506,6 +606,9 @@ class Runner:
                 window = max(MIN_WINDOW_NS, window // 2)
             elif len(batch) < TARGET_POINTS_PER_READ // 4:
                 window = min(MAX_WINDOW_NS, window * 2)
+
+    def _count(self, tag: TagPlan, start_ns: int, end_ns: int) -> int:
+        return sum(self._source.count(key, start_ns, end_ns) for key in tag.sources)
 
     def _render(self, key: SeriesKey, points: Sequence) -> Iterator[_Line]:
         tags = key.tag_dict
@@ -530,6 +633,7 @@ class Runner:
             yield _Line(
                 point.timestamp_ns,
                 encode_line(key.measurement, tags, fields, point.timestamp_ns),  # type: ignore[arg-type]
+                described.unit,
             )
 
     # -- the run -------------------------------------------------------------
@@ -677,6 +781,12 @@ class Runner:
                     "first_ns": batch[0].timestamp_ns,
                     "last_ns": batch[-1].timestamp_ns,
                     "readings": len(batch),
+                    # Whether the tag's newest reading can answer for this
+                    # batch - only when it was sent as newer than anything the
+                    # tag held. Kept with the batch, because a resume may run
+                    # with other options than the run that sent it.
+                    "by_newest": not self._options.include_older,
+                    "unit": _last_unit(batch),
                 }
                 self._checkpoint.save()
                 if self._settle(tag, state):
@@ -769,6 +879,7 @@ class Runner:
         state.written_through_ns = batch[-1].timestamp_ns
         state.readings_sent += len(batch)
         state.unconfirmed = None
+        self._gave_unit(tag, state, _last_unit(batch))
         self._budget.spent(len(batch))
         self._checkpoint.save()
         self.report.sent += len(batch)
@@ -779,22 +890,62 @@ class Runner:
             f"({max(0.0, min(1.0, done)):.0%} of the range)"
         )
 
+    def _gave_unit(self, tag: TagPlan, state: TagState, unit: str | None) -> None:
+        if unit:
+            state.unit = unit
+            self.report.units_given.add(tag.tag_name)
+
     def _settle(self, tag: TagPlan, state: TagState) -> bool:
         """Find out whether a batch that got no answer was stored, without writing it twice.
 
-        A batch is committed all or nothing, and it holds history: nothing else
-        writes to this tag inside its time window. So one reading stored in
-        that window means the batch arrived. None means it did not - or that
-        every reading in it was a repeat the deadband dropped, and sending
-        those again is dropped again just the same. Either way the answer
-        decides whether to resend, and resending can no longer double
-        anything.
+        A batch is committed all or nothing, so the question is whether Tag
+        Historian took it. Two ways of asking, because neither answers for
+        every batch:
 
-        The question waits ``settle_delay`` first. A batch the server accepted
-        sits in that revision's write buffer for a few minutes before it is
-        on disk, and while a deploy runs two revisions side by side, the
-        question could reach the other one; past the overlap there is only
-        the one that took it.
+        1. THE TAG'S NEWEST READING - the newest it was ever sent, which ingest
+           keeps for every reading of any age, stored or dropped as a repeat.
+           In the copy's own order a batch is newer than anything the tag
+           held, and nothing else writes to the tag while it is copied, so a
+           newest reading at or past the batch's last one (at the server's
+           100 ns resolution) means the batch was taken. This is the question
+           that works for OLD history, and it is asked first because the
+           second one does not: reading back a window older than the plan's
+           full-resolution period is answered from hourly summaries, built by
+           the nightly roll-up, and a batch that had arrived and already left
+           the server's write buffer - a flush every few minutes, so often
+           inside the wait below - read back as nothing and was sent again.
+           Tag Historian does not deduplicate, so every reading the deadband
+           kept was stored twice and charged twice: 100 of 432 readings in a
+           probe of the server's tiered read, and on a small plan nearly all
+           of a history is that old. Not asked for a batch sent under
+           --include-older: there the tag already holds newer readings, live
+           forwarding's, and its newest reading says nothing about the batch.
+           (If live forwarding writes to a tag the copy is still filling
+           without it - the switch made too early - the newest reading is past
+           the batch either way; the batch is then older than what the tag
+           holds, which the copy does not send, and the next run's plan names
+           the tag.)
+        2. THE WINDOW READ BACK, from storage and the write buffer as a chart
+           reads it. Exact inside the full-resolution period whatever happened
+           to the statistics behind question 1: they live in the serving
+           instance's memory, saved to the database every few minutes, so a
+           restart or a deploy between the batch and the question can take the
+           batch's mark with it while the readings themselves are safe in the
+           write-ahead log. Also the only question for an --include-older
+           batch.
+
+        Either answer yes means it arrived. Both no means it did not - except
+        in one case left open: a batch of history older than the
+        full-resolution period, AND a restart or deploy of Tag Historian
+        between it and the question. Then neither can see it, and that one
+        batch is stored twice. Three unlikely things at once, for one batch.
+        A batch whose readings were all repeats the deadband dropped reads
+        back as nothing too, and sending those again is dropped again the
+        same way.
+
+        The question waits ``settle_delay`` first: while a deploy runs two
+        revisions side by side the question could reach the one that did not
+        take the batch, and past the overlap there is only the one that did.
         """
         unconfirmed = state.unconfirmed
         assert unconfirmed is not None
@@ -806,9 +957,7 @@ class Runner:
         while True:
             self._sleep(self._options.settle_delay)
             try:
-                arrived = self._destination.stored_between(
-                    tag.tag_name, unconfirmed["first_ns"], unconfirmed["last_ns"]
-                )
+                arrived = self._arrived(tag, unconfirmed)
                 break
             except TagHistorianError as exc:
                 attempts += 1
@@ -823,6 +972,7 @@ class Runner:
             assert self._budget is not None
             state.written_through_ns = unconfirmed["last_ns"]
             state.readings_sent += unconfirmed["readings"]
+            self._gave_unit(tag, state, unconfirmed.get("unit"))
             self._budget.spent(unconfirmed["readings"])
             self.report.sent += unconfirmed["readings"]
             self._say("    it had arrived")
@@ -831,6 +981,20 @@ class Runner:
         state.unconfirmed = None
         self._checkpoint.save()
         return arrived
+
+    def _arrived(self, tag: TagPlan, unconfirmed: dict) -> bool:
+        """The two questions of :meth:`_settle`, in its order."""
+        if unconfirmed.get("by_newest"):
+            held = self._destination.existing_tag(tag.tag_name)
+            if (
+                held is not None
+                and held.last_ns is not None
+                and held.last_ns >= unconfirmed["last_ns"] // 100 * 100
+            ):
+                return True
+        return self._destination.stored_between(
+            tag.tag_name, unconfirmed["first_ns"], unconfirmed["last_ns"]
+        )
 
     def _pause_for_the_day(self) -> int | None:
         assert self._budget is not None
@@ -856,3 +1020,18 @@ class Runner:
             self._say(f"  not copied, {name}: {reason}")
         for name, reason in self.report.failed:
             self._say(f"  not copied, {name}: {reason}")
+        for tag in plan.tags:
+            if tag.gap_ns is not None:
+                self._say(
+                    f"  not copied, {tag.tag_name}: InfluxDB's readings after "
+                    f"{format_human(tag.gap_ns[0])}, because the tag already holds newer ones; "
+                    "--include-older copies them"
+                )
+        if self.report.units_given:
+            # See build_plan: a unit is saved by Tag Historian a few minutes
+            # after it changes, and lost by a restart before then.
+            self._say(
+                "Tag Historian saves a tag's unit a few minutes after a batch brings it, and a "
+                "restart of Tag Historian before then loses it. Run the same command with "
+                "--dry-run in ten minutes: it names any tag whose unit did not stay."
+            )

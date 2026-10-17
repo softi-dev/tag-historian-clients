@@ -32,8 +32,8 @@ always what they mean for a live writer:
   answered by splitting the batch if it does.
 
 Anything without an answer - a timeout, a dropped connection, a 500 - may or
-may not have been stored. See ``migrate.Runner._settle_unanswered`` for how
-that is resolved without writing anything twice.
+may not have been stored. See ``migrate.Runner._settle`` for how that is
+resolved without writing anything twice.
 """
 
 from __future__ import annotations
@@ -78,11 +78,18 @@ class Limits:
 
 @dataclass(frozen=True)
 class ExistingTag:
-    """What Tag Historian already holds for a tag."""
+    """What Tag Historian already holds for a tag.
+
+    ``last_ns`` is the newest reading the tag was ever SENT - kept by ingest
+    for every reading of any age, stored or dropped as a repeat - not the
+    newest one a read of its stored data would find.
+    """
 
     readings: int
     first_ns: int | None
     last_ns: int | None
+    units: str = ""
+    description: str = ""
 
 
 @dataclass(frozen=True)
@@ -231,15 +238,34 @@ class TagHistorian:
             body = self._get("/api/tags", {"skip": skip, "take": _TAG_PAGE}).json()
             page = body.get("tags") or []
             for tag in page:
-                readings = int(tag.get("totalMeasurements") or 0)
-                tags[tag["tagName"]] = ExistingTag(
-                    readings=readings,
-                    first_ns=_time_or_none(tag.get("firstTimestamp")) if readings else None,
-                    last_ns=_time_or_none(tag.get("lastTimestamp")) if readings else None,
-                )
+                tags[tag["tagName"]] = _existing(tag)
             skip += len(page)
             if not page or skip >= int(body.get("totalCount") or 0):
                 return tags
+
+    def existing_tag(self, tag_name: str) -> ExistingTag | None:
+        """What the account holds for one tag right now; None if it has no such tag.
+
+        From the tag list, searched by name, rather than from
+        ``/api/tags/single``: the list's ``lastTimestamp`` is the newest
+        reading the tag was ever sent, which is the question asked of it here,
+        and the single-tag answer carries the same value under the name
+        ``lastStoredTimestamp`` - a name a fix on the server could one day make
+        true, and then it would leave out a last reading the deadband dropped.
+        The search is a substring match, so the exact name is picked out.
+        """
+        skip = 0
+        while True:
+            body = self._get(
+                "/api/tags", {"search": tag_name, "skip": skip, "take": _TAG_PAGE}
+            ).json()
+            page = body.get("tags") or []
+            for tag in page:
+                if tag.get("tagName") == tag_name:
+                    return _existing(tag)
+            skip += len(page)
+            if not page or skip >= int(body.get("totalCount") or 0):
+                return None
 
     def stored_between(self, tag_name: str, first_ns: int, last_ns: int) -> bool:
         """Whether the tag holds at least one stored reading in the window.
@@ -247,6 +273,12 @@ class TagHistorian:
         Read from storage and from the server's write buffer both - the same
         read a chart makes - so a batch that has been accepted but not yet
         flushed to disk counts as there.
+
+        Exact only inside the plan's full-resolution period. Older than that
+        the server answers from hourly summaries, which the nightly roll-up
+        builds, so a window of old history that has left the write buffer
+        reads as empty whether or not it was stored. ``migrate.Runner._settle``
+        asks the tag's newest reading first for that reason.
         """
         path = f"/api/measurements/{self.customer_id()}/{quote(tag_name, safe='')}"
         body = self._get(
@@ -300,6 +332,17 @@ class TagHistorian:
         # A 500 is the endpoint's catch-all, and it can come after the batch
         # was committed. Not knowing is not the same as not stored.
         return WriteOutcome("unanswered", status, message=message)
+
+
+def _existing(tag: dict) -> ExistingTag:
+    readings = int(tag.get("totalMeasurements") or 0)
+    return ExistingTag(
+        readings=readings,
+        first_ns=_time_or_none(tag.get("firstTimestamp")) if readings else None,
+        last_ns=_time_or_none(tag.get("lastTimestamp")) if readings else None,
+        units=str(tag.get("units") or ""),
+        description=str(tag.get("description") or ""),
+    )
 
 
 def _time_or_none(value: object) -> int | None:

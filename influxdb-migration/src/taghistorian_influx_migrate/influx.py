@@ -1,8 +1,9 @@
 """Reading Home Assistant's history out of InfluxDB 1.x and 2.x, over HTTP.
 
 Two readers with one shape: :meth:`discover` lists the Home Assistant series
-in a time range with how many readings each holds, and :meth:`read` returns
-one series' points in a window. Nothing else is asked of InfluxDB, and both
+in a time range with how many readings each holds, :meth:`count` says how
+many one series has in a window, and :meth:`read` returns one series' points
+in a window. Nothing else is asked of InfluxDB, and both
 readers keep to the plainest parts of its query languages on purpose -
 ``SELECT ... GROUP BY *`` and ``COUNT``/``LAST`` in InfluxQL, and ``from``,
 ``range``, ``filter``, ``count`` and ``last`` in Flux - because those are the
@@ -23,7 +24,6 @@ from __future__ import annotations
 
 import csv
 import io
-import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
@@ -118,6 +118,16 @@ class InfluxSource:
         Asked before reading, so the copy starts where the data does rather
         than walking a day at a time from the start of the range through years
         of nothing.
+        """
+        raise NotImplementedError
+
+    def count(
+        self, key: SeriesKey, start_ns: int, end_ns: int
+    ) -> int:  # pragma: no cover - interface
+        """How many ``value`` readings the series has in the window, without reading them.
+
+        Asked before a window is read, so no read is bigger than the copy
+        means it to be (see ``migrate.Runner._lines``).
         """
         raise NotImplementedError
 
@@ -298,6 +308,19 @@ class InfluxV1Source(InfluxSource):
             if times:
                 return min(times)
         return None
+
+    def count(self, key: SeriesKey, start_ns: int, end_ns: int) -> int:
+        statement = (
+            f'SELECT COUNT("{VALUE_FIELD}") FROM {self._from([key.measurement])} '
+            f"WHERE {self._where(key, start_ns, end_ns)} GROUP BY *"
+        )
+        total = 0
+        for series in self._query(statement):
+            if SeriesKey.of(series["name"], series.get("tags") or {}) != key:
+                continue
+            column = series["columns"].index("count")
+            total += sum(int(row[column] or 0) for row in series.get("values") or [])
+        return total
 
     def read(self, key: SeriesKey, start_ns: int, end_ns: int) -> list[SourcePoint]:
         fields = ", ".join(influxql_identifier(f) for f in READ_FIELDS)
@@ -556,6 +579,17 @@ class InfluxV2Source(InfluxSource):
         ]
         return min(times) if times else None
 
+    def count(self, key: SeriesKey, start_ns: int, end_ns: int) -> int:
+        flux = (
+            self._series_filter(key, start_ns, end_ns)
+            + f'  |> filter(fn: (r) => r._field == "{VALUE_FIELD}")\n  |> count()\n'
+        )
+        return sum(
+            int(row.values.get("_value") or 0)  # type: ignore[call-overload]
+            for row in self._query(flux)
+            if _series_of(row) == key
+        )
+
     def read(self, key: SeriesKey, start_ns: int, end_ns: int) -> list[SourcePoint]:
         flux = (
             self._series_filter(key, start_ns, end_ns)
@@ -603,11 +637,3 @@ def filter_series(
             continue
         kept.append(summary)
     return kept
-
-
-_ENTITY_PATTERN = re.compile(r"^[a-z_*?\[\]0-9]+\.[^\s]+$")
-
-
-def looks_like_entity_pattern(pattern: str) -> bool:
-    """A cheap check that a pattern is ``domain.object_id``-shaped."""
-    return bool(_ENTITY_PATTERN.match(pattern))

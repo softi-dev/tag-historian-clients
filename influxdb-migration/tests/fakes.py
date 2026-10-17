@@ -115,6 +115,8 @@ class FakeInflux:
         self.token = token
         self.max_row_limit = max_row_limit
         self.queries: list[str] = []
+        # Rows each InfluxQL read of a series' points answered with.
+        self.rows_read: list[int] = []
         self._server = _Server(self, _InfluxHandler)
 
     @property
@@ -183,6 +185,7 @@ class _InfluxHandler(_Handler):
         + r""" WHERE "domain" = '(?P<domain>(?:[^'\\]|\\.)*)' AND "entity_id" = '(?P<entity>(?:[^'\\]|\\.)*)' AND time >= (?P<s>\d+) AND time < (?P<e>\d+) GROUP BY \*$"""
     )
     _FIRST = re.compile(r'^SELECT FIRST\("value"\)' + _SERIES)
+    _COUNT_SERIES = re.compile(r'^SELECT COUNT\("value"\)' + _SERIES)
     _RAW = re.compile(r'^SELECT "value", "friendly_name_str", "unit_of_measurement_str"' + _SERIES)
 
     @staticmethod
@@ -211,6 +214,7 @@ class _InfluxHandler(_Handler):
             (kind, pattern.match(statement))
             for pattern, kind in (
                 (self._COUNT, "count"),
+                (self._COUNT_SERIES, "count_series"),
                 (self._LAST, "last"),
                 (self._FIRST, "first"),
                 (self._RAW, "raw"),
@@ -225,7 +229,7 @@ class _InfluxHandler(_Handler):
 
         measurements = self._measurements(owner, match.group("from"))
         where = {}
-        if kind in ("first", "raw"):
+        if kind in ("first", "raw", "count_series"):
             where = {
                 "domain": self._unescape(match.group("domain")),
                 "entity_id": self._unescape(match.group("entity")),
@@ -243,7 +247,7 @@ class _InfluxHandler(_Handler):
         for (measurement, group_tags), members in sorted(groups.items()):
             members.sort(key=lambda p: p.time)
             tags = dict(group_tags)
-            if kind == "count":
+            if kind in ("count", "count_series"):
                 n = sum(1 for p in members if "value" in p.fields)
                 if n:
                     series.append(
@@ -302,6 +306,8 @@ class _InfluxHandler(_Handler):
                 if rows:
                     series.append(entry)
 
+        if kind == "raw":
+            owner.rows_read.append(sum(len(s["values"]) for s in series))
         result: dict = {"statement_id": 0}
         if series:
             result["series"] = series
@@ -526,10 +532,22 @@ class StoredTag:
     readings: list[tuple[int, object]] = field(default_factory=list)
     description: str | None = None
     units: str | None = None
+    # (timestamp, when it arrived) for every reading the write endpoint took:
+    # what the write buffer holds until it is flushed.
+    arrivals: list[tuple[int, int]] = field(default_factory=list)
 
 
 class FakeTagHistorian:
-    """Enough of Tag Historian's API for the copy, with scriptable trouble."""
+    """Enough of Tag Historian's API for the copy, with scriptable trouble.
+
+    ``full_resolution_days`` and ``flush_after_s`` model the server's TIERED
+    READ (TieredMeasurementQueryService and MemoryBufferService.GetRange):
+    ``GET /api/measurements`` sees raw readings only inside the plan's
+    full-resolution period; older ones only while they are still in the write
+    buffer, and after the flush only as hourly summaries, which the nightly
+    roll-up builds and this fake never does. Left at None, every stored
+    reading reads back - a server that had never flushed.
+    """
 
     API_KEY = "th-test-key"
     CUSTOMER_ID = "11111111-2222-3333-4444-555555555555"
@@ -540,10 +558,15 @@ class FakeTagHistorian:
         clock: Callable[[], int],
         tag_limit: int = 50,
         readings_per_day: int = 1_000_000,
+        full_resolution_days: int | None = None,
+        flush_after_s: float = 300.0,
     ):
         self.clock = clock
         self.tag_limit = tag_limit
         self.readings_per_day = readings_per_day
+        self.full_resolution_days = full_resolution_days
+        self.flush_after_ns = int(flush_after_s * 1_000_000_000)
+        self.customer_id = self.CUSTOMER_ID
         self.tags: dict[str, StoredTag] = {}
         self.usage: dict[str, int] = {}
         self.write_requests: list[list[str]] = []
@@ -614,6 +637,7 @@ class FakeTagHistorian:
             for row in rows:
                 if row[0] == name:
                     tag.readings.append((row[1], row[2]))
+                    tag.arrivals.append((row[1], self.clock()))
                     stored += 1
             description, units = metadata[name]
             tag.description = description or tag.description
@@ -645,7 +669,7 @@ class _TagHistorianHandler(_Handler):
         owner.reads.append(url.path)
         with owner._lock:
             if url.path == "/api/customers/me":
-                return self._send(200, {"customerId": owner.CUSTOMER_ID})
+                return self._send(200, {"customerId": owner.customer_id})
             if url.path == "/api/usage/limits":
                 return self._send(
                     200,
@@ -669,6 +693,9 @@ class _TagHistorianHandler(_Handler):
                 )
             if url.path == "/api/tags":
                 names = sorted(owner.tags)
+                if query.get("search"):
+                    # HotTagRepository.Search: a case-insensitive substring.
+                    names = [n for n in names if query["search"].lower() in n.lower()]
                 skip, take = int(query.get("skip", 0)), int(query.get("take", 100))
                 page = names[skip : skip + take]
                 tags = []
@@ -695,8 +722,19 @@ class _TagHistorianHandler(_Handler):
             if match:
                 name = unquote(match.group(2))
                 start, stop = parse_time_ns(query["from"]), parse_time_ns(query["to"])
+                tag = owner.tags.get(name, StoredTag())
+                now = owner.clock()
+                cutoff = (
+                    None
+                    if owner.full_resolution_days is None
+                    else now - owner.full_resolution_days * 86_400 * 1_000_000_000
+                )
+                buffered = {t for t, at in tag.arrivals if now - at < owner.flush_after_ns}
                 readings = [
-                    r for r in owner.tags.get(name, StoredTag()).readings if start <= r[0] <= stop
+                    r
+                    for r in tag.readings
+                    if start <= r[0] <= stop
+                    and (cutoff is None or r[0] >= cutoff or r[0] in buffered)
                 ]
                 return self._send(200, {"count": min(len(readings), int(query.get("limit", 1000)))})
         return self._send(404, {"error": "not found"})

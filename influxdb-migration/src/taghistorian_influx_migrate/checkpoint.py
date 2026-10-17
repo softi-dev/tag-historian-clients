@@ -11,8 +11,18 @@ WHAT IS IN IT. Per tag: the InfluxDB series it is copied from, and the
 timestamp of the newest reading Tag Historian has ACKNOWLEDGED - written only
 after a 204, never before the request is sent. Plus the time range, fixed on
 the first run so a resume copies the same history, and which InfluxDB and
-which Tag Historian it is between, so a resume cannot be pointed at a
-different pair by accident.
+which Tag Historian account it is between, so a resume cannot be pointed at a
+different pair by accident. The account is its customer id, not only the
+address: two keys for two accounts share an address, and the positions of one
+account's copy applied to another would quietly skip everything older than
+where the first one stopped.
+
+ONE RUN AT A TIME. Two runs on the same file - a cron job firing while a
+``--wait`` run is still copying - would both read the same positions and send
+the same batches, and Tag Historian would store both. A run that writes
+therefore holds a lock on a file beside this one (:class:`StateLock`) for as
+long as it runs. It is the operating system's lock on an open file, so a run
+that is killed, or a machine that loses power, leaves nothing to clean up.
 
 HOW IT IS WRITTEN. Whole, to a temporary file beside it, then renamed over
 the old one (``os.replace``, atomic on every platform this runs on). A crash
@@ -31,6 +41,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import IO
 
 from .influx import SeriesKey
 
@@ -52,6 +63,9 @@ class TagState:
     reason: str = ""
     # A batch that was sent and never answered, waiting to be settled.
     unconfirmed: dict | None = None
+    # The unit the copy last gave the tag, so a later run can notice when
+    # Tag Historian has lost it (see migrate.build_plan).
+    unit: str | None = None
 
     def to_json(self) -> dict:
         return {
@@ -61,6 +75,7 @@ class TagState:
             "status": self.status,
             "reason": self.reason,
             "unconfirmed": self.unconfirmed,
+            "unit": self.unit,
         }
 
     @staticmethod
@@ -72,6 +87,7 @@ class TagState:
             status=str(data.get("status") or "pending"),
             reason=str(data.get("reason") or ""),
             unconfirmed=data.get("unconfirmed"),
+            unit=data.get("unit"),
         )
 
 
@@ -86,12 +102,15 @@ class Checkpoint:
     tags: dict[str, TagState] = field(default_factory=dict)
     # Readings this copy sent per UTC day - what it has spent of each day's allowance.
     days: dict[str, int] = field(default_factory=dict)
+    # The Tag Historian account (customer id) the copy writes into.
+    account: str | None = None
 
     def save(self) -> None:
         payload = {
             "format": FORMAT_VERSION,
             "source": self.source,
             "destination": self.destination,
+            "account": self.account,
             "start_ns": self.start_ns,
             "end_ns": self.end_ns,
             "options": self.options,
@@ -128,10 +147,18 @@ class Checkpoint:
             options=dict(data.get("options") or {}),
             tags={name: TagState.from_json(t) for name, t in (data.get("tags") or {}).items()},
             days={str(k): int(v) for k, v in (data.get("days") or {}).items()},
+            account=data.get("account"),
         )
 
-    def check_same_copy(self, source: dict, destination: str, options: dict) -> None:
-        """Refuse to resume a different copy into this file's positions."""
+    def check_same_copy(
+        self, source: dict, destination: str, options: dict, account: str | None = None
+    ) -> None:
+        """Refuse to resume a different copy into this file's positions.
+
+        ``account`` is None for a dry run without an API key, which can say
+        nothing about it. A file written before the account was recorded
+        takes the one it is resumed with.
+        """
         if self.source != source:
             raise CheckpointError(
                 f"{self.path} belongs to a copy from {self.source}, not from {source}. "
@@ -141,6 +168,15 @@ class Checkpoint:
             raise CheckpointError(
                 f"{self.path} belongs to a copy into {self.destination}, not {destination}."
             )
+        if account is not None:
+            if self.account is not None and self.account != account:
+                raise CheckpointError(
+                    f"{self.path} belongs to a copy into another Tag Historian account "
+                    f"(customer id {self.account}); this API key opens {account}. Its positions "
+                    "would skip history the other account never received. Use the key of that "
+                    "account, or start a new copy with another --state file."
+                )
+            self.account = account
         changed = sorted(
             k for k in set(self.options) | set(options) if self.options.get(k) != options.get(k)
         )
@@ -150,3 +186,72 @@ class Checkpoint:
                 "the same --entity/--exclude/--measurement/unit options, or start a new copy with "
                 "another --state file."
             )
+
+
+class StateLock:
+    """An exclusive lock on ``<resume file>.lock``, held while one run writes.
+
+    The operating system's lock on an open file - ``flock`` on Linux and
+    macOS, ``msvcrt.locking`` on Windows - and not a file that exists while a
+    run does: the lock goes with the process, so a run killed outright, or a
+    Raspberry Pi that loses power, leaves no stale lock behind that makes the
+    next run refuse to start. The file itself stays, empty, and means nothing
+    when nobody holds it.
+    """
+
+    def __init__(self, state_path: Path) -> None:
+        self.state_path = state_path
+        self.path = state_path.with_name(state_path.name + ".lock")
+        self._handle: IO[bytes] | None = None
+
+    def acquire(self) -> None:
+        try:
+            # Not a with-block: the lock lasts exactly as long as this handle is open.
+            handle = open(self.path, "a+b")  # noqa: SIM115
+        except OSError as exc:
+            raise CheckpointError(
+                f"cannot create {self.path} beside the resume file: {exc}"
+            ) from exc
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            handle.close()
+            if os.name == "nt" or isinstance(exc, BlockingIOError):
+                raise CheckpointError(
+                    f"Another run of the copy is using {self.state_path} right now (it holds "
+                    f"{self.path}). Two runs on one resume file would send the same readings "
+                    "twice, and Tag Historian would store both: let that run finish, or stop it, "
+                    "and run this again."
+                ) from None
+            # A file system that cannot lock at all - some network shares.
+            raise CheckpointError(
+                f"cannot lock {self.path} ({exc}). Keep the resume file on a local disk "
+                "(--state), so that two runs cannot use it at once."
+            ) from exc
+        self._handle = handle
+
+    def release(self) -> None:
+        handle, self._handle = self._handle, None
+        if handle is None:
+            return
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        handle.close()
+
+    def __enter__(self) -> StateLock:
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.release()
