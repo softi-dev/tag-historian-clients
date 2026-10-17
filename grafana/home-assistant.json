@@ -1,0 +1,236 @@
+{
+  "__comment": "Home Assistant history in Grafana, from Tag Historian: the dashboard people built on InfluxDB, pointed at the Infinity data source instead. Pick entities by entity id; each gets a chart whose series carries the friendly name Home Assistant gave it and is drawn in its unit, and a small panel saying whether the line is readings or hourly averages. The URLs are RELATIVE - the data source's Base URL supplies the host. Every url, root_selector and column selector below is run against a real Tag Historian API on every build of the product, and the copy published as grafana/home-assistant.json in github.com/softi-dev/tag-historian-clients is kept identical to the one that is tested.",
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Home Assistant entities stored in Tag Historian: one chart per entity, with its friendly name and unit.",
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 1,
+      "panels": [],
+      "repeat": "entity",
+      "repeatDirection": "h",
+      "title": "$entity",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "${datasource}" },
+      "description": "Query A is the series: maxPoints is a fixed 800, because Infinity cannot tell the server how wide a panel is, and decimation=lttb keeps a long window from returning every stored sample. Query B is the tag's own record: the description and unit Home Assistant sent with its readings, and a computed name that is the description, or the entity id when there is none. The 'Config from query results' transformation makes that name the series name and the unit this chart's unit. Drawn as steps because Home Assistant writes a state when it changes, and the state holds until the next one.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+            "insertNulls": false,
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": { "type": "linear" },
+            "showPoints": "auto",
+            "spanNulls": true,
+            "stacking": { "group": "A", "mode": "none" },
+            "thresholdsStyle": { "mode": "off" }
+          },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 9, "w": 18, "x": 0, "y": 1 },
+      "id": 2,
+      "options": {
+        "legend": { "calcs": ["lastNotNull", "min", "max"], "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "targets": [
+        {
+          "columns": [
+            { "selector": "timestamp", "text": "Time", "type": "timestamp" },
+            { "selector": "value", "text": "value", "type": "number" }
+          ],
+          "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "${datasource}" },
+          "filters": [],
+          "format": "timeseries",
+          "global_query_id": "",
+          "parser": "backend",
+          "refId": "A",
+          "root_selector": "measurements",
+          "source": "url",
+          "type": "json",
+          "url": "/api/measurements/$customerId/$entity?from=${__timeFrom:date}&to=${__timeTo:date}&maxPoints=800&decimation=lttb",
+          "url_options": { "method": "GET" }
+        },
+        {
+          "columns": [
+            { "selector": "tagName", "text": "tagName", "type": "string" },
+            { "selector": "description", "text": "description", "type": "string" },
+            { "selector": "units", "text": "units", "type": "string" }
+          ],
+          "computed_columns": [
+            { "selector": "description != '' ? description : tagName", "text": "name", "type": "string" }
+          ],
+          "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "${datasource}" },
+          "filters": [],
+          "format": "table",
+          "global_query_id": "",
+          "parser": "backend",
+          "refId": "B",
+          "root_selector": "",
+          "source": "url",
+          "type": "json",
+          "url": "/api/tags/single?name=$entity",
+          "url_options": { "method": "GET" }
+        }
+      ],
+      "title": "$entity",
+      "transformations": [
+        {
+          "id": "configFromData",
+          "options": {
+            "configRefId": "B",
+            "mappings": [
+              { "fieldName": "name", "handlerKey": "displayName" },
+              { "fieldName": "units", "handlerKey": "unit" },
+              { "fieldName": "tagName", "handlerKey": "__ignore" },
+              { "fieldName": "description", "handlerKey": "__ignore" }
+            ]
+          }
+        }
+      ],
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "${datasource}" },
+      "description": "The chart beside this panel is not always made of readings. Over a long window the server answers from the hour or the day roll-up, and every point is then an AVERAGE of that interval - and history older than your plan's full-resolution window only exists as those hourly summaries. Raw means stored readings. Hour and Day mean averages. truncated=true means the series does not reach the end of the time range.",
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "auto", "cellOptions": { "type": "auto" } }, "mappings": [] },
+        "overrides": []
+      },
+      "gridPos": { "h": 9, "w": 6, "x": 18, "y": 1 },
+      "id": 3,
+      "options": { "cellHeight": "sm", "footer": { "show": false }, "showHeader": true },
+      "targets": [
+        {
+          "columns": [
+            { "selector": "resolution", "text": "Answered from", "type": "string" },
+            { "selector": "decimation", "text": "Thinned by", "type": "string" },
+            { "selector": "count", "text": "Points drawn", "type": "number" },
+            { "selector": "pointsBeforeDecimation", "text": "Points read", "type": "number" },
+            { "selector": "truncated", "text": "Cut short", "type": "boolean" }
+          ],
+          "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "${datasource}" },
+          "filters": [],
+          "format": "table",
+          "global_query_id": "",
+          "parser": "backend",
+          "refId": "A",
+          "root_selector": "",
+          "source": "url",
+          "type": "json",
+          "url": "/api/measurements/$customerId/$entity?from=${__timeFrom:date}&to=${__timeTo:date}&maxPoints=800&decimation=lttb",
+          "url_options": { "method": "GET" }
+        }
+      ],
+      "title": "What answered this chart",
+      "type": "table"
+    }
+  ],
+  "preload": false,
+  "refresh": "1m",
+  "schemaVersion": 39,
+  "tags": ["tag-historian", "home-assistant"],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "label": "Data source",
+        "multi": false,
+        "name": "datasource",
+        "options": [],
+        "query": "yesoreyeram-infinity-datasource",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "current": { "text": "", "value": "" },
+        "description": "Your account id. GET /api/customers/me returns it as customerId, or read it off the Settings page in the Tag Historian app. It is in the URL path of every measurement query, so nothing on this dashboard draws until it is filled in.",
+        "hide": 0,
+        "label": "Customer ID",
+        "name": "customerId",
+        "options": [{ "selected": true, "text": "", "value": "" }],
+        "query": "",
+        "skipUrlSync": false,
+        "type": "textbox"
+      },
+      {
+        "current": {},
+        "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "${datasource}" },
+        "definition": "GET /api/tags",
+        "description": "Every tag on the account, by name - for Home Assistant that is the entity id. One row is drawn per entity picked. Refreshed when the dashboard loads, not on every refresh: /api/tags sits on a much smaller rate limit than the chart reads.",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Entity",
+        "multi": true,
+        "name": "entity",
+        "options": [],
+        "query": {
+          "infinityQuery": {
+            "columns": [{ "selector": "tagName", "text": "entity", "type": "string" }],
+            "filters": [],
+            "format": "table",
+            "parser": "backend",
+            "refId": "variable",
+            "root_selector": "tags",
+            "source": "url",
+            "type": "json",
+            "url": "/api/tags?take=1000",
+            "url_options": { "method": "GET" }
+          },
+          "query": "",
+          "queryType": "infinity"
+        },
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 5,
+        "type": "query"
+      }
+    ]
+  },
+  "time": { "from": "now-7d", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Home Assistant history",
+  "uid": "tag-historian-home-assistant",
+  "version": 1,
+  "weekStart": ""
+}
