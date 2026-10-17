@@ -363,14 +363,17 @@ class EntityRenamedRepairFlow(RepairsFlow):
     async def async_step_new_tag(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        await async_stop_carrying(self.hass, self._entry, self._entity_id)
+        async_stop_carrying(self.hass, self._entry, self._entity_id)
         return self.async_create_entry(data={})
 
     async def async_step_keep_apart(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        # The readings already go under the new name, into its own history;
-        # leaving the old tag as it is takes nothing more than closing the card.
+        # Until now the readings went on into the old tag, as for a rename
+        # (renames.py: one rule for everything undecided, so a merge that
+        # could not be asked for can be asked again). Kept apart, they go
+        # under the new name, into the tag it has, from now on.
+        async_stop_carrying(self.hass, self._entry, self._entity_id)
         return self.async_create_entry(data={})
 
 

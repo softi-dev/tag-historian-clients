@@ -15,10 +15,12 @@ This module is the fix, in three parts:
   and the forwarder - rebuilt by the reload the options change causes - is
   subscribed to the entity again.
 
-* **Its readings go on landing in its history.** Until the tag has the new
-  name too, readings of the renamed entity are sent under the OLD tag
-  (``send_as``): no gap, no second tag, nothing refused on a plan with no slot
-  free.
+* **Its readings go on landing in its history.** Until Tag Historian has
+  confirmed that the tag has the new name too, readings of the renamed entity
+  are sent under the OLD tag (``send_as``): no gap, no second tag, nothing
+  refused on a plan with no slot free. That holds for a merge as well: the
+  readings go on into the tag they were going to until the merge is done or
+  the user has said to keep the two apart.
 
 * **The tag is renamed in Tag Historian** - ``POST /api/tags/rename``, or a
   merge when the new name is a tag already - so the history goes on under the
@@ -28,14 +30,37 @@ This module is the fix, in three parts:
   have to imply. Either way nothing is lost while it waits: the readings are
   stored under the old name, and the server redirects whatever is still sent
   under an old name once the tag has been renamed.
+
+TWO RULES, each the fix of a way renames were lost:
+
+1. **The options change is made synchronously, in the event callback, before
+   anything is awaited.** It used to be made at the end of a task that first
+   asked Tag Historian which tags exist. Renaming a device renames all of its
+   entities within milliseconds, one registry event each; the tasks overlapped,
+   each wrote back the selection it had read before its await, and the last
+   one to finish put the other entities' OLD ids back. Those entities were
+   never subscribed again - the very silence this module exists to end. Now
+   each event updates the options it finds, there and then, and everything
+   that needs the network happens afterwards (:func:`async_resume`), one entry
+   at a time under a lock, from a fresh read of the options.
+
+2. **The listener belongs to the integration, not to a loaded entry.** It
+   used to be registered at the end of the entry's setup and removed on
+   unload - and every handled rename changes the options, which reloads the
+   entry. A second rename arriving during that reload, or while the entry was
+   waiting to retry its setup because Tag Historian was unreachable, found
+   nobody listening and was dropped. :func:`async_setup_rename_tracking` is
+   called once from ``async_setup`` and listens for as long as Home Assistant
+   runs, for every entry, whatever state it is in.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+import asyncio
+from typing import TYPE_CHECKING, Any, Final
 
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import CALLBACK_TYPE, Event, HomeAssistant, callback
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
+from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -64,6 +89,10 @@ from .line_protocol import tag_name_for_entity
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+# hass.data key: {entry_id: asyncio.Lock}. NOT hass.data[DOMAIN], which holds
+# one ForwarderStats per entry id and nothing else (async_get_stats).
+_LOCKS: Final = f"{DOMAIN}_rename_locks"
+
 
 def send_as(options: Mapping[str, Any]) -> dict[str, str]:
     """{entity_id: entity_id whose tag its readings are sent under}, from the options."""
@@ -87,40 +116,46 @@ def _client(hass: HomeAssistant, entry: ConfigEntry) -> TagHistorianClient:
     )
 
 
+def _lock(hass: HomeAssistant, entry: ConfigEntry) -> asyncio.Lock:
+    """One at a time per entry: what is asked of Tag Historian about its renames."""
+    return hass.data.setdefault(_LOCKS, {}).setdefault(entry.entry_id, asyncio.Lock())
+
+
 @callback
-def async_track_renames(hass: HomeAssistant, entry: ConfigEntry) -> CALLBACK_TYPE:
-    """Listen for selected entities being renamed. Returns the unsubscribe."""
+def async_setup_rename_tracking(hass: HomeAssistant) -> None:
+    """Listen for renamed entities on behalf of every entry, for as long as Home Assistant runs.
+
+    Called once, from the integration's ``async_setup`` - see rule 2 in the
+    module docstring for why it is not tied to an entry being loaded.
+    """
 
     @callback
-    def _is_a_rename_of_ours(event_data: Mapping[str, Any]) -> bool:
-        return (
-            event_data.get("action") == "update"
-            and "old_entity_id" in event_data
-            and event_data["old_entity_id"] in entry.options.get(CONF_ENTITIES, [])
-        )
+    def _is_a_rename(event_data: Mapping[str, Any]) -> bool:
+        return event_data.get("action") == "update" and "old_entity_id" in event_data
 
     @callback
     def _renamed(event: Event) -> None:
-        # NOT an entry background task. The first thing the handler does is
-        # change the options, which reloads the entry - and an unload cancels
-        # the entry's background tasks, this one included, before it could
-        # ask Tag Historian to rename the tag.
-        hass.async_create_background_task(
-            async_entity_renamed(
-                hass, entry, event.data["old_entity_id"], event.data["entity_id"]
-            ),
-            "tag_historian_entity_renamed",
-        )
+        old, new = event.data["old_entity_id"], event.data["entity_id"]
+        for entry in hass.config_entries.async_entries(DOMAIN):
+            async_follow_rename(hass, entry, old, new)
 
-    return hass.bus.async_listen(
-        er.EVENT_ENTITY_REGISTRY_UPDATED, _renamed, event_filter=_is_a_rename_of_ours
-    )
+    hass.bus.async_listen(er.EVENT_ENTITY_REGISTRY_UPDATED, _renamed, event_filter=_is_a_rename)
 
 
-async def async_entity_renamed(
-    hass: HomeAssistant, entry: ConfigEntry, old: str, new: str
-) -> None:
-    """A selected entity was renamed from ``old`` to ``new`` in Home Assistant."""
+@callback
+def async_follow_rename(hass: HomeAssistant, entry: ConfigEntry, old: str, new: str) -> None:
+    """A selected entity was renamed from ``old`` to ``new``: follow it, now.
+
+    Synchronous on purpose (rule 1 in the module docstring): it reads the
+    options and writes them back with nothing awaited in between, so a second
+    rename handled right after it starts from what this one wrote.
+
+    What it does not do is ask Tag Historian anything. The options change
+    reloads a loaded entry; an entry that is being set up, or waiting to retry
+    its setup, reads the new options when it gets there; and every setup ends
+    with :func:`async_resume`, which settles the rename - the card, or the
+    request to rename the tag - from the options as they are by then.
+    """
     selected = list(entry.options.get(CONF_ENTITIES, []))
     if old not in selected:
         return
@@ -128,34 +163,26 @@ async def async_entity_renamed(
     mapping = send_as(entry.options)
     # The entity whose TAG the readings were going to: the old id, or - for an
     # entity renamed twice before its tag was - wherever the first rename left
-    # them going. The card about the first rename is about a name that is gone.
+    # them going.
     history = mapping.pop(old, old)
-    ir.async_delete_issue(hass, DOMAIN, renamed_issue_id(entry, old))
-
-    # The new id is in the selection already when it was selected for an
-    # entity that has since gone - a meter that was replaced, its successor
-    # renamed to the old meter's id. Its tag is the history to continue, and
-    # this one's is merged into it.
-    merge = new in selected
     selected = list(dict.fromkeys(new if entity_id == old else entity_id for entity_id in selected))
 
-    client = _client(hass, entry)
-    carry = True
     if new == history:
-        # Renamed back to the name its tag already has.
-        carry = False
-    elif merge and not await _has_a_tag(client, tag_name_for_entity(new)):
-        # Selected under that name, but nothing was ever stored under it:
-        # there is nothing to merge into, and a rename does the job.
-        merge = False
+        # Renamed back to the name its tag already has: nothing to carry.
+        mapping.pop(new, None)
+    else:
+        # Until Tag Historian has the new name too, the readings go on into
+        # the history they were going to. That is right whether this turns out
+        # to be a rename, a merge (the new id has a tag already) or nothing at
+        # all (the old id never stored anything): sending into an existing
+        # history is never wrong, starting a new one beside it is the thing
+        # this module exists to prevent. async_resume corrects it once it
+        # knows which.
+        mapping[new] = history
 
-    if carry and not merge:
-        if await _has_a_tag(client, tag_name_for_entity(history)):
-            mapping[new] = history
-        else:
-            # Nothing was ever stored under the old name, so there is no
-            # history to carry: the entity simply goes on under its new one.
-            carry = False
+    # Cards about either name describe a state that has just changed.
+    ir.async_delete_issue(hass, DOMAIN, renamed_issue_id(entry, old))
+    ir.async_delete_issue(hass, DOMAIN, renamed_issue_id(entry, new))
 
     LOGGER.info(
         "Tag Historian: %s was renamed to %s; %s",
@@ -164,49 +191,105 @@ async def async_entity_renamed(
         "its readings go on into the tag of " + history if new in mapping else "following it",
     )
 
-    # Last, because it reloads the entry: the forwarder is rebuilt subscribed
-    # to the new id and sending under the right tag.
     hass.config_entries.async_update_entry(
         entry,
         options={**entry.options, CONF_ENTITIES: selected, CONF_SEND_AS: mapping},
     )
 
-    if not carry:
-        return
 
-    if not entry.options.get(CONF_FOLLOW_RENAMES):
-        async_raise_renamed_issue(hass, entry, new, history, merge=merge)
-        return
+@callback
+def async_resume(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """At setup: settle every rename that is waiting.
 
-    if not merge:
-        # Nothing to do here: the reload the options change above causes
-        # finds the entity sent under its old tag and asks Tag Historian to
-        # rename it (async_resume) - one place that asks, retries included,
-        # rather than two racing each other with the same request.
-        return
+    Every entity still sent under another entity's tag is a rename Tag
+    Historian has not confirmed. With ``follow_renames`` on, it is asked to
+    rename (or merge) the tag; with it off, the entity gets its card if it has
+    none. Either way the first step is to find out what the old name is on
+    the server - nothing at all, a tag, or already a former name of the new
+    one - because each of those wants something different.
 
-    # A merge leaves nothing in the options to take it up again, so it is
-    # asked for now, and a refusal or an unreachable API becomes the card.
-    result = await async_carry_history(hass, entry, new, history, merge=True)
-    if result.outcome not in (LineageOutcome.DONE, LineageOutcome.NOT_FOUND):
-        async_raise_renamed_issue(
-            hass,
-            entry,
-            new,
-            history,
-            merge=True,
-            refusal=result.message if result.outcome is LineageOutcome.REFUSED else None,
+    NOT an entry background task: settling one rename can change the options,
+    which reloads the entry, and an unload cancels the entry's background
+    tasks - this one included, part-way through the next rename.
+    """
+    if send_as(entry.options):
+        hass.async_create_background_task(
+            _settle_all(hass, entry), "tag_historian_settle_renames"
         )
 
 
-async def _has_a_tag(client: TagHistorianClient, tag_name: str) -> bool:
-    """Whether Tag Historian has a tag of that name. Yes when it cannot say:
-    sending readings into an existing history is never wrong, starting a new
-    one beside it is the thing this module exists to prevent."""
-    try:
-        return tag_name in await client.async_get_tag_names()
-    except TagHistorianError:
-        return True
+async def _settle_all(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    # Under the lock, and from a fresh read: a resume runs after every reload,
+    # so several can be queued, and the ones behind the first find its work
+    # done (the mapping gone, or the card there) and do nothing.
+    async with _lock(hass, entry):
+        if hass.config_entries.async_get_entry(entry.entry_id) is None:
+            return
+        follow = bool(entry.options.get(CONF_FOLLOW_RENAMES))
+        issues = ir.async_get(hass)
+        pending = {
+            entity_id: history
+            for entity_id, history in send_as(entry.options).items()
+            if follow or issues.async_get_issue(DOMAIN, renamed_issue_id(entry, entity_id)) is None
+        }
+        if not pending:
+            return
+
+        try:
+            # Every name on the account, former names included, to the name
+            # of the tag it belongs to now.
+            names = await _client(hass, entry).async_get_tag_index()
+        except TagHistorianAuthError:
+            # The quota poll asks for the new key; nothing is lost meanwhile.
+            return
+        except TagHistorianError:
+            _retry_later(hass, entry)
+            return
+
+        for entity_id, history in pending.items():
+            if send_as(entry.options).get(entity_id) != history:
+                continue  # renamed again, or answered on its card, while we asked
+            outcome = await _settle_one(hass, entry, entity_id, history, names, follow=follow)
+            if outcome is LineageOutcome.UNAVAILABLE:
+                _retry_later(hass, entry)
+                return
+
+
+async def _settle_one(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    entity_id: str,
+    history: str,
+    names: Mapping[str, str],
+    *,
+    follow: bool,
+) -> LineageOutcome | None:
+    old_tag, new_tag = tag_name_for_entity(history), tag_name_for_entity(entity_id)
+    now_called = names.get(old_tag)
+
+    if now_called is None or now_called == new_tag:
+        # Nothing was ever stored under the old name - no history to carry,
+        # the entity simply goes on under its new one - or the tag is under
+        # the new name already: renamed in Explorer, or by a request whose
+        # answer this integration never got to write down.
+        async_stop_carrying(hass, entry, entity_id)
+        ir.async_delete_issue(hass, DOMAIN, renamed_issue_id(entry, entity_id))
+        return None
+
+    # The new id has a tag of its own (or is a name of one): a merge, not a
+    # rename. A replaced meter, its successor given the old meter's id.
+    merge = new_tag in names
+
+    if not follow:
+        async_raise_renamed_issue(hass, entry, entity_id, history, merge=merge)
+        return None
+
+    result = await _carry(hass, entry, entity_id, history, merge=merge)
+    if result.outcome is LineageOutcome.REFUSED:
+        async_raise_renamed_issue(
+            hass, entry, entity_id, history, merge=merge, refusal=result.message
+        )
+    return result.outcome
 
 
 async def async_carry_history(
@@ -217,8 +300,16 @@ async def async_carry_history(
     A rename, or - when the new name is a tag already - a merge. Done (or
     nothing to carry), the readings of ``entity_id`` are sent under its own
     name from now on and the card goes. Anything else is handed back for the
-    caller to say.
+    caller to say. For the repair card; :func:`async_resume` holds the lock
+    already and calls :func:`_carry` itself.
     """
+    async with _lock(hass, entry):
+        return await _carry(hass, entry, entity_id, history, merge=merge)
+
+
+async def _carry(
+    hass: HomeAssistant, entry: ConfigEntry, entity_id: str, history: str, *, merge: bool
+) -> LineageResult:
     client = _client(hass, entry)
     old_tag = tag_name_for_entity(history)
     new_tag = tag_name_for_entity(entity_id)
@@ -243,9 +334,20 @@ async def async_carry_history(
             # The entry was removed while the request was out; there is no
             # selection left to update, and its cards went with it.
             return result
-        mapping = send_as(entry.options)
-        if mapping.get(entity_id) == history:
-            del mapping[entity_id]
+        # Read fresh: the entity may have been renamed again while the
+        # request was out (a -> b being carried, then b -> c), and then the
+        # mapping says c -> a. After a rename or merge the history it means
+        # is under b, and asking for a -> c next would be refused - a is a
+        # former name of b - so it is pointed at b. (NOT_FOUND moved nothing:
+        # such a mapping is left for its own settling, which finds no history.)
+        moved = result.outcome is LineageOutcome.DONE
+        mapping = {
+            renamed: (entity_id if moved and was == history else was)
+            for renamed, was in send_as(entry.options).items()
+            if not (renamed == entity_id and was == history)
+        }
+        mapping = {renamed: was for renamed, was in mapping.items() if renamed != was}
+        if mapping != send_as(entry.options):
             hass.config_entries.async_update_entry(
                 entry, options={**entry.options, CONF_SEND_AS: mapping}
             )
@@ -266,7 +368,8 @@ async def async_carry_history(
     return result
 
 
-async def async_stop_carrying(hass: HomeAssistant, entry: ConfigEntry, entity_id: str) -> None:
+@callback
+def async_stop_carrying(hass: HomeAssistant, entry: ConfigEntry, entity_id: str) -> None:
     """Send ``entity_id`` under its own name from now on, leaving the old tag as it is."""
     mapping = send_as(entry.options)
     if mapping.pop(entity_id, None) is not None:
@@ -321,45 +424,17 @@ def renamed_placeholders(entity_id: str, history: str, refusal: str | None = Non
 
 
 @callback
-def async_resume(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """At setup: carry on with renames that were waiting.
-
-    With ``follow_renames`` on, every entity still sent under an old tag is
-    a rename Tag Historian has not confirmed - it could not be reached, or the
-    option was switched on after the rename - so it is asked again. With it
-    off, each one gets its card back if it was lost.
-    """
-    pending = send_as(entry.options)
-    if not pending:
-        return
-
-    if not entry.options.get(CONF_FOLLOW_RENAMES):
-        for entity_id, history in pending.items():
-            if ir.async_get(hass).async_get_issue(DOMAIN, renamed_issue_id(entry, entity_id)) is None:
-                async_raise_renamed_issue(hass, entry, entity_id, history, merge=False)
-        return
-
-    async def _carry_all() -> None:
-        for entity_id, history in pending.items():
-            result = await async_carry_history(hass, entry, entity_id, history, merge=False)
-            if result.outcome is LineageOutcome.UNAVAILABLE:
-                _retry_later(hass, entry)
-                return
-            if result.outcome is LineageOutcome.REFUSED:
-                async_raise_renamed_issue(
-                    hass, entry, entity_id, history, merge=False, refusal=result.message
-                )
-
-    hass.async_create_background_task(_carry_all(), "tag_historian_resume_renames")
-
-
-@callback
 def _retry_later(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Ask again in a while (:func:`async_resume`) - unless the entry has gone away by then."""
+    """Ask again in a while (:func:`async_resume`) - if the entry is loaded by then.
+
+    An entry that is not loaded then will be set up again some time, and
+    every setup ends with :func:`async_resume`. The timer is the entry's, so
+    an unload cancels it.
+    """
 
     @callback
     def _again(_now: object) -> None:
-        if entry.state.recoverable and hass.config_entries.async_get_entry(entry.entry_id) is not None:
+        if entry.state is ConfigEntryState.LOADED:
             async_resume(hass, entry)
 
     entry.async_on_unload(async_call_later(hass, RENAME_RETRY_SECONDS, _again))
@@ -372,3 +447,4 @@ def async_clear_renamed_issues(hass: HomeAssistant, entry: ConfigEntry) -> None:
     for domain, issue in list(ir.async_get(hass).issues):
         if domain == DOMAIN and issue.startswith(prefix):
             ir.async_delete_issue(hass, DOMAIN, issue)
+    hass.data.get(_LOCKS, {}).pop(entry.entry_id, None)

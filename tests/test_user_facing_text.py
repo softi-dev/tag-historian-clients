@@ -1096,8 +1096,10 @@ async def test_the_rename_card_names_both_tags_and_says_nothing_is_lost(
     assert "sensor.energy_2" in text and "sensor.energy" in text
     assert "Nothing is copied" in text
     assert "undone" in text or "renamed back" in text
+    # Both cards: until it is answered, the readings go on into the old tag
+    # (renames.py), for a merge as much as for a rename.
+    assert "nothing is lost" in text
     if not merge:
-        assert "nothing is lost" in text
         assert "one more tag" in text, "starting a new tag costs a slot, and the card says so"
 
 

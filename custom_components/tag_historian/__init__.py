@@ -8,8 +8,9 @@ Two independent loops share one HTTP client:
             which is where every quota number the UI shows comes from
             (see coordinator.py)
 
-and one listener: the entity registry, so an entity renamed in Home Assistant
-is followed rather than silently dropped (see renames.py).
+and one listener, for the whole integration rather than any one entry: the
+entity registry, so an entity renamed in Home Assistant is followed rather than
+silently dropped (see renames.py).
 """
 
 from __future__ import annotations
@@ -19,7 +20,9 @@ from dataclasses import dataclass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.typing import ConfigType
 
 from .api import TagHistorianClient
 from .const import (
@@ -35,12 +38,16 @@ from .forwarder import ForwarderStats, StateForwarder
 from .renames import (
     async_clear_renamed_issues,
     async_resume,
-    async_track_renames,
+    async_setup_rename_tracking,
     send_as,
 )
 from .repairs import async_clear_write_issues
 
 PLATFORMS: list[Platform] = [Platform.SENSOR]
+
+# Set up from the UI only; async_setup below exists for the rename listener,
+# and hassfest wants an integration that has one to say what YAML it takes.
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 
 @dataclass
@@ -68,10 +75,36 @@ def async_get_stats(hass: HomeAssistant, entry_id: str) -> ForwarderStats:
     return hass.data.setdefault(DOMAIN, {}).setdefault(entry_id, ForwarderStats())
 
 
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Once per Home Assistant run: listen for renamed entities, for every entry.
+
+    Here and not in async_setup_entry, because an entry is not always loaded
+    when a rename happens. Each handled rename changes the options and so
+    reloads the entry, and an entry waits out a dead API in setup-retry; a
+    listener that came and went with the entry missed every rename made in
+    those windows - the second entity of a device being renamed, typically -
+    and that entity's readings stopped without a word (renames.py).
+    """
+    async_setup_rename_tracking(hass)
+    return True
+
+
 async def async_setup_entry(
     hass: HomeAssistant, entry: TagHistorianConfigEntry
 ) -> bool:
     """Set up one Tag Historian account."""
+    # Reload on an options change so the new selection is what gets subscribed
+    # to. OptionsFlowWithReload would replace this listener, but it only exists
+    # from 2025.8 and hacs.json claims a lower floor - see the README.
+    #
+    # FIRST, before anything is awaited. A rename arriving while this setup is
+    # under way changes the options (renames.py); registered at the end, the
+    # listener missed a change made after the forwarder below was built, which
+    # then ran on to the next reload subscribed to an id that no longer exists.
+    # Registered here, the change queues a reload, which waits for this setup
+    # to finish. A setup that fails runs the unload callbacks, this one too.
+    entry.async_on_unload(entry.add_update_listener(_async_options_updated))
+
     client = TagHistorianClient(
         async_get_clientsession(hass), entry.data[CONF_HOST], entry.data[CONF_API_KEY]
     )
@@ -104,16 +137,10 @@ async def async_setup_entry(
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    # Reload on an options change so the new selection is what gets subscribed
-    # to. OptionsFlowWithReload would replace this listener, but it only exists
-    # from 2025.8 and hacs.json claims a lower floor - see the README.
-    entry.async_on_unload(entry.add_update_listener(_async_options_updated))
-
-    # A selected entity renamed in Home Assistant: follow it, and carry its
-    # history over to the new name (renames.py). And any rename still waiting
-    # from before this start - Tag Historian could not be reached, or Home
-    # Assistant restarted in between - is taken up again.
-    entry.async_on_unload(async_track_renames(hass, entry))
+    # Every rename waiting to be settled - just made, which is what this
+    # reload is for; made while the entry was not loaded; or left from before
+    # a restart or an unreachable API - is taken up: a card, or the request to
+    # rename the tag in Tag Historian (renames.py).
     async_resume(hass, entry)
 
     return True

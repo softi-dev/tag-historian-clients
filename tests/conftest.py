@@ -83,6 +83,7 @@ def make_client(
     client.async_validate.return_value = STUB_ACCOUNT if account is None else account
     client.async_get_quota.return_value = STUB_QUOTA if quota is None else quota
     client.async_get_tag_names.return_value = set() if tags is None else tags
+    client.async_get_tag_index.return_value = {name: name for name in tags or ()}
     client.async_rename_tag.return_value = LineageResult(LineageOutcome.DONE)
     client.async_merge_tags.return_value = LineageResult(LineageOutcome.DONE)
     return client

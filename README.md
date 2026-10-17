@@ -209,8 +209,11 @@ to the name under **Former names**.
 Readings are never adjusted: a replacement meter that started from zero still
 shows the drop where the two histories meet.
 
-A rename made while this integration is not running - disabled, or not yet
-installed - is not seen: the entity simply stops arriving under its old id.
+Renaming a device renames all of its entities at once, and each of them is
+followed. So is a rename made while the integration reloads or waits for Tag
+Historian to come back. A rename made while this integration is not running -
+disabled, or not yet installed - is not seen: the entity simply stops arriving
+under its old id.
 Select it again under its new id, and rename the old series to the new id in
 Tag Historian Explorer (**Tags**, open the series, **Rename**) to keep its
 history in one piece - or, if readings under the new id have already started a

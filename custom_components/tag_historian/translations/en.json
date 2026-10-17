@@ -149,7 +149,7 @@
           },
           "merge_choice": {
             "title": "Merge the history of {old} into {new}?",
-            "description": "Home Assistant renamed {old} to {new}, a name that has a tag in Tag Historian already: {new_tag}. The renamed entity's readings go into {new_tag} now; its history from before the rename is in {old_tag}.{refusal}\n\nMerge them, and the two read as one history under {new_tag}. Where both have readings in the same hour, that hour's figures are worked out from both, and {old_tag} stops counting as a tag. Nothing is copied, and the merge can be undone in the Tag Historian dashboard.\n\nOr keep them apart: {old_tag} keeps its history as a tag of its own.",
+            "description": "Home Assistant renamed {old} to {new}, a name that has a tag in Tag Historian already: {new_tag}. The renamed entity's history from before the rename is in {old_tag}, and its readings go on into {old_tag} until you choose, so nothing is lost.{refusal}\n\nMerge them, and the two read as one history under {new_tag}, and new readings are stored there. Where both have readings in the same hour, that hour's figures are worked out from both, and {old_tag} stops counting as a tag. Nothing is copied, and the merge can be undone in the Tag Historian dashboard.\n\nOr keep them apart: {old_tag} keeps its history as a tag of its own, and the readings from now on go into {new_tag}.",
             "menu_options": {
               "merge_tags": "Merge them into one history",
               "keep_apart": "Keep them apart"

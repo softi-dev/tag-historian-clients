@@ -252,6 +252,34 @@ async def test_existing_tag_names_come_back_as_a_set(client, aioclient_mock) -> 
     assert await client.async_get_tag_names() == {"sensor.a", "sensor.b"}
 
 
+async def test_former_names_exist_too_and_say_which_tag_they_belong_to(
+    client, aioclient_mock
+) -> None:
+    """A former name is not a tag, but readings sent under it are stored in
+    the tag it belongs to - so it costs no slot to select, and an entity whose
+    old id is a former name of its new id has been renamed already."""
+    aioclient_mock.get(
+        "https://api.taghistorian.com/api/tags?take=1000",
+        json={
+            "totalCount": 2,
+            "tags": [
+                {"tagName": "sensor.energy", "formerNames": ["sensor.energy_2", "sensor.meter"]},
+                {"tagName": "sensor.b", "formerNames": []},
+            ],
+        },
+    )
+
+    assert await client.async_get_tag_index() == {
+        "sensor.energy": "sensor.energy",
+        "sensor.energy_2": "sensor.energy",
+        "sensor.meter": "sensor.energy",
+        "sensor.b": "sensor.b",
+    }
+    assert await client.async_get_tag_names() == {
+        "sensor.energy", "sensor.energy_2", "sensor.meter", "sensor.b"
+    }
+
+
 def test_skipped_tag_parsing_fails_soft() -> None:
     """It is scraping prose out of an English sentence, so it will break one
     day. When it does the repair issue must still appear, just unnamed."""
@@ -344,3 +372,38 @@ async def test_a_rename_that_gets_no_answer_is_tried_again_later(client, aioclie
     result = await client.async_rename_tag("sensor.energy_2", "sensor.energy")
 
     assert result.outcome is LineageOutcome.UNAVAILABLE
+
+
+@pytest.mark.parametrize("status", [429, 500, 502, 504])
+async def test_a_busy_or_broken_gateway_is_tried_again_and_never_a_refusal(
+    client, aioclient_mock, status
+) -> None:
+    """These were REFUSED: a gateway hiccup during a deploy became a permanent
+    card saying "/api/tags/rename answered 502", and with "Rename tags when
+    entities are renamed" on, the rename was never asked for again."""
+    aioclient_mock.post(RENAME_URL, status=status)
+
+    result = await client.async_rename_tag("sensor.energy_2", "sensor.energy")
+
+    assert result.outcome is LineageOutcome.UNAVAILABLE
+
+
+async def test_a_tag_historian_without_renames_says_so_in_words(client, aioclient_mock) -> None:
+    """A bare 404 - no code - is a route that does not exist: an API older
+    than this integration. The card quotes the message, so it is a sentence."""
+    aioclient_mock.post(RENAME_URL, status=404)
+
+    result = await client.async_rename_tag("sensor.energy_2", "sensor.energy")
+
+    assert result.outcome is LineageOutcome.REFUSED
+    assert "cannot rename or merge tags yet" in result.message
+    assert "404" not in result.message
+
+
+async def test_a_key_that_may_not_rename_says_which_key_can(client, aioclient_mock) -> None:
+    aioclient_mock.post(MERGE_URL, status=403)
+
+    result = await client.async_merge_tags("sensor.energy_2", "sensor.energy")
+
+    assert result.outcome is LineageOutcome.REFUSED
+    assert "Write scope" in result.message
