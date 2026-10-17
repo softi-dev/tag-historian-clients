@@ -112,6 +112,9 @@ class ImportProgress:
     duplicates: int = 0
     outside_window: int = 0
     refused: int = 0
+    # Of ``refused``: readings that were already live data - not older than
+    # their entity's first live reading or the import's start.
+    not_history: int = 0
     refused_tags: list[str] = field(default_factory=list)
     allowance_remaining: int | None = None
     stop_reason: str = ""
@@ -298,6 +301,10 @@ class HistoryImporter:
                     batch_size = IMPORT_BATCH_SIZE
                     if result is None:
                         return False
+                    if tag in result.refused_tags:
+                        # The plan has no room for this tag; the rest of its
+                        # history would be refused the same way.
+                        return True
                     if (line := result.importable_before.get(tag)) is not None and line < end:
                         # Already live in Tag Historian from here on: the rest
                         # of this entity's recorder history is not history to
@@ -356,6 +363,7 @@ class HistoryImporter:
         progress.duplicates += result.duplicates
         progress.outside_window += result.outside_window
         progress.refused += result.refused
+        progress.not_history += result.refused_not_history
         for tag in result.refused_tags:
             if tag not in progress.refused_tags:
                 progress.refused_tags.append(tag)
@@ -430,8 +438,11 @@ def _summary(progress: ImportProgress) -> str:
             f"{progress.outside_window} were older than your plan's full-resolution window and "
             "were skipped."
         )
-    if progress.refused:
-        lines.append(f"{progress.refused} were refused: {progress.message or 'see the log'}")
+    if progress.not_history:
+        lines.append(
+            f"{progress.not_history} were already your live data - not older than their entity's "
+            "first reading in Tag Historian, or than the import's start - and were not imported."
+        )
     if progress.refused_tags:
         lines.append(
             "No tag could be created for: " + ", ".join(progress.refused_tags) + " - your plan "

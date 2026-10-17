@@ -260,6 +260,7 @@ class ImportSensor(SensorEntity):
             "readings_in_deadband": progress.compressed,
             "readings_outside_window": progress.outside_window,
             "readings_refused": progress.refused,
+            "readings_already_live": progress.not_history,
             "refused_tags": list(progress.refused_tags),
             "import_allowance_left": progress.allowance_remaining,
             "stopped_because": progress.stop_reason or None,

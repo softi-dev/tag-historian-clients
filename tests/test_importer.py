@@ -10,11 +10,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from homeassistant.core import HomeAssistant, State
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.helpers.service import async_get_all_descriptions
 from homeassistant.helpers.storage import Store
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -229,6 +230,46 @@ async def test_an_entity_already_live_ends_where_its_first_live_reading_is(
     assert importer.progress.status == STATUS_FINISHED
 
 
+async def test_an_entity_the_plan_has_no_tag_for_is_left_after_its_first_refusal(
+    hass: HomeAssistant, entry, recorder, freezer, notifications
+) -> None:
+    """The tag limit refuses the probe; the rest of that entity is not sent to be refused too."""
+    freezer.move_to(NOW)
+    for hours in range(40, 0, -1):
+        recorder.record(POWER, str(hours), NOW - timedelta(hours=hours))
+    recorder.record(TEMP, "21.5", NOW - timedelta(hours=5))
+
+    def refused(readings):
+        if readings[0]["tagName"] == POWER:
+            return taken(0, refused_tag_limit=len(readings), refused_tags=[POWER])
+        return taken(len(readings))
+
+    client = ImportClient(*[refused] * 10)
+    importer = make_importer(hass, entry, client)
+    await importer.async_start([POWER, TEMP], None)
+    await _run(importer)
+
+    assert [len(batch) for batch in client.batches] == [1, 1], "one probe each, nothing more for POWER"
+    assert importer.progress.status == STATUS_FINISHED
+    assert importer.progress.refused_tags == [POWER]
+    assert "No tag could be created for: sensor.house_power" in notifications[-1]
+
+
+async def test_readings_that_were_already_live_are_said_to_be_so(
+    hass: HomeAssistant, entry, recorder, freezer, notifications
+) -> None:
+    freezer.move_to(NOW)
+    recorder.record(POWER, "1", NOW - timedelta(hours=3))
+
+    client = ImportClient(taken(0, refused_not_history=1, importable_before={POWER: NOW - timedelta(days=30)}))
+    importer = make_importer(hass, entry, client)
+    await importer.async_start([POWER], None)
+    await _run(importer)
+
+    assert importer.progress.not_history == 1
+    assert "already your live data" in notifications[-1]
+
+
 async def test_a_used_up_allowance_stops_the_import_and_says_why(
     hass: HomeAssistant, entry, recorder, freezer, notifications
 ) -> None:
@@ -378,7 +419,6 @@ async def loaded(hass: HomeAssistant, entry, recorder):
     client = make_client()
     client.async_start_import.return_value = session()
     client.async_import_batch.return_value = taken(0)
-    from unittest.mock import patch
 
     with patch("custom_components.tag_historian.TagHistorianClient", return_value=client):
         assert await hass.config_entries.async_setup(entry.entry_id)
@@ -439,3 +479,15 @@ async def test_without_a_recorder_there_is_nothing_to_import(
     with pytest.raises(ServiceValidationError) as raised:
         await hass.services.async_call(DOMAIN, SERVICE_IMPORT_HISTORY, {}, blocking=True)
     assert raised.value.translation_key == "no_recorder"
+
+
+async def test_the_action_is_described_from_services_yaml_and_the_translations(
+    hass: HomeAssistant, entry, loaded
+) -> None:
+    """What the Actions panel shows: a broken services.yaml shows nothing, silently."""
+    descriptions = await async_get_all_descriptions(hass)
+    action = descriptions[DOMAIN][SERVICE_IMPORT_HISTORY]
+
+    assert action["name"] == "Import history"
+    assert set(action["fields"]) == {"config_entry_id", "entity_id", "days"}
+    assert action["fields"]["days"]["selector"]["number"]["min"] == 1
