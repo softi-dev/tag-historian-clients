@@ -48,7 +48,9 @@ What this integration adds:
   last two are different problems and are never described as the same one.
 
 What it does **not** do: read data back out of Tag Historian, replace the
-recorder, or forward attributes. It is a one-way export of entity states.
+recorder, or keep attributes as history. It is a one-way export of entity
+states - each with the entity's friendly name and unit, so the series is called
+what Home Assistant calls it and its readings carry their unit.
 
 ## Install
 
@@ -122,7 +124,11 @@ asterisks. The integration sends at most a single numeric reading per state
 change and never a second series for the same entity, so the count on the
 review screen is the count you will be billed for.
 
-Only the entity's own state is sent, never its attributes. A reading is
+Only the entity's own state is sent as a reading, never its attributes. Two
+attributes go along to describe it: the friendly name, which becomes the
+series' description, and the unit of measurement, which becomes its unit -
+what Tag Historian Explorer labels the chart with. Rename the entity in Home
+Assistant and the description follows with its next reading. A reading is
 therefore a number, or one of a small set of words that *are* a number in
 disguise: `on`/`off` for a light, a switch, a fan, an automation, a helper or a
 binary sensor, `open`/`closed` for a cover, `above_horizon`/`below_horizon` for
