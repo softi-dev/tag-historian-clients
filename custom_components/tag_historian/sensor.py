@@ -1,8 +1,9 @@
-"""Quota and delivery sensors.
+"""Quota, delivery and history-import sensors.
 
-Five numbers, and not one of them is invented here: the two quota sensors read
+Not one number is invented here: the two quota sensors read
 ``GET /api/usage/limits`` and ``GET /api/usage/daily`` through the coordinator,
-and the delivery sensors read the forwarder's own counters.
+the delivery sensors read the forwarder's own counters, and the import sensor
+reads what the history import has been told by the API.
 
 The delivery sensors exist so that "every reading that does not arrive moves a
 counter" is true in Home Assistant's own idiom, the same invariant the
@@ -17,19 +18,22 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.sensor import (
+    SensorDeviceClass,
     SensorEntity,
     SensorEntityDescription,
     SensorStateClass,
 )
 from homeassistant.const import EntityCategory
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .api import QuotaSnapshot
-from .const import DOMAIN
+from .const import DOMAIN, SIGNAL_IMPORT_UPDATED
 from .coordinator import QuotaCoordinator
 from .forwarder import ForwarderStats
+from .importer import STATUSES
 
 if TYPE_CHECKING:
     from . import TagHistorianConfigEntry
@@ -123,6 +127,7 @@ async def async_setup_entry(
     entities += [
         DeliverySensor(entry, description) for description in DELIVERY_SENSORS
     ]
+    entities.append(ImportSensor(entry))
     async_add_entities(entities)
 
 
@@ -201,6 +206,64 @@ class DeliverySensor(SensorEntity):
             "entities_storing_nothing": list(stats.unstorable_entities),
             "refused_tags": list(stats.refused_tags),
             "last_error": stats.last_error,
+            # Not losses: readings read back from the recorder to fill a gap,
+            # and readings saved at the last stop and sent after it. Here so
+            # that a counter that moved has the story of what happened next
+            # beside it.
+            "backfilled_from_recorder": stats.backfilled,
+            "restored_after_restart": stats.restored,
+        }
+
+
+class ImportSensor(SensorEntity):
+    """Where the history import is: idle, running, finished or stopped, and the numbers.
+
+    Pushed, not polled: it changes once a batch, and the importer says when.
+    """
+
+    _attr_should_poll = False
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = STATUSES
+    _attr_name = "Tag Historian history import"
+
+    def __init__(self, entry: TagHistorianConfigEntry) -> None:
+        self._entry = entry
+        self._attr_unique_id = f"{entry.entry_id}_history_import"
+
+    async def async_added_to_hass(self) -> None:
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                SIGNAL_IMPORT_UPDATED.format(entry_id=self._entry.entry_id),
+                self._updated,
+            )
+        )
+
+    @callback
+    def _updated(self) -> None:
+        self.async_write_ha_state()
+
+    @property
+    def native_value(self) -> str:
+        return self._entry.runtime_data.importer.progress.status
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        progress = self._entry.runtime_data.importer.progress
+        return {
+            "entities": len(progress.entities),
+            "entities_done": len(progress.done),
+            "current_entity": progress.current,
+            "imported_from": progress.since,
+            "readings_imported": progress.stored,
+            "readings_already_there": progress.duplicates,
+            "readings_in_deadband": progress.compressed,
+            "readings_outside_window": progress.outside_window,
+            "readings_refused": progress.refused,
+            "refused_tags": list(progress.refused_tags),
+            "import_allowance_left": progress.allowance_remaining,
+            "stopped_because": progress.stop_reason or None,
+            "finished_at": progress.finished_at,
         }
 
 

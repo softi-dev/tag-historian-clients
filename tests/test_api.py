@@ -7,8 +7,11 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from custom_components.tag_historian.api import (
+    ImportOutcome,
     TagHistorianAuthError,
     TagHistorianClient,
+    TagHistorianConnectionError,
+    TagHistorianImportRefused,
     WriteOutcome,
     _classify_429,
     _parse_dropped_points,
@@ -269,3 +272,125 @@ def test_a_missing_point_count_is_none_and_not_zero() -> None:
     assert _parse_dropped_points("0 points dropped: tag quota exceeded") == 0
     assert _parse_dropped_points("tag quota exceeded (new tags: a.b)") is None
     assert _parse_dropped_points("") is None
+
+
+# --------------------------------------------------------------------------
+# The history import endpoints
+# --------------------------------------------------------------------------
+
+IMPORT_URL = "https://api.taghistorian.com/api/import"
+BATCH_URL = "https://api.taghistorian.com/api/import/imp-1/readings"
+READING = {"tagName": "sensor.house_power", "timestamp": "2026-10-15T12:00:00Z", "value": 1500.0}
+
+
+async def test_starting_an_import_reads_its_line_and_the_allowance(client, aioclient_mock) -> None:
+    aioclient_mock.post(
+        IMPORT_URL,
+        status=201,
+        json={
+            "importId": "imp-1",
+            "startedAt": "2026-10-17T12:00:00.1234567Z",
+            "windowStart": "2026-10-03T12:00:00Z",
+            "maxReadingsPerBatch": 5000,
+            "allowance": {"total": 900, "used": 100, "remaining": 800, "readingsPerDay": 90, "windowDays": 10},
+        },
+    )
+
+    started = await client.async_start_import()
+
+    assert started.import_id == "imp-1"
+    assert started.started_at.year == 2026 and started.started_at.tzinfo is not None
+    assert started.allowance.remaining == 800
+    assert started.allowance.window_days == 10
+    assert aioclient_mock.mock_calls[0][2] == {"source": "home-assistant"}
+
+
+@pytest.mark.parametrize(
+    ("status", "error", "outcome"),
+    [
+        (402, "Import allowance used up", ImportOutcome.ALLOWANCE_SPENT),
+        (402, "Storage quota exceeded", ImportOutcome.STORAGE_FULL),
+        (403, "Email address not verified", ImportOutcome.FORBIDDEN),
+    ],
+)
+async def test_an_import_that_cannot_start_says_why(
+    client, aioclient_mock, status, error, outcome
+) -> None:
+    aioclient_mock.post(IMPORT_URL, status=status, json={"error": error, "message": f"{error}."})
+
+    with pytest.raises(TagHistorianImportRefused) as refused:
+        await client.async_start_import()
+
+    assert refused.value.outcome is outcome
+    assert refused.value.message == f"{error}."
+
+
+async def test_a_batch_answer_is_read_field_by_field(client, aioclient_mock) -> None:
+    aioclient_mock.post(
+        BATCH_URL,
+        status=200,
+        json={
+            "received": 10,
+            "stored": 4,
+            "compressed": 1,
+            "duplicates": 2,
+            "outsideWindow": 1,
+            "refusedTotal": 2,
+            "refused": {"notHistory": 1, "tagLimit": 1, "allowance": 0, "storage": 0},
+            "refusedTags": ["sensor.extra"],
+            "importableBefore": {"sensor.house_power": "2026-10-16T08:00:00Z"},
+            "allowance": {"remaining": 796},
+            "message": "2 of 10 readings were refused",
+        },
+    )
+
+    result = await client.async_import_batch("imp-1", [READING])
+
+    assert result.outcome is ImportOutcome.TAKEN
+    assert (result.stored, result.compressed, result.duplicates, result.outside_window) == (4, 1, 2, 1)
+    assert result.refused == 2
+    assert result.refused_tags == ["sensor.extra"]
+    assert result.importable_before["sensor.house_power"].hour == 8
+    assert result.allowance_remaining == 796
+    assert aioclient_mock.mock_calls[0][2] == {"readings": [READING]}
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "outcome"),
+    [
+        (402, {"error": "Import allowance used up"}, ImportOutcome.ALLOWANCE_SPENT),
+        (402, {"error": "Storage quota exceeded"}, ImportOutcome.STORAGE_FULL),
+        (403, {"error": "Account scheduled for deletion"}, ImportOutcome.FORBIDDEN),
+        (404, {"error": "No import with that id on this account"}, ImportOutcome.UNKNOWN_IMPORT),
+        (400, {"error": "Every imported reading needs its timestamp"}, ImportOutcome.REJECTED),
+    ],
+)
+async def test_every_batch_refusal_is_its_own_outcome(
+    client, aioclient_mock, status, body, outcome
+) -> None:
+    aioclient_mock.post(BATCH_URL, status=status, json=body)
+
+    result = await client.async_import_batch("imp-1", [READING])
+
+    assert result.outcome is outcome
+
+
+@pytest.mark.parametrize("status", [429, 503])
+async def test_a_busy_import_endpoint_is_a_retry_with_its_wait(client, aioclient_mock, status) -> None:
+    aioclient_mock.post(
+        BATCH_URL, status=status, json={"error": "import_unavailable"}, headers={"Retry-After": "15"}
+    )
+
+    result = await client.async_import_batch("imp-1", [READING])
+
+    assert result.outcome is ImportOutcome.RETRY
+    assert result.retry_after == 15
+
+
+async def test_a_500_from_the_import_endpoint_is_retried_like_a_socket_error(
+    client, aioclient_mock
+) -> None:
+    aioclient_mock.post(BATCH_URL, status=500, json={"error": "An internal error occurred."})
+
+    with pytest.raises(TagHistorianConnectionError):
+        await client.async_import_batch("imp-1", [READING])

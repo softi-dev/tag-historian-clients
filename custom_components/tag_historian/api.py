@@ -17,13 +17,14 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
 import aiohttp
 from yarl import URL
 
-from .const import HTTP_TIMEOUT_SECONDS, LOGGER
+from .const import HTTP_TIMEOUT_SECONDS, IMPORT_TIMEOUT_SECONDS, LOGGER
 
 
 class TagHistorianError(Exception):
@@ -116,6 +117,110 @@ class WriteResult:
             WriteOutcome.BACK_PRESSURE,
             WriteOutcome.UNAVAILABLE,
         )
+
+
+class ImportOutcome(Enum):
+    """What the import endpoint said about one batch, in terms of what to do next.
+
+    Unlike the live write endpoint, every refusal that will not change by
+    waiting ends the import: the allowance spent, the storage cap reached, an
+    account that may not write. Waiting is only for the answers that say so -
+    a busy write buffer, a server between two processes - and a batch refused
+    for a retry stored nothing, so sending it again is safe (and would be safe
+    anyway: the import endpoint skips a reading it already has).
+    """
+
+    TAKEN = "taken"  # 200 - counts in the result
+    RETRY = "retry"  # 429/503 - wait Retry-After, send the same batch again
+    ALLOWANCE_SPENT = "allowance_spent"  # 402 - the account's import allowance is used up
+    STORAGE_FULL = "storage_full"  # 402 - the plan's storage cap
+    FORBIDDEN = "forbidden"  # 403 - unconfirmed address, account being erased
+    UNKNOWN_IMPORT = "unknown_import"  # 404 - the import is not this account's (any more)
+    REJECTED = "rejected"  # 400/413 - a body this integration should not have built
+
+
+@dataclass(frozen=True)
+class ImportAllowance:
+    """``GET /api/import/allowance``: how much history the account may still import.
+
+    The total is the plan's daily reading allowance times its full-resolution
+    window in days - both numbers from the API, like every other limit this
+    integration shows.
+    """
+
+    total: int
+    used: int
+    remaining: int
+    readings_per_day: int
+    window_days: int
+    window_start: datetime | None = None
+
+    @classmethod
+    def from_json(cls, payload: dict[str, Any], window_start: Any = None) -> ImportAllowance:
+        return cls(
+            total=int(payload.get("total", 0)),
+            used=int(payload.get("used", 0)),
+            remaining=int(payload.get("remaining", 0)),
+            readings_per_day=int(payload.get("readingsPerDay", 0)),
+            window_days=int(payload.get("windowDays", 0)),
+            window_start=_parse_time(
+                window_start if window_start is not None else payload.get("windowStart")
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class ImportSession:
+    """``POST /api/import``: an import, and the line its readings must stay behind."""
+
+    import_id: str
+    started_at: datetime
+    window_start: datetime
+    max_readings_per_batch: int
+    allowance: ImportAllowance
+
+
+@dataclass
+class ImportBatchResult:
+    """One batch of an import, as the endpoint answered it."""
+
+    outcome: ImportOutcome
+    retry_after: int = 0
+    stored: int = 0
+    compressed: int = 0
+    duplicates: int = 0
+    outside_window: int = 0
+    refused_not_history: int = 0
+    refused_tag_limit: int = 0
+    refused_allowance: int = 0
+    refused_storage: int = 0
+    refused_tags: list[str] = field(default_factory=list)
+    # Per tag in the batch: readings must be older than this to be imported -
+    # the import's start, or the tag's first live reading if that is earlier.
+    importable_before: dict[str, datetime] = field(default_factory=dict)
+    allowance_remaining: int | None = None
+    message: str = ""
+
+    @property
+    def refused(self) -> int:
+        return (
+            self.refused_not_history
+            + self.refused_tag_limit
+            + self.refused_allowance
+            + self.refused_storage
+        )
+
+
+class TagHistorianImportRefused(TagHistorianError):
+    """An import could not be started: the allowance is spent, or the account cannot write.
+
+    Carries the API's own sentence, which says which and what to do about it.
+    """
+
+    def __init__(self, outcome: ImportOutcome, message: str) -> None:
+        super().__init__(message)
+        self.outcome = outcome
+        self.message = message
 
 
 @dataclass(frozen=True)
@@ -245,6 +350,71 @@ class TagHistorianClient:
             for tag in payload.get("tags", [])
             if isinstance(tag, dict) and tag.get("tagName")
         }
+
+    async def async_get_import_allowance(self) -> ImportAllowance:
+        """How much history this account may still import, and where the window starts."""
+        return ImportAllowance.from_json(await self._get_json("/api/import/allowance"))
+
+    async def async_start_import(self, source: str = "home-assistant") -> ImportSession:
+        """Start an import. Its readings must be older than ``started_at``.
+
+        Raises :class:`TagHistorianImportRefused` when the account cannot
+        import at all right now - the allowance spent (402), the storage cap
+        reached (402), or an account that may not write (403).
+        """
+        try:
+            async with self._session.post(
+                self._base.join(URL("/api/import")),
+                headers=self._headers(),
+                json={"source": source},
+                timeout=aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SECONDS),
+            ) as response:
+                if response.status == 401:
+                    raise TagHistorianAuthError("import")
+                if response.status in (402, 403):
+                    body = await self._read_error_body(response)
+                    raise TagHistorianImportRefused(
+                        _classify_import_refusal(response.status, body),
+                        str(body.get("message") or body.get("error") or ""),
+                    )
+                if response.status != 201:
+                    raise TagHistorianConnectionError(f"/api/import answered {response.status}")
+                payload = await response.json()
+        except (TimeoutError, aiohttp.ClientError) as err:
+            raise TagHistorianConnectionError(str(err)) from err
+
+        return ImportSession(
+            import_id=str(payload["importId"]),
+            started_at=_parse_time(payload.get("startedAt")) or datetime.now(UTC),
+            window_start=_parse_time(payload.get("windowStart")) or datetime.now(UTC),
+            max_readings_per_batch=int(payload.get("maxReadingsPerBatch", 0)),
+            allowance=ImportAllowance.from_json(
+                payload.get("allowance") or {}, payload.get("windowStart")
+            ),
+        )
+
+    async def async_import_batch(
+        self, import_id: str, readings: list[dict[str, Any]]
+    ) -> ImportBatchResult:
+        """Send one batch of history and classify the answer.
+
+        Raises :class:`TagHistorianAuthError` on a 401 and
+        :class:`TagHistorianConnectionError` when nothing usable came back;
+        everything the endpoint says on purpose is an :class:`ImportOutcome`.
+        """
+        try:
+            async with self._session.post(
+                self._base.join(URL(f"/api/import/{import_id}/readings")),
+                headers=self._headers(),
+                json={"readings": readings},
+                timeout=aiohttp.ClientTimeout(total=IMPORT_TIMEOUT_SECONDS),
+            ) as response:
+                if response.status == 401:
+                    raise TagHistorianAuthError("import")
+                body = await self._read_error_body(response)
+                return _classify_import(response, body)
+        except (TimeoutError, aiohttp.ClientError) as err:
+            raise TagHistorianConnectionError(str(err)) from err
 
     async def async_write(self, body: str) -> WriteResult:
         """POST line protocol and classify the answer.
@@ -421,3 +591,82 @@ def _parse_dropped_points(message: str) -> int | None:
         )
         return None
     return int(match.group(1))
+
+
+def _parse_time(value: Any) -> datetime | None:
+    """An ISO 8601 instant from the API, as an aware UTC datetime, or ``None``."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _classify_import_refusal(status: int, body: dict[str, Any]) -> ImportOutcome:
+    """402 is two different things on the import path; the body says which.
+
+    ``ImportController`` answers "Import allowance used up" when the account
+    has imported everything its plan allows; ``QuotaEnforcementMiddleware``
+    answers "Storage quota exceeded" for the storage cap, which holds for
+    imports as it does for live data. 403 is the account itself.
+    """
+    if status == 403:
+        return ImportOutcome.FORBIDDEN
+    if "storage" in str(body.get("error") or "").casefold():
+        return ImportOutcome.STORAGE_FULL
+    return ImportOutcome.ALLOWANCE_SPENT
+
+
+def _classify_import(response: aiohttp.ClientResponse, body: dict[str, Any]) -> ImportBatchResult:
+    status = response.status
+    message = str(body.get("message") or body.get("error") or "")
+
+    if status == 200:
+        refused = body.get("refused") or {}
+        allowance = body.get("allowance") or {}
+        importable = {
+            str(tag): parsed
+            for tag, value in (body.get("importableBefore") or {}).items()
+            if (parsed := _parse_time(value)) is not None
+        }
+        return ImportBatchResult(
+            ImportOutcome.TAKEN,
+            stored=int(body.get("stored", 0)),
+            compressed=int(body.get("compressed", 0)),
+            duplicates=int(body.get("duplicates", 0)),
+            outside_window=int(body.get("outsideWindow", 0)),
+            refused_not_history=int(refused.get("notHistory", 0)),
+            refused_tag_limit=int(refused.get("tagLimit", 0)),
+            refused_allowance=int(refused.get("allowance", 0)),
+            refused_storage=int(refused.get("storage", 0)),
+            refused_tags=[str(t) for t in body.get("refusedTags") or []],
+            importable_before=importable,
+            allowance_remaining=(
+                int(allowance["remaining"]) if "remaining" in allowance else None
+            ),
+            message=message,
+        )
+
+    if status in (402, 403):
+        return ImportBatchResult(_classify_import_refusal(status, body), message=message)
+
+    if status == 404:
+        return ImportBatchResult(ImportOutcome.UNKNOWN_IMPORT, message=message)
+
+    if status in (429, 503):
+        return ImportBatchResult(
+            ImportOutcome.RETRY, retry_after=_parse_retry_after(response), message=message
+        )
+
+    if status in (400, 413):
+        LOGGER.error("Tag Historian refused an import batch with %s: %s", status, message)
+        return ImportBatchResult(ImportOutcome.REJECTED, message=message)
+
+    # A 500 and anything else unexpected: nothing is known to be stored, and
+    # the endpoint skips what it already has, so it is retried like a socket
+    # error rather than ending the import.
+    raise TagHistorianConnectionError(f"import answered {status}")

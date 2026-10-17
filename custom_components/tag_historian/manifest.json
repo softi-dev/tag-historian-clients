@@ -1,6 +1,7 @@
 {
   "domain": "tag_historian",
   "name": "Tag Historian",
+  "after_dependencies": ["recorder"],
   "codeowners": ["@softi-dev"],
   "config_flow": true,
   "documentation": "https://taghistorian.com/docs/home-assistant-hacs",
@@ -8,5 +9,5 @@
   "iot_class": "cloud_push",
   "issue_tracker": "https://github.com/softi-dev/tag-historian-clients/issues",
   "requirements": [],
-  "version": "2026.10.0"
+  "version": "2026.11.0"
 }

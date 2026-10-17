@@ -29,12 +29,14 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 import voluptuous as vol
-from homeassistant.config_entries import SOURCE_REAUTH, SOURCE_USER
+from homeassistant.config_entries import SOURCE_REAUTH, SOURCE_USER, ConfigEntryState
 from homeassistant.core import HomeAssistant
+from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -387,6 +389,7 @@ def render_step(section: str, result) -> str:
     strings = TRANSLATIONS[section]["step"][result["step_id"]]
     placeholders = dict(result.get("description_placeholders") or {})
     parts = [strings["title"], strings.get("description", "")]
+    parts += list(strings.get("menu_options", {}).values())
     parts += list(strings.get("data", {}).values())
     parts += list(strings.get("data_description", {}).values())
     return "\n".join(part.format(**placeholders) for part in parts)
@@ -408,6 +411,15 @@ def audit_step(section: str, result) -> str:
     assert supplied - FRAMEWORK_PLACEHOLDERS <= wanted, (
         f"{where} is handed {supplied - wanted} that nothing prints"
     )
+
+    if result["type"] is FlowResultType.MENU:
+        # A menu draws its options, not fields: every option it offers has
+        # words, and no words are left over for an option it does not offer.
+        assert set(strings.get("menu_options", {})) == set(result["menu_options"]), (
+            f"{where} names {set(strings.get('menu_options', {})) ^ set(result['menu_options'])} "
+            "that its menu does not offer"
+        )
+        return render_step(section, result)
 
     fields = fields_on(result)
     assert set(strings.get("data", {})) == fields, (
@@ -462,7 +474,8 @@ async def _walk_config_flow(hass: HomeAssistant, client) -> dict[str, dict]:
 
 
 async def _walk_options_flow(hass: HomeAssistant, client) -> dict[str, dict]:
-    """The same two screens again, from Configure rather than Add."""
+    """The same two screens again, from Configure rather than Add - and the
+    menu in front of them, and the history import beside them."""
     entry = MockConfigEntry(
         domain=DOMAIN,
         data=CREDENTIALS,
@@ -479,6 +492,11 @@ async def _walk_options_flow(hass: HomeAssistant, client) -> dict[str, dict]:
         flow_id = result["flow_id"]
 
         result = await hass.config_entries.options.async_configure(
+            flow_id, {"next_step_id": "choose"}
+        )
+        seen[result["step_id"]] = result
+
+        result = await hass.config_entries.options.async_configure(
             flow_id,
             {
                 CONF_ENTITIES: ["sensor.house_power", "sensor.outdoor_temperature"],
@@ -487,7 +505,26 @@ async def _walk_options_flow(hass: HomeAssistant, client) -> dict[str, dict]:
         )
         seen[result["step_id"]] = result
         hass.config_entries.options.async_abort(flow_id)
+
+    seen["import_history"] = await _open_import_screen(hass, entry, client)
     return seen
+
+
+async def _open_import_screen(hass: HomeAssistant, entry, client) -> dict:
+    """The import form, as a loaded entry with a recorder draws it."""
+    entry.mock_state(hass, ConfigEntryState.LOADED)
+    entry.runtime_data = SimpleNamespace(importer=SimpleNamespace(running=False))
+    with patch(FLOW_CLIENT_PATH, return_value=client), patch(
+        "custom_components.tag_historian.config_flow.history.recorder_ready",
+        return_value=True,
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {"next_step_id": "import_history"}
+        )
+        hass.config_entries.options.async_abort(result["flow_id"])
+    entry.mock_state(hass, ConfigEntryState.NOT_LOADED)
+    return result
 
 
 async def test_every_config_flow_screen_renders_and_matches_its_own_form(
