@@ -41,7 +41,7 @@ so the ranking can be tested without a running Home Assistant.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 
 from .line_protocol import tag_name_for_entity
@@ -418,6 +418,7 @@ def trim_to_new_tag_budget(
     candidates: list[Candidate],
     existing_tags: set[str],
     available: int,
+    tag_name_for: Callable[[str], str] = tag_name_for_entity,
 ) -> list[str]:
     """Cut a selection until the NEW tags it needs fit in ``available``.
 
@@ -433,6 +434,10 @@ def trim_to_new_tag_budget(
     So the loop is written against the number that actually decides the
     outcome, and it removes the lowest-ranked entity that NEEDS a new tag -
     never one that was costing nothing.
+
+    ``tag_name_for`` is the tag an entity's readings land in: its own name,
+    or - for an entity renamed in Home Assistant whose tag has not been
+    renamed yet - its old one (renames.py), which exists and costs nothing.
     """
     order = {c.entity_id: (c.rank, c.entity_id) for c in candidates}
     # Anything the user picked that ranking does not recognise sorts last,
@@ -445,13 +450,13 @@ def trim_to_new_tag_budget(
         return sum(
             1
             for entity_id in entity_ids
-            if tag_name_for_entity(entity_id) not in existing_tags
+            if tag_name_for(entity_id) not in existing_tags
         )
 
     budget = max(0, available)
     while new_tags(ranked) > budget:
         for index in range(len(ranked) - 1, -1, -1):
-            if tag_name_for_entity(ranked[index]) not in existing_tags:
+            if tag_name_for(ranked[index]) not in existing_tags:
                 del ranked[index]
                 break
         else:  # pragma: no cover - unreachable while new_tags() > budget >= 0

@@ -202,12 +202,17 @@ class StateForwarder:
         min_interval: int,
         stats: ForwarderStats | None = None,
         store: Store[dict[str, Any]] | None = None,
+        send_as: dict[str, str] | None = None,
     ) -> None:
         self.hass = hass
         self.entry = entry
         self.stats = stats if stats is not None else ForwarderStats()
         self._client = client
         self._entity_ids = list(entity_ids)
+        # An entity renamed in Home Assistant whose tag has not been renamed
+        # yet is sent under its OLD id, so its readings go on into the history
+        # they belong to instead of starting a second tag (renames.py).
+        self._send_as = dict(send_as or {})
         self._min_interval = min_interval
         # Where the buffer goes when the forwarder stops, and where the
         # acknowledged watermark is kept across a restart. None only in tests
@@ -660,7 +665,7 @@ class StateForwarder:
         # not State.name: that falls back to a name made from the entity id,
         # and an entity without a friendly name should not be given one.
         line = encode_point(
-            entity_id,
+            self._send_as.get(entity_id, entity_id),
             value,
             stamp,
             new_state.attributes.get("unit_of_measurement"),
@@ -933,12 +938,14 @@ class StateForwarder:
                 if self._closed:
                     return
 
+                # Into the tag a live reading of it goes to: a renamed entity's
+                # gap is part of the history its live readings carry on.
                 self._backfill.append(
                     Queued(
                         entity_id,
                         stamp,
                         encode_point(
-                            entity_id,
+                            self._send_as.get(entity_id, entity_id),
                             value,
                             state.last_updated,
                             state.attributes.get("unit_of_measurement"),

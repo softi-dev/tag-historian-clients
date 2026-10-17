@@ -15,7 +15,12 @@ from unittest.mock import AsyncMock
 import pytest
 import pytest_socket
 
-from custom_components.tag_historian.api import ImportAllowance, QuotaSnapshot
+from custom_components.tag_historian.api import (
+    ImportAllowance,
+    LineageOutcome,
+    LineageResult,
+    QuotaSnapshot,
+)
 
 pytest_plugins = "pytest_homeassistant_custom_component"
 
@@ -94,4 +99,7 @@ def make_client(
     client.async_get_quota.return_value = STUB_QUOTA if quota is None else quota
     client.async_get_tag_names.return_value = set() if tags is None else tags
     client.async_get_import_allowance.return_value = STUB_ALLOWANCE
+    client.async_get_tag_index.return_value = {name: name for name in tags or ()}
+    client.async_rename_tag.return_value = LineageResult(LineageOutcome.DONE)
+    client.async_merge_tags.return_value = LineageResult(LineageOutcome.DONE)
     return client

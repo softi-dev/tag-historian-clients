@@ -223,6 +223,30 @@ class TagHistorianImportRefused(TagHistorianError):
         self.message = message
 
 
+class LineageOutcome(Enum):
+    """What Tag Historian said to a rename or a merge of a tag.
+
+    In the vocabulary of what this integration does next, like
+    :class:`WriteOutcome`. The API's own answers are richer (TagsController's
+    ``code``); only the ones that change what happens here get a value of
+    their own.
+    """
+
+    DONE = "done"  # 200 - done now, or by an earlier request
+    TARGET_EXISTS = "target_exists"  # 409 - the new name is a tag already: merge
+    NOT_FOUND = "not_found"  # 404 - no tag under the old name: nothing to carry
+    REFUSED = "refused"  # anything else refused - the message says why
+    UNAVAILABLE = "unavailable"  # 503, or no answer - ask again later
+
+
+@dataclass
+class LineageResult:
+    """The classified answer to a rename or a merge."""
+
+    outcome: LineageOutcome
+    message: str = ""
+
+
 @dataclass(frozen=True)
 class QuotaSnapshot:
     """Everything the UI is allowed to say about plans and limits.
@@ -336,20 +360,105 @@ class TagHistorianClient:
         )
 
     async def async_get_tag_names(self) -> set[str]:
-        """Tag names that already exist on the account.
+        """Names that already exist on the account: its tags and their former names.
 
         Lets the selection screens say how many of the chosen entities are
         genuinely NEW tags rather than assuming all of them are - which is the
-        difference between "you need 12 free slots" and "you need 47". The
-        endpoint clamps ``take`` to 1000, comfortably above every tier's tag
-        limit, so one page is always the whole list.
+        difference between "you need 12 free slots" and "you need 47". A
+        former name (a tag renamed or merged away from it) counts as existing:
+        readings sent under it are stored in the tag it belongs to now, so
+        selecting it costs no slot.
+        """
+        return set(await self.async_get_tag_index())
+
+    async def async_get_tag_index(self) -> dict[str, str]:
+        """Every name on the account to the tag it belongs to now.
+
+        A tag maps to itself; each of its ``formerNames`` maps to it. The
+        rename handling needs the difference: an entity's old id that is a
+        former name of its new id has been renamed already (in Explorer, or by
+        a request whose answer never arrived), and one that is no name at all
+        never stored anything. The endpoint clamps ``take`` to 1000,
+        comfortably above every tier's tag limit, so one page is always the
+        whole list.
         """
         payload = await self._get_json("/api/tags", take=1000)
-        return {
-            tag["tagName"]
-            for tag in payload.get("tags", [])
-            if isinstance(tag, dict) and tag.get("tagName")
-        }
+        index: dict[str, str] = {}
+        for tag in payload.get("tags", []):
+            if not isinstance(tag, dict) or not tag.get("tagName"):
+                continue
+            name = str(tag["tagName"])
+            index[name] = name
+            for former in tag.get("formerNames") or []:
+                if isinstance(former, str) and former:
+                    index.setdefault(former, name)
+        return index
+
+    async def async_rename_tag(self, old: str, new: str) -> LineageResult:
+        """Give the tag ``old`` the name ``new``, keeping all of its history.
+
+        ``POST /api/tags/rename``. Nothing is copied on the server: the history
+        stays where it is stored and reads under the new name, and readings
+        still sent under the old one are stored in the renamed tag. A name
+        another tag has already is refused with ``target_exists`` - that is a
+        merge (:meth:`async_merge_tags`). Asking again for a rename that is
+        done answers 200, so a retry is always safe.
+        """
+        return await self._post_lineage("/api/tags/rename", {"from": old, "to": new})
+
+    async def async_merge_tags(self, source: str, target: str) -> LineageResult:
+        """Make ``source``'s history part of ``target``'s (``POST /api/tags/merge``)."""
+        return await self._post_lineage(
+            "/api/tags/merge", {"source": source, "target": target}
+        )
+
+    async def _post_lineage(self, path: str, body: dict[str, str]) -> LineageResult:
+        try:
+            async with self._session.post(
+                self._base.join(URL(path)),
+                headers=self._headers(),
+                json=body,
+                timeout=aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SECONDS),
+            ) as response:
+                if response.status == 200:
+                    return LineageResult(LineageOutcome.DONE)
+                if response.status == 401:
+                    raise TagHistorianAuthError(path)
+
+                error = await self._read_error_body(response)
+                code = str(error.get("code") or "")
+                # ``details`` is the sentence written for a person - what
+                # happened and what to do about it. ``error`` is its title.
+                message = str(
+                    error.get("details") or error.get("error") or f"{path} answered {response.status}"
+                )
+
+                if response.status == 409 and code == "target_exists":
+                    return LineageResult(LineageOutcome.TARGET_EXISTS, message)
+                if response.status == 404 and code == "not_found":
+                    return LineageResult(LineageOutcome.NOT_FOUND, message)
+                if response.status == 429 or response.status >= 500:
+                    # Rate limited, the deploy handover (503), or a gateway
+                    # that lost the backend for a moment (502/504): all of
+                    # them pass. A REFUSED here used to become a permanent
+                    # card quoting "answered 502" for a rename that would
+                    # have gone through a minute later.
+                    return LineageResult(LineageOutcome.UNAVAILABLE, message)
+                if response.status == 404 and not code:
+                    # No such route: a Tag Historian older than this
+                    # integration. The bare "answered 404" told nobody that.
+                    message = (
+                        "This Tag Historian cannot rename or merge tags yet. Nothing was "
+                        "changed; the readings go on into the old tag."
+                    )
+                elif response.status == 403 and not error:
+                    message = (
+                        "The API key this integration uses may not rename or merge tags. "
+                        "A key with the Write scope can."
+                    )
+                return LineageResult(LineageOutcome.REFUSED, message)
+        except (TimeoutError, aiohttp.ClientError) as err:
+            return LineageResult(LineageOutcome.UNAVAILABLE, str(err))
 
     async def async_get_import_allowance(self) -> ImportAllowance:
         """How much history this account may still import, and where the window starts."""

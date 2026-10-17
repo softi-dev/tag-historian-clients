@@ -13,6 +13,10 @@ Three loops share one HTTP client:
               entities, sent to POST /api/import (see importer.py), started
               from the options dialog or the tag_historian.import_history
               action
+
+and one listener, for the whole integration rather than any one entry: the
+entity registry, so an entity renamed in Home Assistant is followed rather than
+silently dropped (see renames.py).
 """
 
 from __future__ import annotations
@@ -54,10 +58,19 @@ from .const import (
 from .coordinator import QuotaCoordinator
 from .forwarder import ForwarderStats, StateForwarder
 from .importer import HistoryImporter, ImportAlreadyRunning
+from .renames import (
+    async_clear_renamed_issues,
+    async_resume,
+    async_setup_rename_tracking,
+    send_as,
+)
 from .repairs import async_clear_write_issues
 
 PLATFORMS: list[Platform] = [Platform.SENSOR]
 
+# Set up from the UI only; async_setup below exists for the import action and
+# the rename listener, and hassfest wants an integration that has one to say
+# what YAML it takes.
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 IMPORT_HISTORY_SCHEMA = vol.Schema(
@@ -95,10 +108,16 @@ def async_get_stats(hass: HomeAssistant, entry_id: str) -> ForwarderStats:
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
-    """Register the integration's actions, once, whatever entries there are.
+    """Once per Home Assistant run: the integration's actions, and the rename listener.
 
-    In async_setup rather than per entry, so the action exists - and can say
-    what is wrong - even while no entry is loaded.
+    Both here rather than per entry, because an entry is not always loaded
+    when they are needed. The action exists - and can say what is wrong -
+    while no entry is loaded. And a rename can happen at any time: each
+    handled rename changes the options and so reloads the entry, and an entry
+    waits out a dead API in setup-retry; a listener that came and went with
+    the entry missed every rename made in those windows - the second entity of
+    a device being renamed, typically - and that entity's readings stopped
+    without a word (renames.py).
     """
 
     async def _async_import_history(call: ServiceCall) -> None:
@@ -121,6 +140,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     hass.services.async_register(
         DOMAIN, SERVICE_IMPORT_HISTORY, _async_import_history, schema=IMPORT_HISTORY_SCHEMA
     )
+    async_setup_rename_tracking(hass)
     return True
 
 
@@ -185,6 +205,20 @@ async def async_setup_entry(
     hass: HomeAssistant, entry: TagHistorianConfigEntry
 ) -> bool:
     """Set up one Tag Historian account."""
+    # Reload on an options change so the new selection is what gets subscribed
+    # to. OptionsFlowWithReload would replace this listener, but it only exists
+    # from 2025.8 and hacs.json claims a lower floor - see the README.
+    #
+    # FIRST, before anything is awaited. A rename arriving while this setup is
+    # under way changes the options (renames.py); registered at the end, the
+    # listener missed a change made after the forwarder below was built, which
+    # then ran on to the next reload subscribed to an id that no longer exists.
+    # Registered here, the change queues a reload, which waits for this setup
+    # to finish. A setup that fails runs the unload callbacks, this one too.
+    # The saved buffer and the saved import are read further down, so this
+    # setup awaits more than it did when that was found, not less.
+    entry.async_on_unload(entry.add_update_listener(_async_options_updated))
+
     client = TagHistorianClient(
         async_get_clientsession(hass), entry.data[CONF_HOST], entry.data[CONF_API_KEY]
     )
@@ -204,7 +238,8 @@ async def async_setup_entry(
         list(entry.options.get(CONF_ENTITIES, [])),
         min_interval,
         async_get_stats(hass, entry.entry_id),
-        _store(hass, STORAGE_KEY_FORWARDER, entry),
+        store=_store(hass, STORAGE_KEY_FORWARDER, entry),
+        send_as=send_as(entry.options),
     )
     # What the last run saved - its undelivered readings and how far Tag
     # Historian had acknowledged each entity - goes back in before anything
@@ -236,10 +271,11 @@ async def async_setup_entry(
     # An import that was running when Home Assistant stopped carries on.
     await importer.async_load()
 
-    # Reload on an options change so the new selection is what gets subscribed
-    # to. OptionsFlowWithReload would replace this listener, but it only exists
-    # from 2025.8 and hacs.json claims a lower floor - see the README.
-    entry.async_on_unload(entry.add_update_listener(_async_options_updated))
+    # Every rename waiting to be settled - just made, which is what this
+    # reload is for; made while the entry was not loaded; or left from before
+    # a restart or an unreachable API - is taken up: a card, or the request to
+    # rename the tag in Tag Historian (renames.py).
+    async_resume(hass, entry)
 
     return True
 
@@ -299,6 +335,7 @@ async def async_remove_entry(
     set up here; a re-added account must not send them.
     """
     async_clear_write_issues(hass, entry)
+    async_clear_renamed_issues(hass, entry)
     # The counters survive a reload on purpose; they must not survive the
     # account being removed and re-added, which is a different account's worth
     # of history as far as anybody reading them is concerned.
