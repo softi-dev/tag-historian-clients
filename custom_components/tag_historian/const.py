@@ -34,6 +34,14 @@ CONF_FOLLOW_RENAMES: Final = "follow_renames"
 # belong to, at no extra tag, until the rename is confirmed (renames.py).
 CONF_SEND_AS: Final = "send_as"
 
+# {entity_id: ISO timestamp} - a renamed entity whose readings went into a tag
+# of its own from that moment, its history left in the old tag: "Start a new
+# tag" or "Keep them apart" on the rename card (renames.py). The history import
+# leaves such an entity alone (importer.py). Kept when the selection changes:
+# deselecting the entity and selecting it again does not make the old tag's
+# history its own.
+CONF_OWN_TAG_SINCE: Final = "own_tag_since"
+
 DEFAULT_HOST: Final = "api.taghistorian.com"
 
 # The three write-path limits below are PROTOCOL facts, not plan facts, so they

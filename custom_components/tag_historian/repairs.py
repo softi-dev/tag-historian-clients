@@ -363,7 +363,10 @@ class EntityRenamedRepairFlow(RepairsFlow):
     async def async_step_new_tag(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        async_stop_carrying(self.hass, self._entry, self._entity_id)
+        # own_tag: the history stays under the old name, as the card says -
+        # including against the history import, which would otherwise read it
+        # from the new id Home Assistant moved it to (renames.own_tag_since).
+        async_stop_carrying(self.hass, self._entry, self._entity_id, own_tag=True)
         return self.async_create_entry(data={})
 
     async def async_step_keep_apart(
@@ -372,8 +375,9 @@ class EntityRenamedRepairFlow(RepairsFlow):
         # Until now the readings went on into the old tag, as for a rename
         # (renames.py: one rule for everything undecided, so a merge that
         # could not be asked for can be asked again). Kept apart, they go
-        # under the new name, into the tag it has, from now on.
-        async_stop_carrying(self.hass, self._entry, self._entity_id)
+        # under the new name, into the tag it has, from now on - and the
+        # history import leaves the entity alone, as for a new tag.
+        async_stop_carrying(self.hass, self._entry, self._entity_id, own_tag=True)
         return self.async_create_entry(data={})
 
 

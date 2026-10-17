@@ -26,6 +26,20 @@ old id - and the rename's own reload is the moment that state is read back:
   the new meter's read-back and import were the old meter's, and the old
   meter's saved readings and import progress were taken for the new one's.
 
+Reviewed together, three more:
+
+* "Start a new tag" on the rename card, or a replaced meter kept apart, left
+  the history in the old tag, as the card says - and the import then read it
+  from the new id Home Assistant had moved it to, and sent all of it into the
+  new tag as well;
+* a rename landing while the import read the entity, or while the entry was
+  being set up, was left to the reload it causes - but the reads under the
+  old id went on until then, came up empty, and the entity was saved as done,
+  which that reload carried over to the new id;
+* once Tag Historian has the new name the import goes under it, and how far
+  it goes is Tag Historian's line for the renamed tag: one that has to take
+  in the tag's former names, which only the API can (importer.py).
+
 The recorder here moves an entity's states to its new id on a rename, as Home
 Assistant's does (``recorder/entity_registry.py``, the ``states_meta`` row is
 renamed) - unless the new id has states of its own, which it then leaves
@@ -49,6 +63,7 @@ import pytest
 import yaml
 from homeassistant.core import Event, HomeAssistant, State, callback
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
@@ -73,18 +88,28 @@ from custom_components.tag_historian.const import (
     CONF_FOLLOW_RENAMES,
     CONF_HOST,
     CONF_MIN_INTERVAL,
+    CONF_OWN_TAG_SINCE,
     CONF_SEND_AS,
     DOMAIN,
     SERVICE_IMPORT_HISTORY,
+    STORAGE_KEY_IMPORT,
     STORAGE_VERSION,
 )
 from custom_components.tag_historian.forwarder import (
     CONNECTION_RETRY_SECONDS,
     StateForwarder,
 )
-from custom_components.tag_historian.importer import STATUS_FINISHED
+from custom_components.tag_historian.importer import (
+    STATUS_FINISHED,
+    STATUS_RUNNING,
+    HistoryImporter,
+)
 from custom_components.tag_historian.line_protocol import encode_point
-from custom_components.tag_historian.repairs import EntityRenamedRepairFlow
+from custom_components.tag_historian.renames import renamed_issue_id
+from custom_components.tag_historian.repairs import (
+    EntityRenamedRepairFlow,
+    async_create_fix_flow,
+)
 
 from .conftest import make_client
 
@@ -762,6 +787,263 @@ async def test_both_meters_held_readings_go_to_their_own_meters_tags(
 
 
 # --------------------------------------------------------------------------
+# What the card decided, and a rename while the import reads
+# --------------------------------------------------------------------------
+
+
+async def _import_everything(hass: HomeAssistant, client) -> list[dict[str, Any]]:
+    """The action with its defaults - every selected entity - run to the end."""
+    imported: list[dict[str, Any]] = []
+
+    async def import_batch(import_id: str, readings: list[dict[str, Any]]):
+        imported.extend(readings)
+        return taken(readings)
+
+    client.async_start_import.return_value = session(dt_util.utcnow())
+    client.async_import_batch.side_effect = import_batch
+    await hass.services.async_call(DOMAIN, SERVICE_IMPORT_HISTORY, {}, blocking=True)
+    await settle(hass)
+    return imported
+
+
+@pytest.mark.parametrize(
+    ("tags", "choice"),
+    [
+        ({OLD: OLD}, "new_tag"),
+        # A replaced meter whose tag outlived its recorded history, so Home
+        # Assistant moved the new meter's history to the id: the same thing.
+        ({OLD: OLD, NEW: NEW}, "keep_apart"),
+    ],
+)
+async def test_a_new_tag_chosen_on_the_card_leaves_the_history_out_of_the_import(
+    hass: HomeAssistant, client, loaded, recorder, freezer, tags, choice
+) -> None:
+    """The card: start a new tag "and leave the history where it is, under {old_tag}".
+
+    Home Assistant had moved that history to the new id. Before, the import
+    read it there and sent all of it into the new tag - with no live reading
+    of its own yet, the new tag took every one - so the history was in both
+    tags, and the import allowance paid for the copy.
+    """
+    client.async_get_tag_index.return_value = tags
+    freezer.move_to(T0)
+    old = register(hass, "energy_2")
+    for days in (5, 4, 3, 2, 1):
+        recorder.record(old, str(days), T0 - timedelta(days=days))
+    entry = await loaded(make_entry(hass, [old]))
+    await rename(hass, old, NEW)
+    assert recorder.states[NEW], "the history went with the entity"
+
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, renamed_issue_id(entry, NEW))
+    flow = await async_create_fix_flow(hass, issue.issue_id, issue.data)
+    flow.hass = hass
+    await getattr(flow, f"async_step_{choice}")()
+    await settle(hass)
+    assert entry.options[CONF_SEND_AS] == {}
+    assert NEW in entry.options[CONF_OWN_TAG_SINCE]
+
+    assert await _import_everything(hass, client) == [], "the old tag's history stays the old tag's"
+    progress = entry.runtime_data.importer.progress
+    assert progress.status == STATUS_FINISHED
+    assert progress.done == [NEW]
+
+
+async def test_a_rename_with_nothing_under_the_old_name_still_imports_the_history(
+    hass: HomeAssistant, client, loaded, recorder, freezer
+) -> None:
+    """No tag holds the history, so the new one is where it goes - no card, no mark."""
+    client.async_get_tag_index.return_value = {}
+    freezer.move_to(T0)
+    old = register(hass, "energy_2")
+    for days in (3, 2, 1):
+        recorder.record(old, str(days), T0 - timedelta(days=days))
+    entry = await loaded(make_entry(hass, [old]))
+    await rename(hass, old, NEW)
+    assert entry.options[CONF_SEND_AS] == {}
+    assert CONF_OWN_TAG_SINCE not in entry.options
+
+    imported = await _import_everything(hass, client)
+    assert [r["value"] for r in imported] == [3.0, 2.0, 1.0]
+    assert {r["tagName"] for r in imported} == {NEW}
+
+
+async def test_a_tag_of_its_own_is_still_its_own_after_the_next_rename(
+    hass: HomeAssistant, client, loaded, recorder, freezer
+) -> None:
+    """The choice is about the history, not the id: renamed again, the import still leaves it."""
+    freezer.move_to(T0)
+    old = register(hass, "energy_2")
+    for days in (3, 2, 1):
+        recorder.record(old, str(days), T0 - timedelta(days=days))
+    entry = await loaded(make_entry(hass, [old]))
+    await rename(hass, old, NEW)
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, renamed_issue_id(entry, NEW))
+    flow = await async_create_fix_flow(hass, issue.issue_id, issue.data)
+    flow.hass = hass
+    await flow.async_step_new_tag()
+    await settle(hass)
+
+    await rename(hass, NEW, "sensor.energy_3")
+
+    assert set(entry.options[CONF_OWN_TAG_SINCE]) == {"sensor.energy_3"}
+    assert await _import_everything(hass, client) == []
+
+
+@pytest.fixture
+def import_store(hass: HomeAssistant, entry) -> Store:
+    return Store(hass, STORAGE_VERSION, STORAGE_KEY_IMPORT.format(entry_id=entry.entry_id))
+
+
+def _renamed_in_home_assistant(hass: HomeAssistant, entry) -> None:
+    """The rename, as far as the importer sees it: the registry, the recorder - which
+    moves the history on the registry's event - and the options, which
+    renames.async_follow_rename changes before anything else runs, and which
+    queue the reload that will carry the import on."""
+    er.async_get(hass).async_update_entity(OLD, new_entity_id=NEW)
+    hass.config_entries.async_update_entry(
+        entry, options={**entry.options, CONF_ENTITIES: [NEW], CONF_SEND_AS: {NEW: OLD}}
+    )
+
+
+async def _the_reload(hass: HomeAssistant, entry, client, import_store) -> HistoryImporter:
+    """The next setup's importer, from the options the rename left: it carries the import on."""
+    importer = HistoryImporter(
+        hass, entry, client, import_store, 0, None, send_as={NEW: OLD}, selected=[NEW]
+    )
+    await importer.async_load()
+    assert importer._task is not None, "still running, so the reload carries it on"
+    await importer._task
+    return importer
+
+
+async def test_a_rename_while_the_import_reads_the_entity_does_not_make_it_done(
+    hass: HomeAssistant, entry, recorder, freezer, import_store
+) -> None:
+    """Renamed between two batches, before the rename's reload has stopped the import.
+
+    The reads under the old id came up empty from then on - Home Assistant
+    had moved the history - and the entity was saved as done. The reload
+    carried "done" over to the new id: the rest of the history was never
+    imported, and the import said it had finished.
+    """
+    freezer.move_to(T0)
+    register(hass, "energy_2")
+    for days in (5, 4, 3, 2, 1):
+        recorder.record(OLD, str(days), T0 - timedelta(days=days))
+    hass.config_entries.async_update_entry(entry, options={CONF_ENTITIES: [OLD]})
+
+    batches: list[list[dict[str, Any]]] = []
+
+    async def import_batch(import_id: str, readings: list[dict[str, Any]]):
+        batches.append(readings)
+        if len(batches) == 1:
+            _renamed_in_home_assistant(hass, entry)
+        return taken(readings)
+
+    client = make_client()
+    client.async_start_import.return_value = session(T0)
+    client.async_import_batch.side_effect = import_batch
+    importer = HistoryImporter(
+        hass, entry, client, import_store, 0, None, send_as={}, selected=[OLD]
+    )
+    await importer.async_start([OLD], None)
+    await importer._task
+
+    assert importer.progress.status == STATUS_RUNNING
+    assert importer.progress.done == []
+
+    resumed = await _the_reload(hass, entry, client, import_store)
+    assert resumed.progress.status == STATUS_FINISHED
+    assert resumed.progress.done == [NEW]
+    assert [r["value"] for batch in batches for r in batch] == [5.0, 4.0, 3.0, 2.0, 1.0]
+    assert {r["tagName"] for batch in batches for r in batch} == {OLD}
+
+
+async def test_a_rename_while_the_entry_is_set_up_does_not_make_a_running_import_done(
+    hass: HomeAssistant, entry, recorder, freezer, import_store
+) -> None:
+    """The rename lands after the setup read its options and before the import was loaded.
+
+    The import is carried on under the old id - renamed_since leaves a rename
+    the options it was built from do not know to that rename's own reload -
+    and the recorder holds nothing there any more. Before, that was done.
+    """
+    freezer.move_to(T0)
+    registry_id = er.async_get(hass).async_get(register(hass, "energy_2")).id
+    for days in (5, 4, 3, 2, 1):
+        recorder.record(OLD, str(days), T0 - timedelta(days=days))
+    hass.config_entries.async_update_entry(entry, options={CONF_ENTITIES: [OLD]})
+    await import_store.async_save(
+        {
+            "status": STATUS_RUNNING,
+            "import_id": "imp-1",
+            "started_at": T0.isoformat(),
+            "window_start": (T0 - timedelta(days=14)).isoformat(),
+            "since": (T0 - timedelta(days=14)).isoformat(),
+            "entities": [OLD],
+            "cursor": {OLD: (T0 - timedelta(days=5)).timestamp()},
+            "registry_ids": {OLD: registry_id},
+        }
+    )
+
+    client = make_client()
+    client.async_import_batch.side_effect = lambda import_id, readings: taken(readings)
+    setting_up = HistoryImporter(
+        hass, entry, client, import_store, 0, None, send_as={}, selected=[OLD]
+    )
+    _renamed_in_home_assistant(hass, entry)
+    await setting_up.async_load()
+    await setting_up._task
+    assert setting_up.progress.done == []
+    assert setting_up.progress.status == STATUS_RUNNING
+
+    resumed = await _the_reload(hass, entry, client, import_store)
+    assert resumed.progress.done == [NEW]
+    sent = [r for call in client.async_import_batch.await_args_list for r in call.args[1]]
+    assert [r["value"] for r in sent] == [4.0, 3.0, 2.0, 1.0], "the rest of it, after the cursor"
+
+
+async def test_once_the_tag_has_the_new_name_the_import_stops_at_tag_historians_line_for_it(
+    hass: HomeAssistant, client, loaded, recorder, freezer
+) -> None:
+    """Renamed, the tag renamed with it (follow_renames), imported after.
+
+    The import goes under the new name, and only Tag Historian knows where
+    the renamed tag's live data began: under its old name, before the
+    rename. This holds the client to stopping wherever the answer for the
+    name it sent says - which is where the API has to take in the tag's
+    former names, or the history the old name holds already is taken again.
+    """
+    freezer.move_to(T0)
+    old = register(hass, "energy_2")
+    for days in (5, 4, 3, 2, 1):
+        recorder.record(old, str(days), T0 - timedelta(days=days))
+    entry = await loaded(make_entry(hass, [old], follow=True))
+    await rename(hass, old, NEW)
+    client.async_rename_tag.assert_awaited_once_with(OLD, NEW)
+    assert entry.options[CONF_SEND_AS] == {}
+
+    went_live_under_the_old_name = T0 - timedelta(days=3, hours=12)
+    imported: list[dict[str, Any]] = []
+
+    async def import_batch(import_id: str, readings: list[dict[str, Any]]):
+        imported.extend(readings)
+        return ImportBatchResult(
+            ImportOutcome.TAKEN,
+            stored=len(readings),
+            importable_before={NEW: went_live_under_the_old_name},
+        )
+
+    client.async_start_import.return_value = session(dt_util.utcnow())
+    client.async_import_batch.side_effect = import_batch
+    await hass.services.async_call(DOMAIN, SERVICE_IMPORT_HISTORY, {}, blocking=True)
+    await settle(hass)
+
+    assert [r["value"] for r in imported] == [5.0, 4.0]
+    assert {r["tagName"] for r in imported} == {NEW}
+
+
+# --------------------------------------------------------------------------
 # Both features' strings, in the one en.json the merge put together
 # --------------------------------------------------------------------------
 
@@ -803,3 +1085,8 @@ def test_the_import_and_the_rename_strings_are_where_the_code_looks() -> None:
     for step, options in re.findall(r'step_id="(\w+)",\s*menu_options=\[([^\]]*)\]', source):
         assert set(re.findall(r'"(\w+)"', options)) == set(card["step"][step]["menu_options"])
     assert set(re.findall(r'reason="(\w+)"', source)) == set(card["abort"])
+
+    # The import screen names the two answers that leave an entity out, as the card words them.
+    import_screen = strings["options"]["step"]["import_history"]["description"]
+    for step, choice in (("rename_choice", "new_tag"), ("merge_choice", "keep_apart")):
+        assert f'"{card["step"][step]["menu_options"][choice]}"' in import_screen

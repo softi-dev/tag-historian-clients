@@ -67,6 +67,13 @@ the entity registry's own id for each entity beside it
 (:func:`registry_ids`), which a rename does not change, and find each one's
 id as it is now when they read it back (:func:`renamed_since`) - or that it
 is gone, and its id another entity's now (:func:`removed_since`).
+
+One answer on the card outlives the rename it settles. "Start a new tag" and
+"Keep them apart" leave the history in the old tag - and Home Assistant has
+moved that history to the new id, where the history import read it and sent
+all of it again, into the new tag the card had just promised would hold the
+readings from now on. The choice is kept (:func:`own_tag_since`), and the
+import leaves such an entity alone.
 """
 
 from __future__ import annotations
@@ -80,6 +87,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_call_later
+from homeassistant.util import dt as dt_util
 
 from .api import (
     LineageOutcome,
@@ -93,6 +101,7 @@ from .const import (
     CONF_ENTITIES,
     CONF_FOLLOW_RENAMES,
     CONF_HOST,
+    CONF_OWN_TAG_SINCE,
     CONF_SEND_AS,
     DOMAIN,
     ISSUE_ENTITY_RENAMED,
@@ -112,6 +121,19 @@ _LOCKS: Final = f"{DOMAIN}_rename_locks"
 def send_as(options: Mapping[str, Any]) -> dict[str, str]:
     """{entity_id: entity_id whose tag its readings are sent under}, from the options."""
     raw = options.get(CONF_SEND_AS) or {}
+    return {str(k): str(v) for k, v in raw.items()}
+
+
+def own_tag_since(options: Mapping[str, Any]) -> dict[str, str]:
+    """{entity_id: when (ISO)} its readings went into a tag of their own, from the options.
+
+    Set by the card's "Start a new tag" and "Keep them apart"
+    (:func:`async_stop_carrying`). Never by a rename that found no history
+    under the old name - the recorder's history of the entity is in no tag
+    at all then, and the new one is where it belongs - nor by one whose old
+    name is the new one's already, one history under the new name.
+    """
+    raw = options.get(CONF_OWN_TAG_SINCE) or {}
     return {str(k): str(v) for k, v in raw.items()}
 
 
@@ -259,10 +281,14 @@ def async_follow_rename(hass: HomeAssistant, entry: ConfigEntry, old: str, new: 
         "its readings go on into the tag of " + history if new in mapping else "following it",
     )
 
-    hass.config_entries.async_update_entry(
-        entry,
-        options={**entry.options, CONF_ENTITIES: selected, CONF_SEND_AS: mapping},
-    )
+    options = {**entry.options, CONF_ENTITIES: selected, CONF_SEND_AS: mapping}
+    own = own_tag_since(entry.options)
+    if old in own:
+        # A tag of its own, chosen on a card before: what the recorder holds
+        # of it from before that is still the old tag's, under whichever id.
+        own[new] = own.pop(old)
+        options[CONF_OWN_TAG_SINCE] = own
+    hass.config_entries.async_update_entry(entry, options=options)
 
 
 @callback
@@ -437,13 +463,28 @@ async def _carry(
 
 
 @callback
-def async_stop_carrying(hass: HomeAssistant, entry: ConfigEntry, entity_id: str) -> None:
-    """Send ``entity_id`` under its own name from now on, leaving the old tag as it is."""
+def async_stop_carrying(
+    hass: HomeAssistant, entry: ConfigEntry, entity_id: str, *, own_tag: bool = False
+) -> None:
+    """Send ``entity_id`` under its own name from now on, leaving the old tag as it is.
+
+    ``own_tag`` when that is the user's answer on the card, a new tag or a
+    replaced meter kept apart: the old tag keeps the history, and the moment
+    is kept with the options (:func:`own_tag_since`) so that the history
+    import does not bring it into the new tag after all. Not when the old name
+    turned out to hold nothing, or to be the new name's already: then there is
+    no other tag for the history to be in.
+    """
     mapping = send_as(entry.options)
-    if mapping.pop(entity_id, None) is not None:
-        hass.config_entries.async_update_entry(
-            entry, options={**entry.options, CONF_SEND_AS: mapping}
-        )
+    if mapping.pop(entity_id, None) is None:
+        return
+    options = {**entry.options, CONF_SEND_AS: mapping}
+    if own_tag:
+        options[CONF_OWN_TAG_SINCE] = {
+            **own_tag_since(entry.options),
+            entity_id: dt_util.utcnow().isoformat(),
+        }
+    hass.config_entries.async_update_entry(entry, options=options)
 
 
 @callback

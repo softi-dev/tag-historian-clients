@@ -64,6 +64,7 @@ from .renames import (
     async_clear_renamed_issues,
     async_resume,
     async_setup_rename_tracking,
+    own_tag_since,
     send_as,
 )
 from .repairs import async_clear_write_issues
@@ -276,6 +277,7 @@ async def async_setup_entry(
         forwarder.history_boundary,
         send_as=renamed,
         selected=selected,
+        own_tag_since=own_tag_since(options),
     )
 
     entry.runtime_data = TagHistorianData(client, coordinator, forwarder, importer)

@@ -76,7 +76,8 @@ straight after the copy's last catch-up run, the same way, and point only one
 of the two at Tag Historian: both would send every reading twice. Its
 [history import](#import-your-history) then adds to the copy and never
 doubles it: Tag Historian counts the copied readings as live data, and an
-import only takes what is older than an entity's first live reading — so it
+import only takes what is older than a series' first live reading, under any
+name the series has had — an entity renamed after the copy included. It
 brings what the recorder has from before your InfluxDB did, if anything, and
 the history of entities your InfluxDB never had.
 
@@ -237,7 +238,8 @@ own account, none of it is written into this integration:
   so the import starts there.
 - **History only.** Readings older than the moment the import started, older
   than the first reading of the entity Tag Historian received live, and older
-  than the start of the first import of that entity. Everything after that is
+  than the start of the first import of that entity (for a renamed series,
+  under any name it has had). Everything after that is
   your live data, which this integration sends itself — including readings
   still waiting to be sent, so nothing arrives twice. Importing the same
   history again works; feeding an entity fresh readings through imports does
@@ -348,11 +350,16 @@ series its readings go to: readings held over a restart or an outage, the ones
 read back from the recorder afterwards, and a history import that is running,
 which carries on under the new id. An entity renamed before you import its
 history has it imported into that series as well, so the import does not
-start a second series beside it either. The recorder is read where Home
-Assistant keeps the entity's history: under the new id, where it moves the
-history when you rename an entity - or, for a replacement meter given the old
-meter's id, under the id the new meter had before, because Home Assistant
-then leaves both histories where they were. While the merge waits - for your
+start a second series beside it either - and once the series has the new
+name, the import still stops where its live readings began under the old one.
+If you chose a new series on the card instead, or to keep a replaced meter's
+two histories apart, the import leaves that entity out: its history stays in
+the old series, as the card says, and what comes after your choice arrives
+live. The recorder is read where Home Assistant keeps the entity's history:
+under the new id, where it moves the history when you rename an entity - or,
+for a replacement meter given the old meter's id, under the id the new meter
+had before, because Home Assistant then leaves both histories where they
+were. While the merge waits - for your
 answer on its card, or for Tag Historian to be reachable - nothing of the old
 meter's is read as the new one's.
 

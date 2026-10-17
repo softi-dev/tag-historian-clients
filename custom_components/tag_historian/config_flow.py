@@ -82,13 +82,14 @@ from .const import (
     CONF_FOLLOW_RENAMES,
     CONF_HOST,
     CONF_MIN_INTERVAL,
+    CONF_OWN_TAG_SINCE,
     CONF_SEND_AS,
     DEFAULT_HOST,
     DEFAULT_MIN_INTERVAL_SECONDS,
     DOMAIN,
 )
 from .line_protocol import tag_name_for_entity
-from .renames import send_as
+from .renames import own_tag_since, send_as
 from .selection import (
     EntityFacts,
     Proposal,
@@ -596,21 +597,23 @@ class TagHistorianOptionsFlow(SelectionStepsMixin, OptionsFlow):
         return await self.async_step_select()
 
     async def async_step_finish(self) -> ConfigFlowResult:
-        return self.async_create_entry(
-            data={
-                CONF_ENTITIES: self._selected,
-                CONF_MIN_INTERVAL: self._min_interval,
-                CONF_FOLLOW_RENAMES: self._follow_renames,
-                # Kept for the entities still selected: a rename waiting to be
-                # confirmed is not undone by changing something else. An
-                # entity no longer selected sends nothing, under any name.
-                CONF_SEND_AS: {
-                    entity_id: history
-                    for entity_id, history in self._send_as.items()
-                    if entity_id in self._selected
-                },
-            }
-        )
+        options: dict[str, Any] = {
+            CONF_ENTITIES: self._selected,
+            CONF_MIN_INTERVAL: self._min_interval,
+            CONF_FOLLOW_RENAMES: self._follow_renames,
+            # Kept for the entities still selected: a rename waiting to be
+            # confirmed is not undone by changing something else. An
+            # entity no longer selected sends nothing, under any name.
+            CONF_SEND_AS: {
+                entity_id: history
+                for entity_id, history in self._send_as.items()
+                if entity_id in self._selected
+            },
+        }
+        # Kept whatever is selected (const.py), as the entry has it now.
+        if own := own_tag_since(self.config_entry.options):
+            options[CONF_OWN_TAG_SINCE] = own
+        return self.async_create_entry(data=options)
 
     async def async_step_import_history(
         self, user_input: dict[str, Any] | None = None

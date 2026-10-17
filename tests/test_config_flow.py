@@ -26,6 +26,7 @@ from custom_components.tag_historian.const import (
     CONF_FOLLOW_RENAMES,
     CONF_HOST,
     CONF_MIN_INTERVAL,
+    CONF_OWN_TAG_SINCE,
     CONF_SEND_AS,
     DOMAIN,
 )
@@ -431,6 +432,44 @@ async def test_options_flow_changes_the_selection(hass: HomeAssistant, house) ->
         CONF_FOLLOW_RENAMES: False,
         CONF_SEND_AS: {},
     }
+
+
+async def test_options_flow_keeps_a_new_tag_chosen_on_the_rename_card(
+    hass: HomeAssistant, house
+) -> None:
+    """The finish step writes the options anew; what the rename card decided goes with them.
+
+    Left out, the choice was forgotten with the next change of selection, and
+    the history import then read the old tag's history from the entity's new
+    id and sent it into the new tag after all (renames.own_tag_since). Kept
+    for an entity that is no longer selected, too: selecting it again does
+    not make that history its own.
+    """
+    own = {"sensor.energy": "2026-10-17T08:00:00+00:00"}
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=STUB_ACCOUNT["customerId"],
+        data=CREDENTIALS,
+        options={
+            CONF_ENTITIES: ["sensor.house_power"],
+            CONF_MIN_INTERVAL: 10,
+            CONF_OWN_TAG_SINCE: own,
+        },
+    )
+    entry.add_to_hass(hass)
+
+    with patch(CLIENT_PATH, return_value=make_client()), patch(SETUP_PATH, return_value=True):
+        result = await _open_choose(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {CONF_ENTITIES: ["sensor.outdoor_temperature"], CONF_MIN_INTERVAL: 10},
+        )
+        result = await hass.config_entries.options.async_configure(result["flow_id"], {})
+        await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options[CONF_ENTITIES] == ["sensor.outdoor_temperature"]
+    assert entry.options[CONF_OWN_TAG_SINCE] == own
 
 
 # --------------------------------------------------------------------------

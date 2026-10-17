@@ -53,7 +53,25 @@ history of its own, a replaced meter's successor given the old meter's id,
 and then the new meter's history is read under its old id and the old
 meter's is left alone (history.py). An import that is running when the
 entity is renamed is stopped by the rename's reload and carries on under the
-new id (:meth:`HistoryImporter._follow_renames`).
+new id (:meth:`HistoryImporter._follow_renames`) - and is never told the
+entity is done by reads under the old id that came up empty because the
+history had moved (:meth:`HistoryImporter._renamed_meanwhile`).
+
+Once Tag Historian has the new name, the import goes under it, and where it
+stops is Tag Historian's line for the renamed tag - which only Tag Historian
+can draw, because it has to take in the tag's former names: the first live
+reading and the first import under the old name. Drawn from the new name
+alone, it lets the history from before the rename in a second time, the old
+name holding it already. This relies on the API release this one requires
+drawing it over the former names, and on its answer being keyed by the name
+the batch was sent under.
+
+And an entity whose rename card was answered "Start a new tag" or "Keep them
+apart" is not imported at all (renames.own_tag_since). The old tag keeps its
+history, as the card says; Home Assistant has moved that history to the new
+id, where it would be read and sent into the new tag in full. What the
+recorder holds of the entity from after the choice is live data, the
+forwarder's to deliver, so nothing of it is history to import.
 """
 
 from __future__ import annotations
@@ -96,6 +114,7 @@ from .line_protocol import (
     state_to_value,
     tag_name_for_entity,
 )
+from .renames import own_tag_since as own_tag_since_of
 from .renames import registry_ids, removed_since, renamed_since
 from .renames import send_as as send_as_of
 
@@ -187,6 +206,7 @@ class HistoryImporter:
         *,
         send_as: Mapping[str, str] | None = None,
         selected: Iterable[str] | None = None,
+        own_tag_since: Mapping[str, str] | None = None,
     ) -> None:
         self.hass = hass
         self.entry = entry
@@ -201,6 +221,9 @@ class HistoryImporter:
         self._send_as = dict(send_as if send_as is not None else send_as_of(entry.options))
         self._selected = set(
             selected if selected is not None else entry.options.get(CONF_ENTITIES, [])
+        )
+        self._own_tag_since = dict(
+            own_tag_since if own_tag_since is not None else own_tag_since_of(entry.options)
         )
         self.progress = ImportProgress()
         self._task: asyncio.Task[None] | None = None
@@ -284,6 +307,30 @@ class HistoryImporter:
                 ends[now(entity_id)] = min(line, ends.get(now(entity_id), line))
         progress.cursor, progress.ends = cursor, ends
 
+    def _renamed_meanwhile(self, entity_id: str) -> bool:
+        """Whether this entity was renamed after the import was loaded, and the rename followed.
+
+        :meth:`_follow_renames` runs once, at load, and only for a new id in
+        the selection the setup was built from (renames.renamed_since). A
+        rename landing after that - while the import runs, or while the entry
+        is being set up - is its own reload's to follow. But the reads under
+        the old id go on until that reload stops this task, and once Home
+        Assistant has moved the history they come up empty: the entity looked
+        done, was saved as done, and the reload carried "done" over to the
+        new id - the rest of its history never imported, and the import said
+        it had finished. So ask the registry as it is now, against the
+        selection as it is now: the new id is in it exactly when this entry
+        followed the rename, and then that reload is on its way.
+        """
+        registry_id = self.progress.registry_ids.get(entity_id)
+        if registry_id is None:
+            return False
+        return bool(
+            renamed_since(
+                self.hass, {entity_id: registry_id}, self.entry.options.get(CONF_ENTITIES, [])
+            )
+        )
+
     async def async_start(self, entity_ids: list[str], days: int | None) -> ImportProgress:
         """Start importing these entities' recorded history, at most ``days`` back.
 
@@ -364,6 +411,18 @@ class HistoryImporter:
                 self._changed()
                 if not await self._async_import_entity(entity_id):
                     return
+                if self._renamed_meanwhile(entity_id):
+                    # Not done: its reads may have come up empty because Home
+                    # Assistant moved the history to the new id under them.
+                    # The rename's reload stops this task and carries the
+                    # import on under the new id, after the last reading Tag
+                    # Historian answered for; until then it stays running.
+                    LOGGER.info(
+                        "Tag Historian: %s was renamed during the history import; "
+                        "it carries on under the new id once the rename's reload is done",
+                        entity_id,
+                    )
+                    return
                 progress.done.append(entity_id)
                 await self._async_save()
                 self._changed()
@@ -383,6 +442,19 @@ class HistoryImporter:
         if started_at is None or since is None:
             await self._async_finish(STATUS_STOPPED, STOP_UNKNOWN_IMPORT)
             return False
+
+        if entity_id in self._own_tag_since:
+            # A tag of its own since the rename card said so; its history is
+            # the old tag's (module docstring). Imported, the recorder's
+            # history of it - all of which the old tag holds - went into the
+            # new tag as well, which the card says it would not.
+            LOGGER.info(
+                "Tag Historian: %s has a tag of its own since %s and its history stays in "
+                "the old tag, so the history import leaves it",
+                entity_id,
+                self._own_tag_since[entity_id],
+            )
+            return True
 
         # A restart carries on after the last reading Tag Historian answered
         # for; the minimum interval is measured from it too.
