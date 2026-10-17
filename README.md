@@ -71,6 +71,15 @@ numbers. And it is a paid service past the free plan's tags.
 Every limit that decides how long step 1 takes — tags, readings a day — is read
 from your own account when the copy runs, and the dry run prints them.
 
+Using this integration for step 2 instead of the built-in one? Set it up
+straight after the copy's last catch-up run, the same way, and point only one
+of the two at Tag Historian: both would send every reading twice. Its
+[history import](#import-your-history) then adds to the copy and never
+doubles it: Tag Historian counts the copied readings as live data, and an
+import only takes what is older than an entity's first live reading — so it
+brings what the recorder has from before your InfluxDB did, if anything, and
+the history of entities your InfluxDB never had.
+
 ## Do I need this? You may not
 
 Home Assistant's **built-in `influxdb` integration already works** with Tag
