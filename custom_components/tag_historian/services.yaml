@@ -1,0 +1,22 @@
+# Names and descriptions live in translations/en.json ("services"), where
+# Home Assistant reads them from; this file only says what the action takes.
+import_history:
+  fields:
+    config_entry_id:
+      required: false
+      selector:
+        config_entry:
+          integration: tag_historian
+    entity_id:
+      required: false
+      selector:
+        entity:
+          multiple: true
+    days:
+      required: false
+      selector:
+        number:
+          min: 1
+          max: 3650
+          mode: box
+          unit_of_measurement: days

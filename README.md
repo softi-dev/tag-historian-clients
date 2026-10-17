@@ -46,6 +46,18 @@ What this integration adds:
   what to do — a revoked key, entities beyond your plan's series count, the
   daily reading allowance being spent, or Tag Historian simply being busy. The
   last two are different problems and are never described as the same one.
+- **It brings the history you already have.** The recorder on your Home
+  Assistant box holds days of readings from before you installed this — on an
+  SD card, more often than not, the part most likely to fail. One action
+  copies them into Tag Historian with their original timestamps, and imported
+  history does not count against your daily reading allowance. See
+  [Import your history](#import-your-history).
+- **A restart or an outage does not cost you your readings.** Readings it
+  could not deliver are saved when Home Assistant stops and sent when it
+  starts again, and readings it had to let go of during an outage are read
+  back from the recorder while the recorder still has them. See [When the
+  connection or Home Assistant goes
+  away](#when-the-connection-or-home-assistant-goes-away).
 
 What it does **not** do: read data back out of Tag Historian, replace the
 recorder, or keep attributes as history. It is a one-way export of entity
@@ -115,7 +127,64 @@ If your account has no free series at all and everything you picked would need
 one, setup stops and says so rather than finishing with an empty selection.
 
 Change any of it later: **Settings → Devices & services → Tag Historian →
-Configure.**
+Configure → Change what you keep history for.**
+
+## Import your history
+
+**Settings → Devices & services → Tag Historian → Configure → Import the
+history Home Assistant has already recorded**, or the action
+`tag_historian.import_history` (from **Developer tools → Actions**, a script or
+an automation):
+
+```yaml
+action: tag_historian.import_history
+data:
+  entity_id:            # optional: default is every entity you keep history for
+    - sensor.house_power
+  days: 30              # optional: default is as far back as your plan's window
+```
+
+It reads what Home Assistant's recorder holds for those entities and sends it
+to Tag Historian with the original timestamps, through the same rules as the
+live readings — the same numbers and on/off words, `unavailable` left as a
+gap, the same minimum interval, timestamps to the second. It runs in the
+background: the **Tag Historian history import** sensor shows how far it is
+(`idle`, `running`, `finished` or `stopped`, with the counts as attributes),
+and a notification says when it is done and what it did. A restart carries it
+on where it stopped.
+
+What Tag Historian holds an import to — every number below is read from your
+own account, none of it is written into this integration:
+
+- **Your import allowance, instead of the daily one.** Imported readings do not
+  count against your daily reading allowance. Each account has an import
+  allowance instead: your plan's daily reading allowance times its
+  full-resolution window in days — what the plan could have stored in that
+  window — for all imports together. The import screen shows what is left; a
+  larger plan raises it. When it is used up the import stops and says so, and
+  live readings carry on unaffected.
+- **Your plan's full-resolution window.** Readings older than it are skipped,
+  so the import starts there.
+- **History only.** Readings older than the moment the import started, older
+  than the first reading of the entity Tag Historian received live, and older
+  than the start of the first import of that entity. Everything after that is
+  your live data, which this integration sends itself — including readings
+  still waiting to be sent, so nothing arrives twice. Importing the same
+  history again works; feeding an entity fresh readings through imports does
+  not.
+- **The tag limit and the storage cap**, as for live data. An imported entity
+  uses a series like a forwarded one, which is why only entities you keep
+  history for can be imported.
+
+Running an import twice stores nothing twice: Tag Historian skips a reading it
+already has for that series at that timestamp, and a reading it skips costs no
+allowance.
+
+**Not imported: long-term statistics.** Once the recorder purges its states
+(after 10 days by default), Home Assistant keeps only hourly mean, minimum and
+maximum values. Those are averages, not readings, and Tag Historian stores
+readings — so they are not imported yet, rather than imported as something
+they are not. Import soon after installing to keep the most.
 
 ## What one entity costs
 
@@ -173,8 +242,9 @@ chart means exactly that — Tag Historian never stores an invented zero.
 | `sensor.tag_historian_tags_used` | Series in use on your account, with the limit as an attribute |
 | `sensor.tag_historian_readings_today` | Readings stored today, against your daily allowance |
 | `sensor.tag_historian_readings_sent` | Readings this integration has delivered |
-| `sensor.tag_historian_readings_queued` | Readings waiting in memory right now |
+| `sensor.tag_historian_readings_queued` | Readings waiting to be sent right now |
 | `sensor.tag_historian_readings_dropped` | Readings that did not arrive, and why, in the attributes |
+| `sensor.tag_historian_history_import` | Where a history import is, with its counts as attributes |
 
 The last one is there on purpose: nothing is dropped silently, so if data is
 missing there is always a counter that moved. Its state adds up every way a
@@ -183,21 +253,24 @@ reading can fail to become history:
 | Attribute | What it counts |
 |---|---|
 | `dropped_over_quota` | Refused because it needed a series your plan has no room for |
-| `dropped_queue_overflow` | Evicted from a full buffer during a long outage, oldest first |
-| `dropped_on_shutdown` | Still undelivered when the last flush was done, buffered or handed back too late to requeue |
+| `dropped_queue_overflow` | Evicted from a full buffer, oldest first. During an outage they are read back from the recorder once Tag Historian answers again, while the recorder still has them; while today's reading allowance is spent they are over the allowance and are not |
+| `dropped_on_shutdown` | Neither delivered nor saved when the integration stopped: handed back too late to requeue, or a save that failed |
 | `dropped_mid_write` | Already in a request that never came back, because Home Assistant stopped or the entry was reloaded underneath it |
 | `dropped_not_a_number` | The entity reported a word this integration cannot store |
 
 `entities_storing_nothing` names the entities behind that last one, so a chart
 that stays empty says why. `dropped_rate_limited` is on the attributes too but
 is deliberately *not* in the total — those are the readings your minimum
-interval skipped, which is what you asked it to do.
+interval skipped, which is what you asked it to do. Two more attributes are not
+losses but what happened next: `backfilled_from_recorder`, readings read back
+from the recorder to fill a gap, and `restored_after_restart`, readings saved
+at the last stop and sent after it.
 
 The counters keep their values across a reload, so fixing a Repairs card does
 not erase the evidence of what it was telling you about. A Home Assistant
-restart clears them: they are held in memory, next to the buffer they describe.
-Anything the restart could not deliver is written to the log as well as
-counted, and the log is the half that is still there afterwards.
+restart clears them — they are held in memory — while the readings they
+describe are saved and sent, and anything that could not be is written to the
+log as well as counted.
 
 ## When something goes wrong
 
@@ -207,19 +280,26 @@ Everything below shows up in **Settings → Repairs**.
 |---|---|
 | Your API key was revoked | Asks for a new one through Home Assistant's normal re-authentication card, and stops retrying the dead key meanwhile |
 | Some readings exceed your plan's series count | Names the series, counts the readings that were lost, keeps sending everything else, and offers to reopen the picker so you can deselect |
-| Today's reading allowance is spent | Holds readings in memory and waits exactly as long as the API asks — it does not hammer a closed door |
+| Today's reading allowance is spent | Holds the newest readings — through a restart too — and waits exactly as long as the API asks; it does not hammer a closed door. What no longer fits in the buffer meanwhile is over the allowance: counted, not sent later |
 | Tag Historian is busy or briefly unreachable | Holds and retries quietly; only raises a card if it lasts, and that card never mentions your plan, because this is not about your plan |
 | Your account cannot write yet | Shows Tag Historian's own explanation, word for word |
 
-The buffer is held **in memory only**. When Home Assistant stops — a restart,
-an update, a reboot — or when the entry is reloaded because you changed the
-options or fixed a Repairs card, two things happen before it goes:
+## When the connection or Home Assistant goes away
+
+When Home Assistant stops — a restart, an update, a reboot — or when the entry
+is reloaded because you changed the options or fixed a Repairs card, three
+things happen before the buffer is let go of:
 
 - a request that is already on its way out gets up to five seconds to finish,
   so a stop or a reload landing mid-write normally **delivers** those readings
   rather than losing them;
-- whatever is still buffered gets a last few delivery attempts, and anything
-  that will not go is added to the dropped counter and written to the log.
+- whatever is still buffered gets a last few delivery attempts;
+- and anything that will not go is **saved** to Home Assistant's `.storage`
+  (`tag_historian.<entry>.forwarder`), with how far Tag Historian had
+  acknowledged each entity, and sent when the integration starts again. The
+  file is bounded like the buffer — at most ten thousand readings, a few
+  megabytes — and is written when the integration stops and when writes start
+  or stop failing, not on every reading, so it does not wear an SD card.
 
 Both of those apply to both ways out, and that is worth stating because the two
 are not the same underneath. Home Assistant cancels an integration's background
@@ -230,7 +310,7 @@ you the full five seconds on the rarer event and nothing at all on the one that
 happens every time you restart.
 
 A request that does *not* finish in that window is abandoned rather than
-re-sent. Tag Historian does not deduplicate, and the endpoint may already have
+re-sent. The live write endpoint does not deduplicate, and it may already have
 taken the batch before the connection went, so re-sending it would risk
 doubling readings in your history instead of restoring them. Those readings are
 counted as `dropped_mid_write`, which means that counter can *overstate* the
@@ -238,7 +318,36 @@ loss — some of them may have landed. That is the direction chosen on purpose:
 an overstated loss gets asked about, an understated one is invisible.
 
 The buffer is also bounded — during a long outage the oldest go first and
-`dropped_queue_overflow` moves. Nothing is thrown away without being counted.
+`dropped_queue_overflow` moves. They are not gone: the recorder still has
+them. For every entity the integration keeps the time of the last reading Tag
+Historian acknowledged, and after a gap — an outage that overflowed the buffer,
+a restart, a stretch with the integration disabled — it reads the recorder for
+what lies between that reading and the oldest one it still holds, and sends
+that first, oldest first. That is your live data arriving late, so it counts
+against your daily reading allowance like any other reading; a long gap can
+take more than a day's allowance, and then it waits for the allowance like any
+reading does.
+
+What it reads back is what the recorder still has: Home Assistant purges
+states after 10 days by default, and an entity you have excluded from the
+recorder has nothing to read back. And readings let go of while today's
+allowance is spent are not read back at all. Those are over the allowance, not
+lost to an outage, and reading them back at midnight would put the new day's
+readings behind them — every day, for an account that sends more than its
+allowance. The buffer still holds the newest of them and sends those when the
+allowance resets. (One exception: an entity that is still catching up on an
+earlier outage when the allowance runs out has its readings read back as
+usual, so none of that outage is lost.)
+
+It does not re-send a reading Tag Historian may already have. A request that
+was abandoned mid-write counts as delivered, never as a gap, and if Home
+Assistant did not shut down cleanly — a crash, a power cut — while writes were
+going through, nothing is read back: the last moment before it may be missing,
+and nothing is doubled. (The recorder loses its own last few seconds to a power
+cut too.) If writes were failing when it went down, or it had not yet had an
+answer since it started, nothing had been acknowledged since, and the whole
+outage is read back — with the one exception of a retry Tag Historian took in
+the very moment of the crash, which then arrives twice.
 
 ## Development
 

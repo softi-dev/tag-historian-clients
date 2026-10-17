@@ -67,6 +67,13 @@
   },
   "options": {
     "step": {
+      "init": {
+        "title": "Tag Historian",
+        "menu_options": {
+          "choose": "Change what you keep history for",
+          "import_history": "Import the history Home Assistant has already recorded"
+        }
+      },
       "select": {
         "title": "Change what you keep history for",
         "description": "Your plan allows {tag_limit} tags. {tags_in_use} are already in use, leaving {tags_available}.\n\nOf the {entity_count} entities enabled in this Home Assistant, the {offered_count} listed below are the ones whose job is to report something - sensors, binary sensors, numbers, number helpers and counters - plus everything you already had selected. The other {hidden_count} are things you switch, run or look up rather than things that measure; tick \"Show every entity\" to list all {entity_count} instead, unfiltered.\n\n{preselected} are ticked right now: {breakdown}. Another {did_not_fit} would be worth ticking if the allowance stretched to them.\n\nUnticking an entity stops new readings for it. History already stored in Tag Historian is untouched, and so is the tag - delete it in the dashboard to free the slot.",
@@ -94,14 +101,34 @@
         "data_description": {
           "trim_to_fit": "Removes the lowest-ranked entities that need a new tag, and only those."
         }
+      },
+      "import_history": {
+        "title": "Import recorded history",
+        "description": "Sends what Home Assistant's recorder holds for the entities below to Tag Historian, with the original timestamps, so the history on this box is kept even if the box is not.\n\nImported readings do not count against your daily reading allowance. They count against your import allowance instead: {remaining} of {total} readings left - {readings_per_day} a day times your plan's {window_days}-day full-resolution window, for all imports together. Readings older than that window are skipped, and so is anything Tag Historian already has, so running an import twice stores nothing twice.\n\nOnly history is imported: readings older than the moment the import starts, older than the first reading of the entity Tag Historian received live, and older than the start of the first import of it. Everything after that is your live data, which this integration sends itself - including what is still waiting to be sent.\n\nThe recorder here keeps {recorder_days} days of states. The hourly long-term statistics Home Assistant keeps after that are not imported: they are averages, not readings.\n\nThe import runs in the background. The \"Tag Historian history import\" sensor shows how far it is, a notification says when it is done, and a restart carries on where it stopped.",
+        "data": {
+          "entities": "Entities to import",
+          "days": "How far back"
+        },
+        "data_description": {
+          "entities": "Only entities you keep history for are listed: an imported entity uses a tag like a forwarded one.",
+          "days": "Days before today. The import starts no earlier than your plan's full-resolution window, whatever this says."
+        }
       }
     },
     "error": {
-      "select_at_least_one": "Pick at least one entity. To stop forwarding altogether, disable this integration rather than emptying the list - an entry that is loaded and storing nothing looks exactly like a working one."
+      "select_at_least_one": "Pick at least one entity. To stop forwarding altogether, disable this integration rather than emptying the list - an entry that is loaded and storing nothing looks exactly like a working one.",
+      "import_nothing_selected": "Pick at least one entity to import."
     },
     "abort": {
       "cannot_connect": "Could not reach Tag Historian, so this screen cannot show you how much of your allowance is left. Try again in a moment.",
-      "no_tags_available": "Your account has no free tags, and every entity you chose would need one, so trimming the selection to fit leaves nothing to historise. Your existing selection has been left alone. Free a tag in the Tag Historian dashboard or move to a larger plan."
+      "no_tags_available": "Your account has no free tags, and every entity you chose would need one, so trimming the selection to fit leaves nothing to historise. Your existing selection has been left alone. Free a tag in the Tag Historian dashboard or move to a larger plan.",
+      "import_started": "Importing the recorded history of {entities} entities into Tag Historian. Follow it on the \"Tag Historian history import\" sensor; a notification says when it is done.",
+      "import_running": "A history import is already running for this account. Wait for it to finish - the \"Tag Historian history import\" sensor shows how far it is.",
+      "import_refused": "Tag Historian did not start the import and said:\n\n{message}",
+      "no_recorder": "Home Assistant's recorder is not running, so there is no recorded history to import.",
+      "not_loaded": "This Tag Historian entry is not running right now. Wait until it is, then try again.",
+      "key_rejected": "Tag Historian no longer accepts this integration's API key. Enter a new one through the re-authentication card, then try again.",
+      "import_cannot_connect": "Could not reach Tag Historian to start the import. Try again in a moment."
     }
   },
   "issues": {
@@ -121,7 +148,7 @@
     },
     "daily_quota_exceeded": {
       "title": "Tag Historian daily reading limit reached",
-      "description": "Your account has used its reading allowance for today, so Tag Historian is refusing new data until the limit resets, which is {when}. Readings are held in memory until then and the oldest are dropped if the wait is long.\n\nTwo ways out: raise the minimum interval in this integration's options so fewer readings are sent, or move to a plan with a larger allowance."
+      "description": "Your account has used its reading allowance for today, so Tag Historian is refusing new data until the limit resets, which is {when}. Readings are held until then, through a restart too. If the wait is long the oldest are let go and read back from Home Assistant's recorder once Tag Historian takes data again, so they still arrive - and count against the next day's allowance.\n\nTwo ways out: raise the minimum interval in this integration's options so fewer readings are sent, or move to a plan with a larger allowance."
     },
     "write_forbidden": {
       "title": "Tag Historian is not accepting data from this account",
@@ -129,7 +156,56 @@
     },
     "service_unavailable": {
       "title": "Tag Historian has not been accepting data",
-      "description": "Writes have been failing for {minutes} minutes - Tag Historian is either unreachable or too busy to take them. Nothing about your account has changed. Readings are being held in memory and will be sent when it accepts them again; if this goes on the oldest are dropped and the dropped counter moves. Nothing needs doing at your end."
+      "description": "Writes have been failing for {minutes} minutes - Tag Historian is either unreachable or too busy to take them. Nothing about your account has changed. Readings are being held, through a restart too, and will be sent when it accepts them again; if this goes on, the oldest are let go and read back from Home Assistant's recorder afterwards. Nothing needs doing at your end."
+    }
+  },
+  "exceptions": {
+    "not_selected": {
+      "message": "Not selected for Tag Historian: {entities}. Add them under Configure, Change what you keep history for, first - an imported entity uses a tag like a forwarded one."
+    },
+    "nothing_selected": {
+      "message": "This Tag Historian entry keeps history for no entities, so there is nothing to import."
+    },
+    "entry_not_loaded": {
+      "message": "That Tag Historian entry is not running."
+    },
+    "entry_ambiguous": {
+      "message": "More than one Tag Historian account is set up here. Say which one with config_entry_id."
+    },
+    "no_recorder": {
+      "message": "Home Assistant's recorder is not running, so there is no recorded history to import."
+    },
+    "import_running": {
+      "message": "A history import is already running for this account."
+    },
+    "import_refused": {
+      "message": "Tag Historian did not start the import: {message}"
+    },
+    "key_rejected": {
+      "message": "Tag Historian no longer accepts this integration's API key."
+    },
+    "import_cannot_connect": {
+      "message": "Could not reach Tag Historian to start the import."
+    }
+  },
+  "services": {
+    "import_history": {
+      "name": "Import history",
+      "description": "Sends the history Home Assistant's recorder holds for entities you keep history for to Tag Historian, with the original timestamps. Imported readings count against the account's import allowance, not the daily one, and only history is imported: nothing this integration sends live, or still has to.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Account",
+          "description": "Which Tag Historian entry to import into. Only needed when more than one is set up."
+        },
+        "entity_id": {
+          "name": "Entities",
+          "description": "Entities to import. Leave empty for every entity this entry keeps history for."
+        },
+        "days": {
+          "name": "Days back",
+          "description": "How far back to import. Leave empty to import as far as your plan's full-resolution window reaches."
+        }
+      }
     }
   }
 }

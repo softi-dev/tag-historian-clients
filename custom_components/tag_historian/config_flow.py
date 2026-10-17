@@ -1,6 +1,11 @@
 """Config and options flows.
 
-Four screens, and the middle two are the reason this integration exists at all.
+Configure opens a menu of two things: choosing what to keep history for (the
+select and review screens below, again), and importing the history Home
+Assistant has already recorded (``import_history``, see importer.py).
+
+Four screens to add the integration, and the middle two are the reason this
+integration exists at all.
 Home Assistant can already write to Tag Historian through the built-in
 ``influxdb`` integration; what it cannot do is tell the user, while they are
 choosing, that their plan holds N tags and they have just ticked N+14.
@@ -42,11 +47,13 @@ from typing import Any
 
 import voluptuous as vol
 from homeassistant.config_entries import (
+    ConfigEntryState,
     ConfigFlow,
     ConfigFlowResult,
     OptionsFlow,
 )
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
@@ -60,6 +67,7 @@ from homeassistant.helpers.selector import (
     TextSelectorType,
 )
 
+from . import history
 from .api import (
     QuotaSnapshot,
     TagHistorianAuthError,
@@ -68,6 +76,7 @@ from .api import (
     TagHistorianPermissionError,
 )
 from .const import (
+    ATTR_DAYS,
     CONF_API_KEY,
     CONF_ENTITIES,
     CONF_HOST,
@@ -528,11 +537,18 @@ class TagHistorianConfigFlow(SelectionStepsMixin, ConfigFlow, domain=DOMAIN):
 
 
 class TagHistorianOptionsFlow(SelectionStepsMixin, OptionsFlow):
-    """Change the selection later without re-adding the integration."""
+    """Change the selection later, or import recorded history, without re-adding anything."""
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
+        """The two things Configure does."""
+        return self.async_show_menu(step_id="init", menu_options=["choose", "import_history"])
+
+    async def async_step_choose(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """The selection, with live numbers - the select and review screens."""
         entry = self.config_entry
         self._selected = list(entry.options.get(CONF_ENTITIES, []))
         self._min_interval = int(
@@ -567,6 +583,101 @@ class TagHistorianOptionsFlow(SelectionStepsMixin, OptionsFlow):
                 CONF_MIN_INTERVAL: self._min_interval,
             }
         )
+
+    async def async_step_import_history(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Import what the recorder holds for the selected entities.
+
+        The allowance and the window on this screen are read from the API as
+        it is drawn (``GET /api/import/allowance``); nothing about a plan is
+        typed here. Submitting starts the import in the background and closes
+        the dialog - an import of a year of readings takes far longer than
+        anybody should watch a dialog for - and the sensor and a notification
+        take it from there. Nothing in the options changes, so the entry is
+        not reloaded.
+        """
+        entry = self.config_entry
+        selected = list(entry.options.get(CONF_ENTITIES, []))
+
+        if not history.recorder_ready(self.hass):
+            return self.async_abort(reason="no_recorder")
+        if entry.state is not ConfigEntryState.LOADED:
+            return self.async_abort(reason="not_loaded")
+        if entry.runtime_data.importer.running:
+            return self.async_abort(reason="import_running")
+
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            entities = list(user_input.get(CONF_ENTITIES) or [])
+            if not entities:
+                errors["base"] = "import_nothing_selected"
+            else:
+                # Late import: __init__ imports this module's package.
+                from . import async_start_import
+
+                try:
+                    await async_start_import(
+                        self.hass, entry, entities, int(user_input[ATTR_DAYS])
+                    )
+                except HomeAssistantError as err:
+                    # The action's own refusals, under the same keys: one
+                    # reason, one sentence, whichever door it came through.
+                    return self.async_abort(
+                        reason=err.translation_key or "cannot_connect",
+                        description_placeholders=err.translation_placeholders,
+                    )
+                return self.async_abort(
+                    reason="import_started",
+                    description_placeholders={"entities": str(len(entities))},
+                )
+
+        client = TagHistorianClient(
+            async_get_clientsession(self.hass),
+            entry.data[CONF_HOST],
+            entry.data[CONF_API_KEY],
+        )
+        try:
+            allowance = await client.async_get_import_allowance()
+        except (
+            TagHistorianAuthError,
+            TagHistorianPermissionError,
+            TagHistorianConnectionError,
+        ):
+            return self.async_abort(reason="cannot_connect")
+
+        window_days = max(1, allowance.window_days)
+        keep_days = history.recorder_keep_days(self.hass)
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_ENTITIES, default=selected): EntitySelector(
+                    EntitySelectorConfig(multiple=True, include_entities=selected)
+                ),
+                vol.Required(ATTR_DAYS, default=window_days): NumberSelector(
+                    NumberSelectorConfig(
+                        min=1, max=window_days, mode=NumberSelectorMode.BOX,
+                        unit_of_measurement="days",
+                    )
+                ),
+            }
+        )
+        return self.async_show_form(
+            step_id="import_history",
+            data_schema=schema,
+            errors=errors,
+            description_placeholders={
+                "remaining": _spaced(allowance.remaining),
+                "total": _spaced(allowance.total),
+                "readings_per_day": _spaced(allowance.readings_per_day),
+                "window_days": str(allowance.window_days),
+                "recorder_days": str(keep_days) if keep_days is not None else "some",
+            },
+        )
+
+
+def _spaced(number: int) -> str:
+    """A large number the way the review screen prints them: 1 500 000."""
+    return f"{number:,}".replace(",", " ")
 
 
 def _write_blocked_pending_verification(account: dict[str, Any]) -> bool:

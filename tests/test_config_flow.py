@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 import voluptuous as vol
-from homeassistant.config_entries import SOURCE_REAUTH, SOURCE_USER
+from homeassistant.config_entries import SOURCE_REAUTH, SOURCE_USER, ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.exceptions import HomeAssistantError
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.tag_historian.api import (
@@ -26,7 +28,7 @@ from custom_components.tag_historian.const import (
     DOMAIN,
 )
 
-from .conftest import STUB_ACCOUNT, STUB_QUOTA, make_client
+from .conftest import STUB_ACCOUNT, STUB_ALLOWANCE, STUB_QUOTA, make_client
 
 CREDENTIALS = {CONF_HOST: "api.taghistorian.com", CONF_API_KEY: "not-a-real-key"}
 CLIENT_PATH = "custom_components.tag_historian.config_flow.TagHistorianClient"
@@ -49,6 +51,16 @@ def house(hass: HomeAssistant) -> None:
     hass.states.async_set("binary_sensor.heat_pump_running", "on", {"device_class": "running"})
     hass.states.async_set("climate.living_room", "heat", {"current_temperature": 21.0})
     hass.states.async_set("sensor.phone_battery", "88", {"device_class": "battery"})
+
+
+async def _open_choose(hass: HomeAssistant, entry):
+    """Configure, then the menu's "change what you keep history for"."""
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert result["type"] is FlowResultType.MENU
+    assert result["menu_options"] == ["choose", "import_history"]
+    return await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "choose"}
+    )
 
 
 async def _start(hass: HomeAssistant, client):
@@ -392,7 +404,7 @@ async def test_options_flow_changes_the_selection(hass: HomeAssistant, house) ->
     with patch(CLIENT_PATH, return_value=make_client()), patch(
         SETUP_PATH, return_value=True
     ):
-        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await _open_choose(hass, entry)
         assert result["step_id"] == "select"
 
         result = await hass.config_entries.options.async_configure(
@@ -450,7 +462,7 @@ async def test_the_options_flow_opens_when_a_selected_entity_is_unavailable(
     with patch(CLIENT_PATH, return_value=make_client()), patch(
         SETUP_PATH, return_value=True
     ):
-        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await _open_choose(hass, entry)
         assert result["step_id"] == "select"
 
         unchanged = result["data_schema"]({})
@@ -727,7 +739,116 @@ async def test_options_flow_refuses_to_show_a_stale_budget(
     client.async_get_quota.side_effect = TagHistorianConnectionError("down")
 
     with patch(CLIENT_PATH, return_value=client), patch(SETUP_PATH, return_value=True):
-        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await _open_choose(hass, entry)
 
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "cannot_connect"
+
+
+# --------------------------------------------------------------------------
+# The history import, from Configure
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def loaded_entry(hass: HomeAssistant, house):
+    """An entry Configure can import for: loaded, with a recorder to read."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=STUB_ACCOUNT["customerId"],
+        data=CREDENTIALS,
+        options={CONF_ENTITIES: ["sensor.house_power", "sensor.outdoor_temperature"], CONF_MIN_INTERVAL: 10},
+    )
+    entry.add_to_hass(hass)
+    entry.mock_state(hass, ConfigEntryState.LOADED)
+    entry.runtime_data = SimpleNamespace(importer=SimpleNamespace(running=False))
+    with patch(
+        "custom_components.tag_historian.config_flow.history.recorder_ready", return_value=True
+    ), patch("custom_components.tag_historian.history.recorder_ready", return_value=True):
+        yield entry
+
+
+async def _open_import(hass: HomeAssistant, entry):
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    return await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "import_history"}
+    )
+
+
+async def test_the_import_screen_shows_the_allowance_from_the_api(
+    hass: HomeAssistant, loaded_entry
+) -> None:
+    with patch(CLIENT_PATH, return_value=make_client()):
+        result = await _open_import(hass, loaded_entry)
+
+    assert result["step_id"] == "import_history"
+    placeholders = result["description_placeholders"]
+    assert placeholders["remaining"] == f"{STUB_ALLOWANCE.remaining}"
+    assert placeholders["window_days"] == f"{STUB_ALLOWANCE.window_days}"
+    defaults = result["data_schema"]({})
+    assert defaults[CONF_ENTITIES] == ["sensor.house_power", "sensor.outdoor_temperature"]
+    assert defaults["days"] == STUB_ALLOWANCE.window_days, "as far back as the window reaches"
+
+
+async def test_submitting_the_import_screen_starts_the_import_and_closes(
+    hass: HomeAssistant, loaded_entry
+) -> None:
+    with patch(CLIENT_PATH, return_value=make_client()), patch(
+        "custom_components.tag_historian.async_start_import"
+    ) as start:
+        result = await _open_import(hass, loaded_entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {CONF_ENTITIES: ["sensor.house_power"], "days": 2}
+        )
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "import_started"
+    start.assert_awaited_once()
+    assert start.await_args.args[2:] == (["sensor.house_power"], 2)
+    assert loaded_entry.options[CONF_ENTITIES] == [
+        "sensor.house_power",
+        "sensor.outdoor_temperature",
+    ], "starting an import changes nothing in the options, so nothing reloads"
+
+
+async def test_a_refused_import_says_what_tag_historian_said(
+    hass: HomeAssistant, loaded_entry
+) -> None:
+    refusal = HomeAssistantError(
+        translation_domain=DOMAIN,
+        translation_key="import_refused",
+        translation_placeholders={"message": "Import allowance used up."},
+    )
+    with patch(CLIENT_PATH, return_value=make_client()), patch(
+        "custom_components.tag_historian.async_start_import", side_effect=refusal
+    ):
+        result = await _open_import(hass, loaded_entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {CONF_ENTITIES: ["sensor.house_power"], "days": 2}
+        )
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "import_refused"
+    assert result["description_placeholders"] == {"message": "Import allowance used up."}
+
+
+async def test_an_import_already_running_is_not_started_twice(
+    hass: HomeAssistant, loaded_entry
+) -> None:
+    loaded_entry.runtime_data.importer.running = True
+    with patch(CLIENT_PATH, return_value=make_client()):
+        result = await _open_import(hass, loaded_entry)
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "import_running"
+
+
+async def test_an_import_of_nothing_is_asked_again(hass: HomeAssistant, loaded_entry) -> None:
+    with patch(CLIENT_PATH, return_value=make_client()):
+        result = await _open_import(hass, loaded_entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {CONF_ENTITIES: [], "days": 2}
+        )
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "import_nothing_selected"}

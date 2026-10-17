@@ -40,7 +40,8 @@ PLAN_LIMIT_IN_PROSE = re.compile(r"(?<![\d/.])\b\d+\s+(?:tags?|series)\b", re.IG
 # quota. The two below are mechanics, not plan values, and each earns its
 # place here or the test fails:
 #   86400 - seconds in a day, config_flow's readings-per-day arithmetic;
-#   10000 - MAX_QUEUE_LENGTH, the in-memory buffer bound during an outage.
+#   10000 - MAX_QUEUE_LENGTH, the buffer bound during an outage, and so
+#           the bound on what is saved to .storage across a restart.
 # Adding a number to this allowlist is the review surface: if it came out of
 # the server's plan configuration, it does not belong in this package at all.
 BIG_LITERAL = re.compile(r"\b\d{5,}\b")

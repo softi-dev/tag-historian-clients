@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock
 import pytest
 import pytest_socket
 
-from custom_components.tag_historian.api import QuotaSnapshot
+from custom_components.tag_historian.api import ImportAllowance, QuotaSnapshot
 
 pytest_plugins = "pytest_homeassistant_custom_component"
 
@@ -59,6 +59,16 @@ STUB_QUOTA = QuotaSnapshot(
     current_storage_bytes=1000,
 )
 
+# The import allowance, likewise a stub: total = readings_per_day x window_days
+# only because that is how the API computes it, not because these are a plan.
+STUB_ALLOWANCE = ImportAllowance(
+    total=360,
+    used=60,
+    remaining=300,
+    readings_per_day=120,
+    window_days=3,
+)
+
 STUB_ACCOUNT = {
     "customerId": "11111111-2222-3333-4444-555555555555",
     "name": "Test House",
@@ -83,4 +93,5 @@ def make_client(
     client.async_validate.return_value = STUB_ACCOUNT if account is None else account
     client.async_get_quota.return_value = STUB_QUOTA if quota is None else quota
     client.async_get_tag_names.return_value = set() if tags is None else tags
+    client.async_get_import_allowance.return_value = STUB_ALLOWANCE
     return client
