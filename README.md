@@ -12,10 +12,64 @@ your own account, so the numbers on screen are your numbers.
 
 This repository is the public home of Tag Historian's client-side
 integrations. Besides this Home Assistant integration it ships the official
-[Python client](python-client/) and an [MCP server](mcp-server/) for Claude
-Desktop and other AI assistants, and it carries the documentation and public
-image name of the [collector](collector/) for MQTT, OPC UA and Sparkplug B —
-see [Also in this repository](#also-in-this-repository).
+[Python client](python-client/), an [MCP server](mcp-server/) for Claude
+Desktop and other AI assistants, a tool that [copies your history out of
+InfluxDB](influxdb-migration/) and a [Grafana dashboard](grafana/) for Home
+Assistant entities, and it carries the documentation and public image name of
+the [collector](collector/) for MQTT, OPC UA and Sparkplug B — see
+[Also in this repository](#also-in-this-repository).
+
+## Leaving InfluxDB? Bring the history, and skip the next database migration
+
+If Home Assistant writes to an InfluxDB of your own today, you are about to
+move it anyway: Home Assistant is removing the integration's YAML connection,
+and its InfluxDB 1.x app was marked end-of-life on 28 August. This is the move
+that ends the moving — Tag Historian is the database, and somebody else runs
+it.
+
+**What stays the same.** Home Assistant's own InfluxDB integration keeps doing
+the writing: Tag Historian speaks the InfluxDB v2 write API, so the switch is
+the integration's own dialog, and your `include` filter stays as it is. Each
+entity keeps its name — `sensor.outdoor_temperature` is the tag
+`sensor.outdoor_temperature` — and Grafana can still draw it, through Grafana
+Labs' Infinity data source and the dashboard in step 3 rather than your old
+InfluxDB queries.
+
+**What you gain.** No database to run, upgrade or back up. Full resolution for
+as long as your plan keeps it, then hourly minimum, maximum, average and count
+for ten years, on every plan — see
+[how long data is kept](https://taghistorian.com/docs/retention). A nightly
+backup to a geo-redundant vault whose offsite copy sits in a second Swedish
+region. Alerts by email, push and chat when a value crosses a limit or a sensor
+goes quiet.
+
+**What you give up.** InfluxQL and Flux: data comes back out through Tag
+Historian's own API, its charts, exports and Grafana's Infinity data source, not
+through InfluxDB tooling. Text states and attributes are not stored, only
+numbers. And it is a paid service past the free plan's tags.
+
+**The move, in three steps** (in full, with the order that matters, at
+[taghistorian.com/docs/migrate-from-influxdb](https://taghistorian.com/docs/migrate-from-influxdb)):
+
+1. **Copy the history** with [`influxdb-migration/`](influxdb-migration/) while
+   Home Assistant still writes to InfluxDB. It names every tag exactly as live
+   forwarding will, carries each entity's friendly name and unit, and spreads a
+   big history over as many days as your plan's daily allowance needs — with a
+   dry run first and a resume file throughout.
+2. **Point Home Assistant at Tag Historian** straight after the copy's last
+   catch-up run: **Reconfigure** on an InfluxDB 2.x connection; for 1.x, which
+   Reconfigure cannot turn into 2.x, delete the entry and add it again as
+   v2.x. [taghistorian.com/docs/home-assistant](https://taghistorian.com/docs/home-assistant)
+   has both.
+3. **Import [`grafana/home-assistant.json`](grafana/)** into Grafana: an entity
+   dropdown and a chart per entity, in its tag's unit and under its friendly
+   name. The copy gives every entity it copies its unit; for one you add to
+   Home Assistant later, set the unit once on the tag's page in Tag Historian
+   Explorer, because the built-in integration, on its default settings, does
+   not send it in a form Tag Historian reads.
+
+Every limit that decides how long step 1 takes — tags, readings a day — is read
+from your own account when the copy runs, and the dry run prints them.
 
 ## Do I need this? You may not
 
@@ -447,6 +501,16 @@ themselves in place. CI runs Ubuntu, where neither is used.
   history, aggregates, alerts. **Read-only by default** — the three write
   tools don't exist as far as the host is concerned unless you explicitly
   enable them. Its README explains the write gate before you turn it on.
+- **[`influxdb-migration/`](influxdb-migration/)** — `taghistorian-influx-migrate`,
+  a command-line tool that copies Home Assistant's history out of InfluxDB 1.x
+  or 2.x into Tag Historian, under the names live forwarding uses, with each
+  entity's friendly name and unit. Dry run first, a resume file throughout, and
+  the daily allowance shared politely with live data. `requests` is its only
+  dependency; installed from this repository.
+- **[`grafana/`](grafana/)** — `home-assistant.json`, a Grafana dashboard for
+  Home Assistant entities stored in Tag Historian: an entity dropdown and one
+  chart per entity, in its tag's unit and under its friendly name, through
+  Grafana Labs' Infinity data source.
 - **[`collector/`](collector/)** —
   `ghcr.io/softi-dev/tag-historian-clients/collector`, the container image
   you run next to your MQTT broker, OPC UA server or Sparkplug B namespace.
@@ -456,9 +520,10 @@ themselves in place. CI runs Ubuntu, where neither is used.
   that its image, documentation and issue tracker are somewhere public. What
   lives here is its README.
 
-The two Python packages each have their own README, test suite and Python
-floor, the collector has its README and nothing to build, and everything
-ships on its own cadence — they only meet in this repository.
+The three Python packages each have their own README, test suite and Python
+floor, the collector has its README and nothing to build, the dashboard is a
+file to import, and everything ships on its own cadence — they only meet in
+this repository.
 
 ## License
 

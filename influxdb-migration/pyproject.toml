@@ -1,0 +1,71 @@
+# The InfluxDB history copy: a command-line tool that reads Home Assistant's
+# history out of InfluxDB 1.x or 2.x and writes it into Tag Historian.
+#
+# Its own package, beside python-client/ and mcp-server/ rather than inside
+# either, for the same reason those two are apart: it ships on its own
+# cadence, and somebody leaving InfluxDB should be able to install exactly
+# this and nothing else. It does not depend on python-client - it writes
+# through the InfluxDB-compatible endpoint, which that client does not wrap,
+# and a dependency on a package that is not on PyPI would make the one-line
+# install below two lines.
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "taghistorian-influx-migrate"
+version = "0.1.0"
+description = "Copy Home Assistant history from InfluxDB 1.x or 2.x into Tag Historian"
+readme = "README.md"
+# Same floor as python-client: this runs once, on whatever machine can reach
+# the InfluxDB - often the old Raspberry Pi itself, or a NAS.
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Softi AB" }]
+keywords = ["taghistorian", "influxdb", "home-assistant", "migration", "time-series"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+# requests only: InfluxQL, Flux and line protocol are all plain HTTP, and the
+# annotated CSV InfluxDB 2.x answers in is read with the standard library.
+dependencies = ["requests>=2.28"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "ruff>=0.4"]
+
+[project.scripts]
+taghistorian-influx-migrate = "taghistorian_influx_migrate.cli:main"
+
+[project.urls]
+Repository = "https://github.com/softi-dev/tag-historian-clients"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+ignore = [
+  "E501", # long lines with reasoning in the comment read worse hard-wrapped
+]
+
+[tool.ruff.lint.per-file-ignores]
+# The fakes speak InfluxDB's and Tag Historian's wire formats, and the tests
+# assert on the private helpers where being wrong is silent.
+"tests/*" = ["SLF001"]
