@@ -21,8 +21,10 @@ from custom_components.tag_historian.config_flow import CONF_SHOW_ALL
 from custom_components.tag_historian.const import (
     CONF_API_KEY,
     CONF_ENTITIES,
+    CONF_FOLLOW_RENAMES,
     CONF_HOST,
     CONF_MIN_INTERVAL,
+    CONF_SEND_AS,
     DOMAIN,
 )
 
@@ -93,6 +95,9 @@ async def test_happy_path_creates_an_entry(hass: HomeAssistant, house) -> None:
     assert result["options"] == {
         CONF_ENTITIES: ["sensor.house_power", "sensor.outdoor_temperature"],
         CONF_MIN_INTERVAL: 10,
+        # Off unless asked for: renaming a tag is a decision about the
+        # customer's data, offered on a repair card instead (renames.py).
+        CONF_FOLLOW_RENAMES: False,
     }
     # The stable customer id, not the host - two entries for one account would
     # send every reading twice and bill for it twice.
@@ -411,6 +416,8 @@ async def test_options_flow_changes_the_selection(hass: HomeAssistant, house) ->
     assert entry.options == {
         CONF_ENTITIES: ["sensor.outdoor_temperature", "binary_sensor.heat_pump_running"],
         CONF_MIN_INTERVAL: 30,
+        CONF_FOLLOW_RENAMES: False,
+        CONF_SEND_AS: {},
     }
 
 

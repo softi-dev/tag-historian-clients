@@ -19,12 +19,14 @@
         "data": {
           "entities": "Entities to historise",
           "min_interval": "Minimum seconds between readings",
-          "show_all": "Show every entity"
+          "show_all": "Show every entity",
+          "follow_renames": "Rename tags when entities are renamed"
         },
         "data_description": {
           "entities": "One entity costs one tag. Sensors with no device class and no state class are listed but left unticked, because Home Assistant knows nothing about them either way: most are hand-written template sensors reporting a number, but a few report a word - a house mode sitting at \"away\", a status sitting at \"idle\" - and those store nothing at all. Whatever stores nothing is counted on the \"readings dropped\" sensor and the entity is named there, so a series that stays empty says why. Anything you have already ticked stays in the list whatever else changes.",
           "min_interval": "Readings arriving sooner than this after the previous one for the same entity are skipped. Your daily reading allowance is spent on everything sent, so this is the setting that keeps a chatty sensor from using it up.",
-          "show_all": "Puts every entity in the install in the list, unfiltered. Some of them store a 1 or a 0 - a light, a switch, a cover, an automation. The rest store nothing: a lock, a person, a climate mode and a media player all report words, and only entities whose state is a number or a plain on/off can become a reading."
+          "show_all": "Puts every entity in the install in the list, unfiltered. Some of them store a 1 or a 0 - a light, a switch, a cover, an automation. The rest store nothing: a lock, a person, a climate mode and a media player all report words, and only entities whose state is a number or a plain on/off can become a reading.",
+          "follow_renames": "When you rename an entity in Home Assistant, rename its tag in Tag Historian too, so its history goes on under the new name. Nothing is copied: the readings from before stay where they are and read under the new name. Off: the readings go on into the old tag, and a repair card asks whether to rename it."
         }
       },
       "review": {
@@ -73,12 +75,14 @@
         "data": {
           "entities": "Entities to historise",
           "min_interval": "Minimum seconds between readings",
-          "show_all": "Show every entity"
+          "show_all": "Show every entity",
+          "follow_renames": "Rename tags when entities are renamed"
         },
         "data_description": {
           "entities": "One entity costs one tag. An entity that is currently unavailable or unknown stays in this list and stays selected - it is only the readings that pause, not the choice. An entity whose state is a word rather than a number stores nothing at all; those are counted and named on the \"readings dropped\" sensor.",
           "min_interval": "Readings arriving sooner than this after the previous one for the same entity are skipped.",
-          "show_all": "Puts every entity in the install in the list, unfiltered - including ones that can store nothing."
+          "show_all": "Puts every entity in the install in the list, unfiltered - including ones that can store nothing.",
+          "follow_renames": "When you rename an entity in Home Assistant, rename its tag in Tag Historian too, so its history goes on under the new name. Nothing is copied: the readings from before stay where they are and read under the new name. Off: the readings go on into the old tag, and a repair card asks whether to rename it."
         }
       },
       "review": {
@@ -130,6 +134,33 @@
     "service_unavailable": {
       "title": "Tag Historian has not been accepting data",
       "description": "Writes have been failing for {minutes} minutes - Tag Historian is either unreachable or too busy to take them. Nothing about your account has changed. Readings are being held in memory and will be sent when it accepts them again; if this goes on the oldest are dropped and the dropped counter moves. Nothing needs doing at your end."
+    },
+    "entity_renamed": {
+      "title": "{old} was renamed to {new} in Home Assistant",
+      "fix_flow": {
+        "step": {
+          "rename_choice": {
+            "title": "Keep the history of {old} under its new name?",
+            "description": "Home Assistant renamed {old} to {new}. Tag Historian goes on storing its readings in the tag {old_tag} meanwhile, so the history goes on and nothing is lost.{refusal}\n\nRename the tag, and its whole history - the readings from before included - reads as {new_tag} from now on, and new readings are stored under that name. Nothing is copied: it is the same history under a new name, and it can be renamed back in the Tag Historian dashboard.\n\nOr start a new tag, {new_tag}, for the readings from now on, and leave the history where it is, under {old_tag}. That takes one more tag on your plan.",
+            "menu_options": {
+              "rename_tag": "Rename the tag and keep its history",
+              "new_tag": "Start a new tag instead"
+            }
+          },
+          "merge_choice": {
+            "title": "Merge the history of {old} into {new}?",
+            "description": "Home Assistant renamed {old} to {new}, a name that has a tag in Tag Historian already: {new_tag}. The renamed entity's readings go into {new_tag} now; its history from before the rename is in {old_tag}.{refusal}\n\nMerge them, and the two read as one history under {new_tag}. Where both have readings in the same hour, that hour's figures are worked out from both, and {old_tag} stops counting as a tag. Nothing is copied, and the merge can be undone in the Tag Historian dashboard.\n\nOr keep them apart: {old_tag} keeps its history as a tag of its own.",
+            "menu_options": {
+              "merge_tags": "Merge them into one history",
+              "keep_apart": "Keep them apart"
+            }
+          }
+        },
+        "abort": {
+          "carry_unavailable": "Tag Historian could not be reached, so nothing was changed. The readings go on into the old tag meanwhile, so nothing is lost. Try again from this card later.",
+          "carry_refused": "Tag Historian refused, and nothing was changed. It said:\n\n{message}"
+        }
+      }
     }
   }
 }

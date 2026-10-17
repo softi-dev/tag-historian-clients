@@ -23,6 +23,17 @@ CONF_API_KEY: Final = "api_key"
 CONF_ENTITIES: Final = "entities"
 CONF_MIN_INTERVAL: Final = "min_interval"
 
+# Whether renaming an entity in Home Assistant renames its tag in Tag Historian
+# too, so the history goes on under the new name (renames.py). Off by default:
+# the user is asked through a repair card instead.
+CONF_FOLLOW_RENAMES: Final = "follow_renames"
+
+# {entity_id: entity_id} - readings of the first are sent under the tag of the
+# second. Only ever set for an entity renamed in Home Assistant whose tag has
+# not been renamed yet, so its readings go on landing in the history they
+# belong to, at no extra tag, until the rename is confirmed (renames.py).
+CONF_SEND_AS: Final = "send_as"
+
 DEFAULT_HOST: Final = "api.taghistorian.com"
 
 # The three write-path limits below are PROTOCOL facts, not plan facts, so they
@@ -68,6 +79,12 @@ ISSUE_TAG_QUOTA: Final = "tag_quota_exceeded"
 ISSUE_DAILY_QUOTA: Final = "daily_quota_exceeded"
 ISSUE_WRITE_FORBIDDEN: Final = "write_forbidden"
 ISSUE_SERVICE_UNAVAILABLE: Final = "service_unavailable"
+ISSUE_ENTITY_RENAMED: Final = "entity_renamed"
+
+# How long to wait before asking Tag Historian again to rename a tag after it
+# could not be reached. A rename that waits costs nothing - the readings go on
+# being stored under the old name meanwhile - so this is unhurried.
+RENAME_RETRY_SECONDS: Final = 900
 
 # A single 503 is our problem and none of the user's business. Only after the
 # writes have been failing this long does it become something they should see.

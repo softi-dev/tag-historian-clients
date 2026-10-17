@@ -7,6 +7,9 @@ Two independent loops share one HTTP client:
     poll  - a 15-minute DataUpdateCoordinator over GET /api/usage/limits,
             which is where every quota number the UI shows comes from
             (see coordinator.py)
+
+and one listener: the entity registry, so an entity renamed in Home Assistant
+is followed rather than silently dropped (see renames.py).
 """
 
 from __future__ import annotations
@@ -29,6 +32,12 @@ from .const import (
 )
 from .coordinator import QuotaCoordinator
 from .forwarder import ForwarderStats, StateForwarder
+from .renames import (
+    async_clear_renamed_issues,
+    async_resume,
+    async_track_renames,
+    send_as,
+)
 from .repairs import async_clear_write_issues
 
 PLATFORMS: list[Platform] = [Platform.SENSOR]
@@ -81,6 +90,7 @@ async def async_setup_entry(
         list(entry.options.get(CONF_ENTITIES, [])),
         int(entry.options.get(CONF_MIN_INTERVAL, DEFAULT_MIN_INTERVAL_SECONDS)),
         async_get_stats(hass, entry.entry_id),
+        send_as(entry.options),
     )
     forwarder.async_start()
     # NOT entry.async_on_unload(forwarder.async_shutdown). See
@@ -98,6 +108,13 @@ async def async_setup_entry(
     # to. OptionsFlowWithReload would replace this listener, but it only exists
     # from 2025.8 and hacs.json claims a lower floor - see the README.
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
+
+    # A selected entity renamed in Home Assistant: follow it, and carry its
+    # history over to the new name (renames.py). And any rename still waiting
+    # from before this start - Tag Historian could not be reached, or Home
+    # Assistant restarted in between - is taken up again.
+    entry.async_on_unload(async_track_renames(hass, entry))
+    async_resume(hass, entry)
 
     return True
 
@@ -148,6 +165,7 @@ async def async_remove_entry(
     dismissed by fixing it, so removing the entry has to remove them too.
     """
     async_clear_write_issues(hass, entry)
+    async_clear_renamed_issues(hass, entry)
     # The counters survive a reload on purpose; they must not survive the
     # account being removed and re-added, which is a different account's worth
     # of history as far as anybody reading them is concerned.

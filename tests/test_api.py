@@ -7,6 +7,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from custom_components.tag_historian.api import (
+    LineageOutcome,
     TagHistorianAuthError,
     TagHistorianClient,
     WriteOutcome,
@@ -269,3 +270,77 @@ def test_a_missing_point_count_is_none_and_not_zero() -> None:
     assert _parse_dropped_points("0 points dropped: tag quota exceeded") == 0
     assert _parse_dropped_points("tag quota exceeded (new tags: a.b)") is None
     assert _parse_dropped_points("") is None
+
+
+# --------------------------------------------------------------------------
+# Renaming and merging tags (renames.py)
+# --------------------------------------------------------------------------
+
+RENAME_URL = "https://api.taghistorian.com/api/tags/rename"
+MERGE_URL = "https://api.taghistorian.com/api/tags/merge"
+
+
+async def test_a_rename_sends_the_two_names_and_200_is_done(client, aioclient_mock) -> None:
+    """200 is also what a rename that is already done answers, so a retry is safe."""
+    aioclient_mock.post(RENAME_URL, status=200, json={"applied": False, "alreadyDone": True})
+
+    result = await client.async_rename_tag("sensor.energy_2", "sensor.energy")
+
+    assert result.outcome is LineageOutcome.DONE
+    assert aioclient_mock.mock_calls[0][2] == {"from": "sensor.energy_2", "to": "sensor.energy"}
+
+
+async def test_a_merge_sends_source_and_target(client, aioclient_mock) -> None:
+    aioclient_mock.post(MERGE_URL, status=200, json={"applied": True})
+
+    result = await client.async_merge_tags("sensor.energy_2", "sensor.energy")
+
+    assert result.outcome is LineageOutcome.DONE
+    assert aioclient_mock.mock_calls[0][2] == {"source": "sensor.energy_2", "target": "sensor.energy"}
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "expected"),
+    [
+        # The new name is a tag already: what turns a rename into a merge.
+        (409, {"error": "exists", "code": "target_exists", "details": "A tag named 'x' already exists."},
+         LineageOutcome.TARGET_EXISTS),
+        # No tag under the old name: nothing was ever stored, nothing to carry.
+        (404, {"error": "Tag not found", "code": "not_found", "details": "There is no tag named 'x'."},
+         LineageOutcome.NOT_FOUND),
+        # The deploy handover, or any other moment the API asks to wait.
+        (503, {"error": "switching over", "code": "switching_over", "details": "try again"},
+         LineageOutcome.UNAVAILABLE),
+        # Everything else is the user's to decide, with the API's own words.
+        (409, {"error": "former name", "code": "former_name_of_another_tag", "details": "It is a former name."},
+         LineageOutcome.REFUSED),
+        (402, {"error": "quota", "code": "tag_quota_exceeded", "details": "No tag free."},
+         LineageOutcome.REFUSED),
+        (403, {"error": "Forbidden"}, LineageOutcome.REFUSED),
+    ],
+)
+async def test_a_rename_answer_is_classified_by_what_happens_next(
+    client, aioclient_mock, status, body, expected
+) -> None:
+    aioclient_mock.post(RENAME_URL, status=status, json=body)
+
+    result = await client.async_rename_tag("sensor.energy_2", "sensor.energy")
+
+    assert result.outcome is expected
+    # The sentence written for a person, where there is one.
+    assert result.message == body.get("details", body.get("error"))
+
+
+async def test_a_rename_with_a_revoked_key_asks_for_a_new_one(client, aioclient_mock) -> None:
+    aioclient_mock.post(RENAME_URL, status=401)
+
+    with pytest.raises(TagHistorianAuthError):
+        await client.async_rename_tag("sensor.energy_2", "sensor.energy")
+
+
+async def test_a_rename_that_gets_no_answer_is_tried_again_later(client, aioclient_mock) -> None:
+    aioclient_mock.post(RENAME_URL, exc=TimeoutError())
+
+    result = await client.async_rename_tag("sensor.energy_2", "sensor.energy")
+
+    assert result.outcome is LineageOutcome.UNAVAILABLE

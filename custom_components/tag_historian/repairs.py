@@ -29,6 +29,12 @@ sending the second one there is this code inventing a reason to charge more.
 
 Every issue is cleared on the next clean 204. An issue that outlives its cause
 teaches people to ignore the repairs panel.
+
+One more card is not about the write path at all, and is not cleared by a 204:
+an entity that was renamed in Home Assistant, whose tag has not been renamed in
+Tag Historian. It offers to carry the history over to the new name, or to start
+a new tag; until it is answered, the readings go on into the old tag, so
+nothing is lost while it waits (renames.py).
 """
 
 from __future__ import annotations
@@ -46,15 +52,24 @@ from homeassistant.helpers.selector import (
     EntitySelectorConfig,
 )
 
+from .api import LineageOutcome
 from .const import (
     CONF_ENTITIES,
+    CONF_SEND_AS,
     DOMAIN,
     ISSUE_DAILY_QUOTA,
+    ISSUE_ENTITY_RENAMED,
     ISSUE_SERVICE_UNAVAILABLE,
     ISSUE_TAG_QUOTA,
     ISSUE_WRITE_FORBIDDEN,
     PRICING_URL,
     SERVICE_UNAVAILABLE_ISSUE_AFTER_SECONDS,
+)
+from .renames import (
+    async_carry_history,
+    async_stop_carrying,
+    renamed_placeholders,
+    send_as,
 )
 
 # Issue ids are per config entry: two Tag Historian accounts on one Home
@@ -246,9 +261,19 @@ class TagQuotaRepairFlow(RepairsFlow):
         current: list[str] = list(self._entry.options.get(CONF_ENTITIES, []))
 
         if user_input is not None:
+            chosen = list(user_input[CONF_ENTITIES])
             self.hass.config_entries.async_update_entry(
                 self._entry,
-                options={**self._entry.options, CONF_ENTITIES: user_input[CONF_ENTITIES]},
+                options={
+                    **self._entry.options,
+                    CONF_ENTITIES: chosen,
+                    # An entity no longer selected sends nothing, under any name.
+                    CONF_SEND_AS: {
+                        entity_id: history
+                        for entity_id, history in send_as(self._entry.options).items()
+                        if entity_id in chosen
+                    },
+                },
             )
             # The issue describes a state that the new selection may have just
             # ended. Clear it and let the next write decide whether it is true
@@ -270,6 +295,85 @@ class TagQuotaRepairFlow(RepairsFlow):
         )
 
 
+class EntityRenamedRepairFlow(RepairsFlow):
+    """An entity was renamed in Home Assistant: carry its history over, or not.
+
+    Two choices, and the card says what each does. Carrying it over renames
+    the tag in Tag Historian (or merges it into the tag the new name has
+    already) - nothing is copied, the history reads under the new name, and
+    the readings go under the new name from then on. Not carrying it over
+    sends the readings under the new name from now on as a new tag, and leaves
+    the history where it is, under the old one.
+    """
+
+    def __init__(
+        self, entry: ConfigEntry, entity_id: str, history: str, merge: bool, refusal: str
+    ) -> None:
+        self._entry = entry
+        self._entity_id = entity_id
+        self._history = history
+        self._merge = merge
+        # What Tag Historian said when it was asked automatically and refused,
+        # so the card does not offer as new a choice that has been tried.
+        self._refusal = refusal
+
+    def _placeholders(self) -> dict[str, str]:
+        return renamed_placeholders(self._entity_id, self._history, self._refusal or None)
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        if self._merge:
+            return self.async_show_menu(
+                step_id="merge_choice",
+                menu_options=["merge_tags", "keep_apart"],
+                description_placeholders=self._placeholders(),
+            )
+        return self.async_show_menu(
+            step_id="rename_choice",
+            menu_options=["rename_tag", "new_tag"],
+            description_placeholders=self._placeholders(),
+        )
+
+    async def async_step_rename_tag(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        return await self._carry()
+
+    async def async_step_merge_tags(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        return await self._carry()
+
+    async def _carry(self) -> FlowResult:
+        result = await async_carry_history(
+            self.hass, self._entry, self._entity_id, self._history, merge=self._merge
+        )
+        if result.outcome in (LineageOutcome.DONE, LineageOutcome.NOT_FOUND):
+            return self.async_create_entry(data={})
+        if result.outcome is LineageOutcome.UNAVAILABLE:
+            # Nothing changed, and nothing is lost meanwhile: the readings go
+            # on into the old tag. The card stays for another try.
+            return self.async_abort(reason="carry_unavailable")
+        return self.async_abort(
+            reason="carry_refused",
+            description_placeholders={"message": result.message or "no reason given"},
+        )
+
+    async def async_step_new_tag(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        await async_stop_carrying(self.hass, self._entry, self._entity_id)
+        return self.async_create_entry(data={})
+
+    async def async_step_keep_apart(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        # The readings already go under the new name, into its own history;
+        # leaving the old tag as it is takes nothing more than closing the card.
+        return self.async_create_entry(data={})
+
+
 async def async_create_fix_flow(
     hass: HomeAssistant,
     issue_id_: str,
@@ -284,4 +388,12 @@ async def async_create_fix_flow(
         # The entry was removed while the card was on screen. Confirming is
         # then the only honest option - there is nothing left to reconfigure.
         return ConfirmRepairFlow()
+    if issue_id_.startswith(f"{ISSUE_ENTITY_RENAMED}_"):
+        return EntityRenamedRepairFlow(
+            entry,
+            str((data or {}).get("entity_id")),
+            str((data or {}).get("history")),
+            (data or {}).get("merge") == "yes",
+            str((data or {}).get("refusal") or ""),
+        )
     return TagQuotaRepairFlow(entry)

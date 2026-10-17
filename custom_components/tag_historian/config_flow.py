@@ -70,13 +70,16 @@ from .api import (
 from .const import (
     CONF_API_KEY,
     CONF_ENTITIES,
+    CONF_FOLLOW_RENAMES,
     CONF_HOST,
     CONF_MIN_INTERVAL,
+    CONF_SEND_AS,
     DEFAULT_HOST,
     DEFAULT_MIN_INTERVAL_SECONDS,
     DOMAIN,
 )
 from .line_protocol import tag_name_for_entity
+from .renames import send_as
 from .selection import (
     EntityFacts,
     Proposal,
@@ -174,6 +177,14 @@ class SelectionStepsMixin:
     _min_interval: int = DEFAULT_MIN_INTERVAL_SECONDS
     _show_everything: bool = False
     _selection_touched: bool = False
+    _follow_renames: bool = False
+    # Entities renamed in Home Assistant whose readings still go under their
+    # old tag (renames.py) - empty for an entry being created.
+    _send_as: dict[str, str] = {}  # noqa: RUF012 - replaced, never mutated
+
+    def _tag_of(self, entity_id: str) -> str:
+        """The tag this entity's readings land in - its old one while a rename waits."""
+        return tag_name_for_entity(self._send_as.get(entity_id, entity_id))
 
     def _new_tag_count(self, selected: list[str]) -> int:
         """How many of these entities do NOT already have a tag.
@@ -186,7 +197,7 @@ class SelectionStepsMixin:
         return sum(
             1
             for entity_id in selected
-            if tag_name_for_entity(entity_id) not in self._existing_tags
+            if self._tag_of(entity_id) not in self._existing_tags
         )
 
     async def async_step_select(
@@ -198,6 +209,7 @@ class SelectionStepsMixin:
         if user_input is not None:
             self._selected = list(user_input[CONF_ENTITIES])
             self._min_interval = int(user_input[CONF_MIN_INTERVAL])
+            self._follow_renames = bool(user_input.get(CONF_FOLLOW_RENAMES, False))
             self._selection_touched = True
             asked_for_everything = bool(user_input.get(CONF_SHOW_ALL, False))
 
@@ -249,6 +261,9 @@ class SelectionStepsMixin:
                 ),
                 vol.Required(
                     CONF_SHOW_ALL, default=self._show_everything
+                ): bool,
+                vol.Required(
+                    CONF_FOLLOW_RENAMES, default=self._follow_renames
                 ): bool,
             }
         )
@@ -344,7 +359,8 @@ class SelectionStepsMixin:
                 # counted in - free TAG slots. Passing an entity count here is
                 # what let a "trim" finish still over budget.
                 trimmed = trim_to_new_tag_budget(
-                    self._selected, candidates, self._existing_tags, available
+                    self._selected, candidates, self._existing_tags, available,
+                    tag_name_for=self._tag_of,
                 )
                 if not trimmed:
                     # Trimming a selection down to nothing is not a trim, it is
@@ -478,6 +494,7 @@ class TagHistorianConfigFlow(SelectionStepsMixin, ConfigFlow, domain=DOMAIN):
             options={
                 CONF_ENTITIES: self._selected,
                 CONF_MIN_INTERVAL: self._min_interval,
+                CONF_FOLLOW_RENAMES: self._follow_renames,
             },
         )
 
@@ -538,6 +555,8 @@ class TagHistorianOptionsFlow(SelectionStepsMixin, OptionsFlow):
         self._min_interval = int(
             entry.options.get(CONF_MIN_INTERVAL, DEFAULT_MIN_INTERVAL_SECONDS)
         )
+        self._follow_renames = bool(entry.options.get(CONF_FOLLOW_RENAMES, False))
+        self._send_as = send_as(entry.options)
 
         client = TagHistorianClient(
             async_get_clientsession(self.hass),
@@ -565,6 +584,15 @@ class TagHistorianOptionsFlow(SelectionStepsMixin, OptionsFlow):
             data={
                 CONF_ENTITIES: self._selected,
                 CONF_MIN_INTERVAL: self._min_interval,
+                CONF_FOLLOW_RENAMES: self._follow_renames,
+                # Kept for the entities still selected: a rename waiting to be
+                # confirmed is not undone by changing something else. An
+                # entity no longer selected sends nothing, under any name.
+                CONF_SEND_AS: {
+                    entity_id: history
+                    for entity_id, history in self._send_as.items()
+                    if entity_id in self._selected
+                },
             }
         )
 

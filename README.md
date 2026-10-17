@@ -39,6 +39,10 @@ What this integration adds:
   number of series, not by how much data they hold, so *which* entities you
   send is the decision that matters. This shows you the budget as you spend it,
   and refuses to let you sail past it without saying so.
+- **History that survives a rename.** Rename an entity in Home Assistant, or
+  replace a meter and give the new one the old one's id, and the series follows
+  it with its history intact - nothing is lost, nothing starts over, and it does
+  not cost a second series. See [When you rename an entity](#when-you-rename-an-entity).
 - **It can tell you why data stopped arriving.** The built-in integration
   cannot: it has one failure mode, it never reads the `Retry-After` header, and
   it has no notion of the API's "some of that batch was refused" answer. This
@@ -82,7 +86,10 @@ name that does not exist yet — against your tag allowance. It cannot issue or
 revoke API keys, not even its own; it cannot delete a tag, which is what deletes
 that tag's history; it cannot change your plan or cancel your subscription; and
 it cannot invite or remove anyone from your team. Those endpoints refuse it with
-a `403`; they do not quietly do nothing. The key an account recovery hands you
+a `403`; they do not quietly do nothing. It can rename a tag or merge one into
+another, which is how this integration carries a renamed entity's history
+over. Neither deletes anything: the history stays where it is stored, and both
+can be undone in Tag Historian Explorer. The key an account recovery hands you
 is **Admin**, which is the whole account, and Home Assistant has no use for any
 of it.
 
@@ -166,6 +173,49 @@ choose it.
 either: they are Home Assistant saying it has nothing to report. A gap in the
 chart means exactly that — Tag Historian never stores an invented zero.
 
+## When you rename an entity
+
+A series is named after its entity's id: `sensor.energy_meter` is stored as the
+series `sensor.energy_meter`. Rename the entity in Home Assistant and this
+integration follows it. The selection is updated to the new id, and readings
+keep arriving - before version 2026.11.0 they stopped without a word, because
+the integration was listening for an id that no longer existed.
+
+The history follows as well, in one of two ways:
+
+- **With "Rename tags when entities are renamed" switched on** (on the Choose
+  screen, and under Configure later), the integration asks Tag Historian to
+  rename the series to the new id straight away. Nothing is copied or moved:
+  the readings from before stay where they are stored and read under the new
+  name, and it is still one series. If the new id already has a series of its
+  own - you replaced a meter and gave the new one the old one's id - the two
+  are merged into one history under that name, and the merged-in one stops
+  counting against your plan. If Tag Historian cannot be reached, the
+  integration asks again later; the readings go on into the old series
+  meanwhile.
+- **With it off** (the default), the readings go on into the series the entity
+  already has, so nothing is lost and no second series is started, and a
+  Repairs card asks what you want: rename the series and keep its history, or
+  start a new series under the new id and leave the history under the old
+  name, which takes one more series on your plan. For a replaced meter, the card
+  asks whether to merge the two histories or keep them apart.
+
+Tag Historian keeps the old id as a *former name* of the series. Anything still
+sent under it - a script, Home Assistant's built-in `influxdb` integration - is
+stored in the renamed series, and a chart or a query that asks for the old name
+gets the renamed series. Both can be undone in Tag Historian Explorer, under
+**Tags**: a rename by renaming the series back, a merge with **Separate** next
+to the name under **Former names**.
+Readings are never adjusted: a replacement meter that started from zero still
+shows the drop where the two histories meet.
+
+A rename made while this integration is not running - disabled, or not yet
+installed - is not seen: the entity simply stops arriving under its old id.
+Select it again under its new id, and rename the old series to the new id in
+Tag Historian Explorer (**Tags**, open the series, **Rename**) to keep its
+history in one piece - or, if readings under the new id have already started a
+series, use **Merge into...** instead.
+
 ## Sensors it adds
 
 | Sensor | What it is |
@@ -210,6 +260,7 @@ Everything below shows up in **Settings → Repairs**.
 | Today's reading allowance is spent | Holds readings in memory and waits exactly as long as the API asks — it does not hammer a closed door |
 | Tag Historian is busy or briefly unreachable | Holds and retries quietly; only raises a card if it lasts, and that card never mentions your plan, because this is not about your plan |
 | Your account cannot write yet | Shows Tag Historian's own explanation, word for word |
+| An entity you send was renamed | Follows it and keeps its readings arriving in its history; renames the series in Tag Historian if you switched that on, or asks you on a card - see [When you rename an entity](#when-you-rename-an-entity) |
 
 The buffer is held **in memory only**. When Home Assistant stops — a restart,
 an update, a reboot — or when the entry is reloaded because you changed the

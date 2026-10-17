@@ -160,12 +160,17 @@ class StateForwarder:
         entity_ids: list[str],
         min_interval: int,
         stats: ForwarderStats | None = None,
+        send_as: dict[str, str] | None = None,
     ) -> None:
         self.hass = hass
         self.entry = entry
         self.stats = stats if stats is not None else ForwarderStats()
         self._client = client
         self._entity_ids = list(entity_ids)
+        # An entity renamed in Home Assistant whose tag has not been renamed
+        # yet is sent under its OLD id, so its readings go on into the history
+        # they belong to instead of starting a second tag (renames.py).
+        self._send_as = dict(send_as or {})
         self._min_interval = min_interval
         self._queue: deque[str] = deque()
         self._last_sent: dict[str, datetime] = {}
@@ -430,7 +435,7 @@ class StateForwarder:
         # not State.name: that falls back to a name made from the entity id,
         # and an entity without a friendly name should not be given one.
         line = encode_point(
-            entity_id,
+            self._send_as.get(entity_id, entity_id),
             value,
             stamp,
             new_state.attributes.get("unit_of_measurement"),
