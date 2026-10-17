@@ -104,7 +104,7 @@
       },
       "import_history": {
         "title": "Import recorded history",
-        "description": "Sends what Home Assistant's recorder holds for the entities below to Tag Historian, with the original timestamps, so the history on this box is kept even if the box is not.\n\nImported readings do not count against your daily reading allowance. They count against your import allowance instead: {remaining} of {total} readings left - {readings_per_day} a day times your plan's {window_days}-day full-resolution window, for all imports together. Readings older than that window are skipped, and so is anything Tag Historian already has, so running an import twice stores nothing twice.\n\nOnly history is imported: readings older than the moment the import starts, and for an entity that is already being sent to Tag Historian, older than the first reading it received. Everything after that is your live data and is already there.\n\nThe recorder here keeps {recorder_days} days of states. The hourly long-term statistics Home Assistant keeps after that are not imported: they are averages, not readings.\n\nThe import runs in the background. The \"Tag Historian history import\" sensor shows how far it is, a notification says when it is done, and a restart carries on where it stopped.",
+        "description": "Sends what Home Assistant's recorder holds for the entities below to Tag Historian, with the original timestamps, so the history on this box is kept even if the box is not.\n\nImported readings do not count against your daily reading allowance. They count against your import allowance instead: {remaining} of {total} readings left - {readings_per_day} a day times your plan's {window_days}-day full-resolution window, for all imports together. Readings older than that window are skipped, and so is anything Tag Historian already has, so running an import twice stores nothing twice.\n\nOnly history is imported: readings older than the moment the import starts, older than the first reading of the entity Tag Historian received live, and older than the start of the first import of it. Everything after that is your live data, which this integration sends itself - including what is still waiting to be sent.\n\nThe recorder here keeps {recorder_days} days of states. The hourly long-term statistics Home Assistant keeps after that are not imported: they are averages, not readings.\n\nThe import runs in the background. The \"Tag Historian history import\" sensor shows how far it is, a notification says when it is done, and a restart carries on where it stopped.",
         "data": {
           "entities": "Entities to import",
           "days": "How far back"
@@ -191,7 +191,7 @@
   "services": {
     "import_history": {
       "name": "Import history",
-      "description": "Sends the history Home Assistant's recorder holds for entities you keep history for to Tag Historian, with the original timestamps. Imported readings count against the account's import allowance, not the daily one, and only history older than each entity's first live reading is imported.",
+      "description": "Sends the history Home Assistant's recorder holds for entities you keep history for to Tag Historian, with the original timestamps. Imported readings count against the account's import allowance, not the daily one, and only history is imported: nothing this integration sends live, or still has to.",
       "fields": {
         "config_entry_id": {
           "name": "Account",

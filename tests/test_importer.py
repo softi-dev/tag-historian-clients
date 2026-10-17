@@ -8,6 +8,7 @@ will not change; and a restart carries it on under the same import.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -17,7 +18,11 @@ from homeassistant.core import HomeAssistant, State
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers.service import async_get_all_descriptions
 from homeassistant.helpers.storage import Store
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from homeassistant.util import dt as dt_util
+from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
+    async_fire_time_changed,
+)
 
 from custom_components.tag_historian import importer as importer_module
 from custom_components.tag_historian.api import (
@@ -27,6 +32,8 @@ from custom_components.tag_historian.api import (
     ImportSession,
     TagHistorianConnectionError,
     TagHistorianImportRefused,
+    WriteOutcome,
+    WriteResult,
 )
 from custom_components.tag_historian.const import (
     ATTR_DAYS,
@@ -38,6 +45,7 @@ from custom_components.tag_historian.const import (
     SERVICE_IMPORT_HISTORY,
     STORAGE_VERSION,
 )
+from custom_components.tag_historian.forwarder import StateForwarder
 from custom_components.tag_historian.importer import (
     STATUS_FINISHED,
     STATUS_RUNNING,
@@ -55,6 +63,7 @@ TEMP = "sensor.outdoor_temperature"
 NOW = datetime(2026, 10, 17, 12, 0, tzinfo=UTC)
 WINDOW_START = NOW - timedelta(days=14)
 KEY = "tag_historian.import_entry.import"
+REAL_SLEEP = asyncio.sleep
 
 
 class FakeRecorder:
@@ -380,6 +389,58 @@ async def test_a_restart_carries_the_import_on_under_the_same_import(
     assert [value for _, _, value in client.sent] == [2.0, 3.0, 4.0], "after the cursor, not from the start"
     assert importer.progress.import_id == "imp-before-restart"
     assert importer.progress.stored == 5
+    assert importer.progress.status == STATUS_FINISHED
+
+
+async def test_what_the_live_forwarder_still_has_to_deliver_is_not_imported(
+    hass: HomeAssistant, entry, recorder, freezer, monkeypatch
+) -> None:
+    """Readings waiting in the forwarder are the forwarder's, not the import's.
+
+    The case: an account over its daily allowance (or with Tag Historian
+    down) adds an entity, whose live readings then wait in the forwarder, and
+    runs the import, which the daily allowance does not hold up. To Tag
+    Historian the entity has no first live reading yet, so it holds the import
+    only to the import's own start. Had the import sent those readings, the
+    forwarder would have delivered each a second time at midnight, through an
+    endpoint that does not deduplicate.
+    """
+    # The live path needs the loop to turn, and Home Assistant turns it with
+    # asyncio.sleep(0) - which no_waiting has made return without yielding.
+    # Nothing here retries, so nothing here waits.
+    monkeypatch.setattr(importer_module.asyncio, "sleep", REAL_SLEEP)
+    listening = NOW - timedelta(hours=2)
+    freezer.move_to(listening)
+    over = make_client()
+    over.async_write.return_value = WriteResult(
+        WriteOutcome.DAILY_QUOTA, retry_after=36000, message="spent"
+    )
+    forwarder = StateForwarder(hass, entry, over, [POWER], 10)
+    forwarder.async_start()
+
+    recorder.record(POWER, "1", NOW - timedelta(days=1))  # history from before
+    for minutes in (10, 50, 90):
+        freezer.move_to(listening + timedelta(minutes=minutes))
+        hass.states.async_set(POWER, str(minutes))
+        recorder.record(POWER, str(minutes), dt_util.utcnow())
+        await hass.async_block_till_done()
+        async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=2))
+        await hass.async_block_till_done()
+    assert forwarder.stats.queued == 3, "held: today's allowance is spent"
+
+    freezer.move_to(NOW)
+    client = ImportClient()
+    importer = HistoryImporter(
+        hass, entry, client, Store(hass, STORAGE_VERSION, KEY), 10, forwarder.history_boundary
+    )
+    await importer.async_start([POWER], None)
+    await _run(importer)
+    forwarder.async_stop()
+
+    assert [value for _, _, value in client.sent] == [1.0], (
+        "the history from before the forwarder started listening, and nothing it holds"
+    )
+    assert importer.progress.ends == {POWER: listening.timestamp()}
     assert importer.progress.status == STATUS_FINISHED
 
 

@@ -9,13 +9,24 @@ What Tag Historian holds an import to, and what this therefore stops at:
 
 * the plan's full-resolution window - older readings are skipped, so the
   import starts there rather than sending what would be thrown away;
-* history only: readings older than the moment the import started, and for
-  an entity that is already forwarded live, older than its first live reading
+* history only: readings older than the moment the import started, older
+  than the entity's first live reading if it is already forwarded live, and
+  older than the start of the first import that brought readings into it
   (the API says where that line is in every answer, and the import of that
   entity ends there);
 * the account's import allowance, which imported readings are counted against
   INSTEAD of the daily one; when it is used up the import stops and says so;
 * the tag limit and the storage cap, as for live data.
+
+And one line of its own: where the live forwarder's part of an entity begins
+(:meth:`.forwarder.StateForwarder.history_boundary`) - the oldest reading of it
+the forwarder still has to deliver, or, for an entity it has not delivered
+anything of yet, when it started listening. Tag Historian cannot draw that
+line: an entity whose live readings are still waiting in the forwarder - over
+the daily allowance, or during an outage - has no first live reading there
+yet, so the import would store them, and the forwarder would then deliver them
+a second time through the live endpoint, which does not deduplicate. The line
+is taken when the import starts and saved with it.
 
 What it sends is what the live forwarder would have sent: the same numbers and
 two-state words, ``unavailable`` left as a gap, the same minimum interval
@@ -34,6 +45,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -107,13 +119,18 @@ class ImportProgress:
     # Per entity: the timestamp (epoch seconds) of the last reading of it
     # that Tag Historian has answered for. A restart carries on after it.
     cursor: dict[str, float] = field(default_factory=dict)
+    # Per entity: where the live forwarder's part of it began when the import
+    # started (epoch seconds); the import of it ends there. Absent for an
+    # entity whose only line is Tag Historian's own.
+    ends: dict[str, float] = field(default_factory=dict)
     stored: int = 0
     compressed: int = 0
     duplicates: int = 0
     outside_window: int = 0
     refused: int = 0
     # Of ``refused``: readings that were already live data - not older than
-    # their entity's first live reading or the import's start.
+    # their entity's first live reading, the first import into it, or the
+    # import's start.
     not_history: int = 0
     refused_tags: list[str] = field(default_factory=list)
     allowance_remaining: int | None = None
@@ -145,12 +162,16 @@ class HistoryImporter:
         client: TagHistorianClient,
         store: Store[dict[str, Any]],
         min_interval: int,
+        boundary: Callable[[str], float | None] | None = None,
     ) -> None:
         self.hass = hass
         self.entry = entry
         self._client = client
         self._store = store
         self._min_interval = min_interval
+        # StateForwarder.history_boundary in Home Assistant; None only in tests
+        # that are about something else.
+        self._boundary = boundary
         self.progress = ImportProgress()
         self._task: asyncio.Task[None] | None = None
 
@@ -193,6 +214,7 @@ class HistoryImporter:
             window_start=_iso(session.window_start),
             since=_iso(since),
             entities=list(entity_ids),
+            ends=self._live_lines(entity_ids),
             allowance_remaining=session.allowance.remaining,
         )
         await self._async_save()
@@ -206,6 +228,16 @@ class HistoryImporter:
         )
         self._spawn()
         return self.progress
+
+    def _live_lines(self, entity_ids: list[str]) -> dict[str, float]:
+        """Per entity, where the live forwarder's part begins right now (see the module docstring)."""
+        if self._boundary is None:
+            return {}
+        return {
+            entity_id: line
+            for entity_id in entity_ids
+            if (line := self._boundary(entity_id)) is not None
+        }
 
     def _spawn(self) -> None:
         self._task = self.entry.async_create_background_task(
@@ -264,7 +296,14 @@ class HistoryImporter:
         start = since
         if answered is not None:
             start = max(start, datetime.fromtimestamp(answered, UTC))
+        # Where the forwarder's part begins: as it was when the import
+        # started, and as it is now - a resumed import has a new forwarder.
+        # Everything after either is the forwarder's to deliver, so the
+        # earlier of the two holds.
         end = started_at
+        for line in (progress.ends.get(entity_id), *self._live_lines([entity_id]).values()):
+            if line is not None:
+                end = min(end, datetime.fromtimestamp(line, UTC))
         last_kept = answered
         tag = tag_name_for_entity(entity_id)
         pending: list[tuple[float, dict[str, Any]]] = []
@@ -441,7 +480,8 @@ def _summary(progress: ImportProgress) -> str:
     if progress.not_history:
         lines.append(
             f"{progress.not_history} were already your live data - not older than their entity's "
-            "first reading in Tag Historian, or than the import's start - and were not imported."
+            "first reading in Tag Historian, the first import into it, or this import's start - "
+            "and were not imported."
         )
     if progress.refused_tags:
         lines.append(

@@ -218,8 +218,15 @@ async def async_setup_entry(
     # path has the same hazard one layer up and its own answer - a shutdown
     # job, registered in StateForwarder.async_start.
 
+    # The importer asks the forwarder where each entity's live part begins, so
+    # it never imports a reading the forwarder is still going to deliver.
     importer = HistoryImporter(
-        hass, entry, client, _store(hass, STORAGE_KEY_IMPORT, entry), min_interval
+        hass,
+        entry,
+        client,
+        _store(hass, STORAGE_KEY_IMPORT, entry),
+        min_interval,
+        forwarder.history_boundary,
     )
 
     entry.runtime_data = TagHistorianData(client, coordinator, forwarder, importer)

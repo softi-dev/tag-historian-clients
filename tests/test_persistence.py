@@ -50,6 +50,7 @@ from .conftest import make_client
 
 KEY = "tag_historian.test_entry.forwarder"
 POWER = "sensor.house_power"
+DOOR = "binary_sensor.back_door"
 T0 = datetime(2026, 10, 17, 8, 0, tzinfo=UTC)
 
 
@@ -58,16 +59,27 @@ class StubClient:
 
     def __init__(self, *results) -> None:
         self.bodies: list[str] = []
+        # Only the bodies answered with a delivery, in order.
+        self.delivered: list[str] = []
         self._results = list(results)
 
     async def async_write(self, body: str):
         self.bodies.append(body)
-        if not self._results:
-            return WriteResult(WriteOutcome.OK)
-        result = self._results.pop(0)
+        result = self._results.pop(0) if self._results else WriteResult(WriteOutcome.OK)
         if isinstance(result, Exception):
             raise result
+        if result.outcome is WriteOutcome.OK:
+            self.delivered.append(body)
         return result
+
+    def delivered_values(self, entity: str) -> list[str]:
+        """The values delivered for one entity (its object id), in order."""
+        return [
+            value
+            for body in self.delivered
+            for line, value in zip(body.splitlines(), _values(body), strict=True)
+            if f"entity_id={entity}" in line
+        ]
 
     @property
     def lines(self) -> list[str]:
@@ -336,6 +348,204 @@ async def test_readings_the_buffer_evicted_are_read_back_and_sent_before_the_liv
     assert delivered[-5:] == ["11.0", "12.0", "13.0", "14.0", "15.0"], client.values
     assert forwarder.stats.sent == 6, "every reading once - none of them twice"
     assert forwarder.stats.backfilled == 2
+
+
+async def test_an_evicted_reading_of_an_entity_with_nothing_else_held_is_read_back(
+    hass: HomeAssistant, started, recorder, monkeypatch, freezer
+) -> None:
+    """The slow entity a chatty one pushes out of the buffer.
+
+    The door reports once during the outage; power readings then evict it,
+    and the door holds nothing else. Its gap used to end where the forwarder
+    started listening - before its own watermark - so no pass ever read it,
+    and the door's next reading moved the watermark past it for good.
+    """
+    monkeypatch.setattr(forwarder_module, "MAX_QUEUE_LENGTH", 3)
+    freezer.move_to(T0)
+    client = StubClient(
+        WriteResult(WriteOutcome.OK),
+        *[TagHistorianConnectionError("down")] * 4,
+    )
+    forwarder = await started(client, entities=[POWER, DOOR])
+
+    # Both delivered once: the watermarks.
+    for entity_id, value in ((POWER, "10"), (DOOR, "on")):
+        hass.states.async_set(entity_id, value)
+        recorder.record(entity_id, value, dt_util.utcnow())
+    await hass.async_block_till_done()
+    await _tick(hass, 2)
+
+    # The outage: the door reports once, then power evicts it.
+    for entity_id, value in ((DOOR, "off"), (POWER, "11"), (POWER, "12"), (POWER, "13")):
+        freezer.tick(timedelta(seconds=20))
+        hass.states.async_set(entity_id, value)
+        recorder.record(entity_id, value, dt_util.utcnow())
+        await hass.async_block_till_done()
+        await _tick(hass, 2)
+    assert forwarder.stats.dropped_overflow == 1
+
+    for _ in range(6):
+        await _tick(hass, CONNECTION_RETRY_SECONDS + 1)
+
+    # The door reports again, later, and is delivered as usual.
+    freezer.tick(timedelta(minutes=10))
+    hass.states.async_set(DOOR, "on")
+    recorder.record(DOOR, "on", dt_util.utcnow())
+    await hass.async_block_till_done()
+    await _tick(hass, 2)
+
+    assert client.delivered_values("back_door") == ["1.0", "0.0", "1.0"], (
+        "the evicted reading is read back, and before the door's next one"
+    )
+    assert client.delivered_values("house_power") == ["10.0", "11.0", "12.0", "13.0"]
+    assert forwarder.stats.backfilled == 1
+
+
+async def test_readings_let_go_of_while_the_allowance_is_spent_are_not_read_back(
+    hass: HomeAssistant, started, recorder, monkeypatch, freezer
+) -> None:
+    """Over the allowance is not an outage.
+
+    Read back at midnight, the evening's evictions went in front of the new
+    day's readings and spent its allowance first, so an account that produces
+    more than its allowance every day fell further behind live every day. Now
+    the held buffer goes at midnight, as before read-back existed, and what
+    was let go of while the allowance was spent stays counted, not re-sent.
+    """
+    monkeypatch.setattr(forwarder_module, "MAX_QUEUE_LENGTH", 3)
+    freezer.move_to(T0)
+    client = StubClient(
+        WriteResult(WriteOutcome.OK),
+        WriteResult(WriteOutcome.DAILY_QUOTA, retry_after=600, message="spent"),
+    )
+    forwarder = await started(client)
+
+    hass.states.async_set(POWER, "10")
+    recorder.record(POWER, "10", dt_util.utcnow())
+    await hass.async_block_till_done()
+    await _tick(hass, 2)
+
+    for value in ("11", "12", "13", "14", "15"):
+        freezer.tick(timedelta(seconds=20))
+        hass.states.async_set(POWER, value)
+        recorder.record(POWER, value, dt_util.utcnow())
+        await hass.async_block_till_done()
+        await _tick(hass, 2)
+    assert forwarder.stats.dropped_overflow == 2
+
+    await _tick(hass, 601)  # the allowance resets
+    for _ in range(3):
+        await _tick(hass, 2)
+
+    assert client.delivered_values("house_power") == ["10.0", "13.0", "14.0", "15.0"], (
+        "the held buffer, and not the two let go of over the allowance"
+    )
+    assert forwarder.stats.backfilled == 0
+
+
+async def test_an_outage_backlog_waiting_when_the_allowance_runs_out_is_still_delivered(
+    hass: HomeAssistant, started, recorder, monkeypatch, freezer
+) -> None:
+    """The exception to the rule above, and why it exists.
+
+    A reading read back from an outage is waiting when the allowance runs
+    out. Letting go of a newer reading of that entity for good would move its
+    watermark past the waiting one, and a restart - which drops what was read
+    back, because the recorder still has it - would then lose it with no
+    counter moving. So that entity's eviction is read back like an outage's.
+    """
+    monkeypatch.setattr(forwarder_module, "MAX_QUEUE_LENGTH", 3)
+    freezer.move_to(T0)
+    client = StubClient(
+        WriteResult(WriteOutcome.OK),
+        TagHistorianConnectionError("down"),
+        WriteResult(WriteOutcome.DAILY_QUOTA, retry_after=600, message="spent"),
+    )
+    forwarder = await started(client)
+
+    hass.states.async_set(POWER, "10")
+    recorder.record(POWER, "10", dt_util.utcnow())
+    await hass.async_block_till_done()
+    await _tick(hass, 2)
+
+    # The outage, short enough that no retry falls inside it: 11 is evicted
+    # and read back.
+    for value in ("11", "12", "13", "14"):
+        freezer.tick(timedelta(seconds=5))
+        hass.states.async_set(POWER, value)
+        recorder.record(POWER, value, dt_util.utcnow())
+        await hass.async_block_till_done()
+        await _tick(hass, 2)
+    assert forwarder.stats.backfilled == 1
+
+    # Tag Historian answers again - with "today's allowance is spent".
+    await _tick(hass, CONNECTION_RETRY_SECONDS + 1)
+    freezer.tick(timedelta(seconds=5))
+    hass.states.async_set(POWER, "15")
+    recorder.record(POWER, "15", dt_util.utcnow())
+    await hass.async_block_till_done()
+    await _tick(hass, 2)
+
+    await _tick(hass, 601)
+    for _ in range(3):
+        await _tick(hass, 2)
+
+    assert client.delivered_values("house_power") == ["10.0", "11.0", "12.0", "13.0", "14.0", "15.0"]
+    assert forwarder.stats.backfilled == 2
+
+
+async def test_a_crash_before_the_first_answer_reads_the_restored_buffer_and_the_gap_back(
+    hass: HomeAssistant, entry, hass_storage, recorder, freezer
+) -> None:
+    """A run that has had no answer yet has acknowledged nothing.
+
+    The clean stop saved one reading and the watermark before it; the next run
+    restored them and died before its first write was answered - a boot loop,
+    a second power flicker. That run used to be saved as "writes going
+    through" from its first moment, so the run after it dropped the watermark
+    and read nothing back: the saved reading and the gap before it, gone with
+    no counter moving.
+    """
+    freezer.move_to(T0 + timedelta(minutes=5))
+    held = T0 + timedelta(seconds=60)
+    _seed(
+        hass_storage,
+        clean=True,
+        sending_ok=False,
+        acked={POWER: T0.timestamp()},
+        queue=[[POWER, held.timestamp(), "W,domain=sensor,entity_id=house_power value=3.0 1"]],
+    )
+    recorder.record(POWER, "2", T0 + timedelta(seconds=30))
+    recorder.record(POWER, "3", held)
+
+    crashed = StateForwarder(hass, entry, StubClient(), [POWER], 0, store=Store(hass, STORAGE_VERSION, KEY))
+    await crashed.async_restore()
+    assert _saved(hass_storage)["sending_ok"] is False, "nothing answered yet"
+    # ... and Home Assistant dies here.
+
+    client = StubClient()
+    forwarder = StateForwarder(hass, entry, client, [POWER], 0, store=Store(hass, STORAGE_VERSION, KEY))
+    await forwarder.async_restore()
+    forwarder.async_start()
+    await hass.async_block_till_done()
+    await _tick(hass, 2)
+    forwarder.async_stop()
+
+    assert client.delivered_values("house_power") == ["2.0", "3.0"]
+
+
+async def test_the_first_answer_marks_writes_as_going_through(
+    hass: HomeAssistant, started, hass_storage
+) -> None:
+    client = StubClient()
+    await started(client)
+    assert _saved(hass_storage)["sending_ok"] is False
+
+    hass.states.async_set(POWER, "1500")
+    await hass.async_block_till_done()
+    await _tick(hass, 2)
+
+    assert _saved(hass_storage)["sending_ok"] is True
 
 
 async def test_a_batch_on_the_wire_is_saved_as_answered_so_it_is_never_read_back(

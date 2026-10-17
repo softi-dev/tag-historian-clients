@@ -28,9 +28,12 @@ that overflowed, a restart, an entry that was disabled for a while - it reads
 the recorder for what lies between that reading and the oldest one it still
 holds, and sends that first (:meth:`StateForwarder._async_backfill`). That is
 delayed LIVE data: it goes to the same endpoint and counts against the daily
-allowance like any reading. It never re-sends a reading Tag Historian may
-already have, because the live endpoint does not deduplicate: a batch that
-was on the wire when its answer was lost counts as delivered, never as a gap.
+allowance like any reading. A reading let go of while that allowance was
+spent is the exception: it is over the allowance, not lost to an outage, and
+is not read back (:meth:`StateForwarder._forfeit`). It does not re-send a
+reading Tag Historian may already have, because the live endpoint does not
+deduplicate: a batch that was on the wire when its answer was lost counts as
+delivered, never as a gap.
 
 Everything it cannot place still moves a counter, because a reading that
 vanishes without one is indistinguishable from a sensor that stopped
@@ -245,14 +248,31 @@ class StateForwarder:
         self._paused = False
         self._unavailable_since: datetime | None = None
         self._unsub_stop: CALLBACK_TYPE | None = None
-        # When this forwarder started listening: the end of the gap for an
-        # entity with nothing held.
+        # When this forwarder started listening: where the gap of an entity
+        # nothing has been acknowledged for begins.
         self._listening_since: float = dt_util.utcnow().timestamp()
         # Whether writes are going through. Saved when it changes, because the
         # watermark on disk is exact only while it is false - see async_restore.
-        self._sending_ok = True
+        #
+        # FALSE until this run's first write is answered. It started out true,
+        # and async_restore saved that at once, before this run had sent
+        # anything: a crash in the seconds before the first answer - a boot
+        # loop, a second power flicker, Tag Historian still down - then read
+        # as "crashed while writes were going through", and the next start
+        # dropped the watermark and read nothing back. The buffer the clean
+        # stop had saved, and the whole outage before it, were gone with no
+        # counter moving. Nothing can have been acknowledged since the saved
+        # watermark until something has been answered, so false is the truth.
+        self._sending_ok = False
+        # Set while Tag Historian's last answer was that today's reading
+        # allowance is spent. A reading the full buffer lets go of meanwhile is
+        # over the allowance, not lost to an outage, and is not read back -
+        # see :meth:`_forfeit`.
+        self._over_allowance = False
         self._backfill_task: asyncio.Task[None] | None = None
         self._backfill_running = False
+        # The entity a backfill pass is reading right now, if any.
+        self._reading_back: str | None = None
         # Set when the buffer evicted readings. A backfill pass starts at
         # once - it reads the recorder now and sends when Tag Historian takes
         # data again - and live readings wait behind it, because a live one
@@ -284,13 +304,16 @@ class StateForwarder:
         * it did NOT stop: a crash, a power cut, a kill. Its buffer is gone
           and the watermark on disk is the one saved when it started, or when
           writes last began or stopped failing. If they were failing at the
-          end, nothing was acknowledged since that save and the watermark is
-          exact - the whole outage is read back. If they were going through,
-          some readings after it may already be in Tag Historian, and the
-          live endpoint does not deduplicate, so nothing is read back: the
-          last second or so before the crash may be missing, and nothing is
-          doubled. The recorder itself loses its last few seconds to a power
-          cut, so this asks for no more than it can give.
+          end - or that run had not had a single answer yet - nothing was
+          acknowledged since that save and the watermark is exact: the whole
+          outage is read back, the buffer that run had restored included. (The
+          one reading that can then arrive twice is a retry Tag Historian took
+          in the very moment of the crash, whose answer never came.) If they
+          were going through, some readings after it may already be in Tag
+          Historian, and the live endpoint does not deduplicate, so nothing is
+          read back: the last second or so before the crash may be missing,
+          and nothing is doubled. The recorder itself loses its last few
+          seconds to a power cut, so this asks for no more than it can give.
 
         The store is then marked as a run in progress at once, so a crash
         after this does not bring back - and send twice - a buffer this run
@@ -489,7 +512,7 @@ class StateForwarder:
 
         The backfill's read-ahead is not saved: those readings are still in the
         recorder and still past the watermark, so the next start reads them
-        again.
+        again. (:meth:`_may_forfeit` is what keeps the second half true.)
         """
         self._paused = False
 
@@ -648,12 +671,8 @@ class StateForwarder:
             # Oldest first. During a long outage the recent readings are the
             # ones worth keeping, and an unbounded queue is an out-of-memory
             # kill of the whole Home Assistant process rather than a lost hour
-            # of history. The evicted readings are still in the recorder, and
-            # once Tag Historian answers again the backfill reads them back.
-            self._queue.popleft()
-            self.stats.dropped_overflow += 1
-            self._backfill_wanted = True
-            self._request_backfill()
+            # of history.
+            self._let_go(self._queue.popleft())
 
         self._queue.append(Queued(entity_id, stamp.timestamp(), line))
         self.stats.queued = self._held()
@@ -724,6 +743,78 @@ class StateForwarder:
             candidates.append(acked)
         return max(candidates, default=None)
 
+    def history_boundary(self, entity_id: str) -> float | None:
+        """Where this forwarder's part of an entity's history begins, for the history import.
+
+        From here on, every reading of the entity is this forwarder's to
+        deliver: the oldest of it still held - queued, read back and waiting,
+        or on the wire - and, for an entity nothing has been acknowledged for
+        yet, the moment this forwarder started listening, because its gap is
+        read back from there. An import that stored any of that too would
+        double it once the forwarder delivers it, since the live endpoint does
+        not deduplicate - and Tag Historian cannot stop it, because to Tag
+        Historian an entity that has never been delivered live has no live
+        line yet. None when Tag Historian's own line (its first live reading)
+        is the only one.
+        """
+        candidates = [
+            item.timestamp
+            for item in [*self._queue, *self._backfill, *(self._inflight or [])]
+            if item.entity_id == entity_id
+        ]
+        if entity_id not in self._acked:
+            candidates.append(self._listening_since)
+        return min(candidates, default=None)
+
+    def _let_go(self, item: Queued) -> None:
+        """A reading the full buffer has evicted, oldest first. Counted either way."""
+        self.stats.dropped_overflow += 1
+        if self._over_allowance and self._may_forfeit(item.entity_id):
+            self._forfeit(item)
+            return
+        # Not gone: the recorder still has it, and once Tag Historian answers
+        # again a backfill pass reads it back.
+        self._backfill_wanted = True
+        self._request_backfill()
+
+    def _forfeit(self, item: Queued) -> None:
+        """Let go of a reading for good: evicted while today's allowance was spent.
+
+        Such a reading is over the allowance, not lost to an outage. Reading
+        it back at midnight - which the first version did - put it, and every
+        one like it, in front of the new day's readings: an account that
+        produces more than its allowance every day then spent each morning's
+        allowance on the evening before, ran out earlier, evicted more, and
+        fell further behind live every day, for good - its dashboards and its
+        alerts showing ever older values, until the forwarder was sending
+        what the recorder was about to purge. Before read-back existed the
+        overflow was counted and each day started current; this keeps that.
+
+        So the watermark moves over it, as over a reading the API refused, and
+        no backfill pass reads it back. It was counted as an eviction. The
+        held buffer itself - the newest readings, at most MAX_QUEUE_LENGTH -
+        is still sent when the allowance resets, as it always was.
+        """
+        self._acknowledge([item])
+
+    def _may_forfeit(self, entity_id: str) -> bool:
+        """Whether the watermark of this entity can move without stranding read-back readings.
+
+        Readings of it already read back from an outage - waiting, on the
+        wire, or being read by a pass right now - are older than any held one.
+        A watermark moved past them would make them unreadable again: a
+        restart, which drops the read-ahead because the recorder still has
+        it, would lose them with no counter moving. Such an entity's eviction
+        is read back like an outage's instead; the next day's evictions, with
+        that backlog delivered, are let go of.
+        """
+        if entity_id == self._reading_back:
+            return False
+        waiting = list(self._backfill)
+        if self._inflight and self._inflight_from_backfill:
+            waiting.extend(self._inflight)
+        return all(item.entity_id != entity_id for item in waiting)
+
     @callback
     def _request_backfill(self) -> None:
         """Start a backfill pass, unless one is running or there is no recorder to read."""
@@ -741,17 +832,30 @@ class StateForwarder:
         The gap of an entity runs from the last reading Tag Historian answered
         for - or, for an entity nothing has been answered for yet, from when
         this forwarder started listening - to the oldest live reading still
-        held, or to when this forwarder started listening if none is. Inside
-        it, the same rules as a live reading: numbers and the two-state words
-        only, ``unavailable`` is a gap, and the minimum interval holds -
-        measured from the acknowledged reading, and kept clear of the held one
-        - so a gap that only ever held throttled readings stays empty.
+        held, or, when none is, to the moment this pass began. Inside it, the
+        same rules as a live reading: numbers and the two-state words only,
+        ``unavailable`` is a gap, and the minimum interval holds - measured
+        from the acknowledged reading, and kept clear of the held one - so a
+        gap that only ever held throttled readings stays empty.
+
+        "When none is held" ended at the moment this forwarder started
+        listening, once. That is the same moment at startup, and hours or days
+        before an eviction mid-run - older than the entity's watermark, so the
+        gap came out empty and was skipped. Every entity that changes less
+        often than the buffer's span (a door, a setpoint, a battery: with
+        twenty entities at a ten-second interval the buffer spans about eighty
+        minutes) lost its evicted reading for good, because its next live one
+        was delivered and moved the watermark past it. Ending at the pass's
+        start misses nothing: the forwarder handles a state change the moment
+        Home Assistant sets it, so a reading newer than that is held by the
+        time the pass reaches its entity, and the gap then ends there.
 
         While this runs, the flush sends nothing but what it reads, oldest
         first per entity: a live reading delivered in the middle would move the
         watermark past the part of the gap not read yet, and a restart then
         would leave that part out for good.
         """
+        began = dt_util.utcnow().timestamp()
         try:
             for entity_id in list(self._entity_ids):
                 if self._closed:
@@ -763,17 +867,20 @@ class StateForwarder:
                 acked = self._newest_accounted(entity_id)
                 start = acked if acked is not None else self._listening_since
                 held = self._oldest_held(entity_id)
-                end = held if held is not None else self._listening_since
+                end = held if held is not None else began
                 if end <= start:
                     continue
+                self._reading_back = entity_id
                 await self._async_backfill_entity(
                     entity_id, start, end, held is not None, throttle_from=acked
                 )
+                self._reading_back = None
         except asyncio.CancelledError:
             raise
         except Exception:  # the recorder failing must not stop the live path
             LOGGER.exception("Tag Historian could not read the recorder to fill a gap")
         finally:
+            self._reading_back = None
             self._backfill_running = False
             self._schedule_flush()
 
@@ -945,6 +1052,7 @@ class StateForwarder:
                 # to Home Assistant's reauth flow, which is the one screen that
                 # can take a replacement key. A repair issue here would be a
                 # worse duplicate of a card Home Assistant already shows.
+                self._over_allowance = False
                 self._requeue(batch)
                 self.stats.last_error = "authentication failed"
                 self._flushing = False
@@ -958,6 +1066,7 @@ class StateForwarder:
                 self._pause(CONNECTION_RETRY_SECONDS)
                 return
             except TagHistorianConnectionError as err:
+                self._over_allowance = False
                 self._requeue(batch)
                 self.stats.last_error = str(err)
                 self._flushing = False
@@ -1025,6 +1134,12 @@ class StateForwarder:
             self._request_backfill()
 
     def _handle_result(self, result: WriteResult, batch: list[Queued]) -> None:
+        # Set before anything below can requeue and evict: only "today's
+        # allowance is spent" makes an eviction a reading over the allowance.
+        # Any other answer - a delivery, an outage, a busy buffer - makes it one
+        # to read back.
+        self._over_allowance = result.outcome is WriteOutcome.DAILY_QUOTA
+
         if result.outcome is WriteOutcome.OK:
             self._acknowledge(batch)
             self.stats.sent += len(batch)
@@ -1147,13 +1262,8 @@ class StateForwarder:
             return
 
         self._queue.extendleft(reversed(batch))
-        overflow = len(self._queue) - MAX_QUEUE_LENGTH
-        if overflow > 0:
-            for _ in range(overflow):
-                self._queue.popleft()
-            self.stats.dropped_overflow += overflow
-            self._backfill_wanted = True
-            self._request_backfill()
+        while len(self._queue) > MAX_QUEUE_LENGTH:
+            self._let_go(self._queue.popleft())
         self.stats.queued = self._held()
 
     @callback
