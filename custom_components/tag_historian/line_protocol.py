@@ -299,8 +299,6 @@ def encode_point(
     and reads only those two besides, as the tag's unit and description; an
     API from before that ignored every field but ``value``.
     """
-    domain, _, object_id = entity_id.partition(".")
-
     fields = [f"value={_format_value(value)}"]
     name_text = _attribute_text(friendly_name, MAX_FRIENDLY_NAME_LENGTH)
     if name_text is not None:
@@ -312,12 +310,43 @@ def encode_point(
     measurement = _escape(unit or entity_id)
     line = (
         f"{measurement},"
-        f"domain={_escape(domain, extra='=')},"
-        f"entity_id={_escape(object_id, extra='=')} "
+        f"{_tag_set(entity_id)} "
         f"{','.join(fields)} "
         f"{int(timestamp.timestamp())}"
     )
     return line
+
+
+def _tag_set(entity_id: str) -> str:
+    """The two tags of :func:`encode_point`, in one place: :func:`retag_line` must match them exactly."""
+    domain, _, object_id = entity_id.partition(".")
+    return f"domain={_escape(domain, extra='=')},entity_id={_escape(object_id, extra='=')}"
+
+
+def retag_line(line: str, encoded_for: str, entity_id: str) -> str | None:
+    """A line :func:`encode_point` encoded for ``encoded_for``, as it would have encoded it for ``entity_id``.
+
+    For a reading that waited in the forwarder's saved buffer while the tag
+    its entity sends to changed - a rename settled in Tag Historian, or a new
+    tag chosen on the rename card (renames.py) - so it goes where the entity's
+    readings go now, as a reading read back from the recorder would. Only the
+    tag set changes, and the measurement where it was the id (a reading with
+    no unit); the value, the timestamp and the fields are the entity's own.
+
+    None when ``line`` does not carry ``encoded_for``'s tags: then it was not
+    encoded the way the caller thinks, and is better sent as it is than
+    guessed at. The measurement in front cannot pass for the tag set: its
+    commas and spaces are escaped, and the tag set has an unescaped comma
+    between its two tags.
+    """
+    if encoded_for == entity_id:
+        return line
+    measurement, found, rest = line.partition(f",{_tag_set(encoded_for)} ")
+    if not found:
+        return None
+    if measurement == _escape(encoded_for):
+        measurement = _escape(entity_id)
+    return f"{measurement},{_tag_set(entity_id)} {rest}"
 
 
 def encode_batch(lines: list[str]) -> str:

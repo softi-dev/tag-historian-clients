@@ -16,7 +16,9 @@ Three loops share one HTTP client:
 
 and one listener, for the whole integration rather than any one entry: the
 entity registry, so an entity renamed in Home Assistant is followed rather than
-silently dropped (see renames.py).
+silently dropped (see renames.py). All three loops follow it: a renamed
+entity's readings - live, held, read back or imported - go into the tag its
+history is in.
 """
 
 from __future__ import annotations
@@ -230,20 +232,28 @@ async def async_setup_entry(
     # silently forwards nothing.
     await coordinator.async_config_entry_first_refresh()
 
-    min_interval = int(entry.options.get(CONF_MIN_INTERVAL, DEFAULT_MIN_INTERVAL_SECONDS))
+    # ONE reading of the options, for the forwarder and the importer both. A
+    # rename landing during the awaits below replaces entry.options and queues
+    # the reload that takes it up; meanwhile the two must not see different
+    # selections, or send the same entity to different tags.
+    options = entry.options
+    selected = list(options.get(CONF_ENTITIES, []))
+    renamed = send_as(options)
+    min_interval = int(options.get(CONF_MIN_INTERVAL, DEFAULT_MIN_INTERVAL_SECONDS))
     forwarder = StateForwarder(
         hass,
         entry,
         client,
-        list(entry.options.get(CONF_ENTITIES, [])),
+        selected,
         min_interval,
         async_get_stats(hass, entry.entry_id),
         store=_store(hass, STORAGE_KEY_FORWARDER, entry),
-        send_as=send_as(entry.options),
+        send_as=renamed,
     )
     # What the last run saved - its undelivered readings and how far Tag
     # Historian had acknowledged each entity - goes back in before anything
-    # new arrives.
+    # new arrives: under each entity's id as it is now, for one renamed since,
+    # and bound for the tag it sends to now.
     await forwarder.async_restore()
     forwarder.async_start()
     # NOT entry.async_on_unload(forwarder.async_shutdown). See
@@ -254,7 +264,9 @@ async def async_setup_entry(
     # job, registered in StateForwarder.async_start.
 
     # The importer asks the forwarder where each entity's live part begins, so
-    # it never imports a reading the forwarder is still going to deliver.
+    # it never imports a reading the forwarder is still going to deliver, and
+    # sends a renamed entity's history into the tag the forwarder sends its
+    # readings to.
     importer = HistoryImporter(
         hass,
         entry,
@@ -262,13 +274,16 @@ async def async_setup_entry(
         _store(hass, STORAGE_KEY_IMPORT, entry),
         min_interval,
         forwarder.history_boundary,
+        send_as=renamed,
+        selected=selected,
     )
 
     entry.runtime_data = TagHistorianData(client, coordinator, forwarder, importer)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    # An import that was running when Home Assistant stopped carries on.
+    # An import that was running when Home Assistant stopped, or when this
+    # entry was reloaded - by a rename, too - carries on.
     await importer.async_load()
 
     # Every rename waiting to be settled - just made, which is what this

@@ -39,13 +39,28 @@ RESUMABLE. Where the import is - which entities are done, and how far into
 each - is saved in ``.storage`` after every batch, so a restart picks it up
 where it stopped, under the same import (and so behind the same line). A batch
 sent twice is harmless: the import endpoint skips a reading it already has.
+
+RENAMED ENTITIES (renames.py). A renamed entity's history goes into the tag
+its live readings go to: its old one (``send_as``) until Tag Historian has the
+new name too. Imported under its new name instead, it would start the second
+tag the rename handling exists to prevent - and Tag Historian draws the line
+an import stops at per tag, so the new tag, with no live reading yet, would
+take everything the old one already holds live, and the rename would then
+make the two one history with those readings in it twice. The recorder is
+read under the entity's id as it is now: Home Assistant moves an entity's
+recorded history to its new id when it is renamed - unless the new id has a
+history of its own, a replaced meter's successor given the old meter's id,
+and then the new meter's history is read under its old id and the old
+meter's is left alone (history.py). An import that is running when the
+entity is renamed is stopped by the rename's reload and carries on under the
+new id (:meth:`HistoryImporter._follow_renames`).
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -66,6 +81,7 @@ from .api import (
     TagHistorianConnectionError,
 )
 from .const import (
+    CONF_ENTITIES,
     IMPORT_BATCH_SIZE,
     IMPORT_MAX_CONNECTION_FAILURES,
     IMPORT_RETRY_SECONDS,
@@ -80,6 +96,8 @@ from .line_protocol import (
     state_to_value,
     tag_name_for_entity,
 )
+from .renames import registry_ids, removed_since, renamed_since
+from .renames import send_as as send_as_of
 
 # Statuses the sensor shows. Stable strings: an automation can wait on them.
 STATUS_IDLE = "idle"
@@ -137,6 +155,9 @@ class ImportProgress:
     stop_reason: str = ""
     message: str = ""
     finished_at: str | None = None
+    # Per entity: its entity registry id, which a rename does not change - so
+    # an import resumed after one carries on under the entity's new id.
+    registry_ids: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_saved(cls, data: dict[str, Any]) -> ImportProgress:
@@ -163,6 +184,9 @@ class HistoryImporter:
         store: Store[dict[str, Any]],
         min_interval: int,
         boundary: Callable[[str], float | None] | None = None,
+        *,
+        send_as: Mapping[str, str] | None = None,
+        selected: Iterable[str] | None = None,
     ) -> None:
         self.hass = hass
         self.entry = entry
@@ -172,6 +196,12 @@ class HistoryImporter:
         # StateForwarder.history_boundary in Home Assistant; None only in tests
         # that are about something else.
         self._boundary = boundary
+        # The options the forwarder was built from, so the two agree on where
+        # an entity's readings go (renames.py); the entry's own when not given.
+        self._send_as = dict(send_as if send_as is not None else send_as_of(entry.options))
+        self._selected = set(
+            selected if selected is not None else entry.options.get(CONF_ENTITIES, [])
+        )
         self.progress = ImportProgress()
         self._task: asyncio.Task[None] | None = None
 
@@ -184,12 +214,75 @@ class HistoryImporter:
         saved = await self._store.async_load()
         if saved:
             self.progress = ImportProgress.from_saved(saved)
+            self._follow_renames()
         if self.progress.status == STATUS_RUNNING and self.progress.import_id:
             LOGGER.info(
                 "Tag Historian is carrying on with the history import it was running "
                 "before Home Assistant stopped"
             )
             self._spawn()
+
+    def _follow_renames(self) -> None:
+        """Carry the saved progress over to the ids its entities have now.
+
+        Renaming an entity reloads the entry (renames.py), which stops a
+        running import and carries it on from what was saved - under the old
+        id, which the recorder no longer holds anything under once Home
+        Assistant has moved the entity's history to the new one: the rest of
+        it was never imported, and the import said it had finished.
+        """
+        progress = self.progress
+        renamed = renamed_since(self.hass, progress.registry_ids, self._selected)
+        # An entity that is gone, under an id a selected entity has now - the
+        # replaced meter, whose successor was given its id. What the recorder
+        # holds under that id is no longer its history alone, so the import
+        # leaves it; the successor's carries on under the id.
+        gone = {
+            entity_id
+            for entity_id in removed_since(self.hass, progress.registry_ids)
+            if entity_id in self._selected
+        }
+        if not renamed and not gone:
+            return
+
+        def now(entity_id: str) -> str:
+            return renamed.get(entity_id, entity_id)
+
+        for old, new in renamed.items():
+            LOGGER.info(
+                "Tag Historian: %s was renamed to %s; the history import carries on under %s",
+                old,
+                new,
+                new,
+            )
+        for entity_id in gone:
+            LOGGER.info(
+                "Tag Historian: %s is no longer there and its id is another entity's now; "
+                "the history import leaves it",
+                entity_id,
+            )
+        progress.entities = list(
+            dict.fromkeys(now(e) for e in progress.entities if e not in gone)
+        )
+        progress.done = list(dict.fromkeys(now(e) for e in progress.done if e not in gone))
+        if progress.current in gone:
+            progress.current = None
+        progress.current = now(progress.current) if progress.current else None
+        progress.registry_ids = {
+            now(k): v for k, v in progress.registry_ids.items() if k not in gone
+        }
+        # Should a stale id and a renamed one ever meet, the later cursor (what
+        # Tag Historian has answered for) and the earlier line hold: neither
+        # sends a reading twice.
+        cursor: dict[str, float] = {}
+        for entity_id, stamp in progress.cursor.items():
+            if entity_id not in gone:
+                cursor[now(entity_id)] = max(stamp, cursor.get(now(entity_id), stamp))
+        ends: dict[str, float] = {}
+        for entity_id, line in progress.ends.items():
+            if entity_id not in gone:
+                ends[now(entity_id)] = min(line, ends.get(now(entity_id), line))
+        progress.cursor, progress.ends = cursor, ends
 
     async def async_start(self, entity_ids: list[str], days: int | None) -> ImportProgress:
         """Start importing these entities' recorded history, at most ``days`` back.
@@ -216,6 +309,7 @@ class HistoryImporter:
             entities=list(entity_ids),
             ends=self._live_lines(entity_ids),
             allowance_remaining=session.allowance.remaining,
+            registry_ids=registry_ids(self.hass, entity_ids),
         )
         await self._async_save()
         persistent_notification.async_create(
@@ -305,7 +399,13 @@ class HistoryImporter:
             if line is not None:
                 end = min(end, datetime.fromtimestamp(line, UTC))
         last_kept = answered
-        tag = tag_name_for_entity(entity_id)
+        # The tag the entity's live readings go to - for a renamed entity
+        # whose tag has not been renamed yet, its old one (module docstring) -
+        # and where the recorder keeps its history, which for an entity
+        # renamed onto an id with a history of its own is partly its old id.
+        former = self._send_as.get(entity_id)
+        tag = tag_name_for_entity(former or entity_id)
+        source = await history.async_source(self.hass, entity_id, former)
         pending: list[tuple[float, dict[str, Any]]] = []
         window = timedelta(hours=RECORDER_WINDOW_HOURS)
         cursor = start
@@ -318,8 +418,8 @@ class HistoryImporter:
 
         while cursor < end:
             window_end = min(cursor + window, end)
-            states = await history.async_recorded_states(
-                self.hass, entity_id, cursor - timedelta(microseconds=1), window_end
+            states = await history.async_states(
+                self.hass, source, cursor - timedelta(microseconds=1), window_end
             )
             for state in states:
                 stamp = state.last_updated

@@ -361,3 +361,36 @@ def test_batch_is_newline_joined():
     body = encode_batch(lines)
     assert body.count("\n") == 1
     assert body.splitlines() == lines
+
+
+@pytest.mark.parametrize(
+    ("unit", "friendly_name"),
+    [
+        (None, None),
+        ("kWh", "Energy meter"),
+        # A unit and a name that look like line protocol: escaped in the
+        # measurement and quoted in the field, so neither can pass for the
+        # tag set being looked for.
+        ("a,domain=sensor,entity_id=energy_2 b", 'Meter, "domain=sensor,entity_id=energy_2 "'),
+    ],
+)
+def test_a_held_reading_retagged_is_the_line_its_new_tag_would_have_had(unit, friendly_name):
+    """A reading saved under a renamed entity's old tag, sent where it goes now.
+
+    retag_line has to give exactly what encode_point gives for the other id -
+    anything else is a tag name the API derives differently, which is a tag
+    nobody asked for.
+    """
+    held = encode_point("sensor.energy_2", 1234.5, TS, unit, friendly_name)
+
+    assert line_protocol.retag_line(held, "sensor.energy_2", "sensor.energy") == encode_point(
+        "sensor.energy", 1234.5, TS, unit, friendly_name
+    )
+    assert line_protocol.retag_line(held, "sensor.energy_2", "sensor.energy_2") == held
+
+
+def test_a_line_not_encoded_for_the_id_given_is_not_guessed_at():
+    """None, so the caller sends it as it is rather than to a tag made up from it."""
+    held = encode_point("sensor.energy_2", 1.0, TS)
+
+    assert line_protocol.retag_line(held, "sensor.water", "sensor.energy") is None

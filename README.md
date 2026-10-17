@@ -181,7 +181,9 @@ own account, none of it is written into this integration:
   not.
 - **The tag limit and the storage cap**, as for live data. An imported entity
   uses a series like a forwarded one, which is why only entities you keep
-  history for can be imported.
+  history for can be imported. It is imported into the series its live
+  readings go to - for an entity you have renamed, the one its history is in
+  (see [When you rename an entity](#when-you-rename-an-entity)).
 
 Running an import twice stores nothing twice: Tag Historian skips a reading it
 already has for that series at that timestamp, and a reading it skips costs no
@@ -277,6 +279,19 @@ gets the renamed series. Both can be undone in Tag Historian Explorer, under
 to the name under **Former names**.
 Readings are never adjusted: a replacement meter that started from zero still
 shows the drop where the two histories meet.
+
+What is still on its way when you rename an entity goes with it, into the
+series its readings go to: readings held over a restart or an outage, the ones
+read back from the recorder afterwards, and a history import that is running,
+which carries on under the new id. An entity renamed before you import its
+history has it imported into that series as well, so the import does not
+start a second series beside it either. The recorder is read where Home
+Assistant keeps the entity's history: under the new id, where it moves the
+history when you rename an entity - or, for a replacement meter given the old
+meter's id, under the id the new meter had before, because Home Assistant
+then leaves both histories where they were. While the merge waits - for your
+answer on its card, or for Tag Historian to be reachable - nothing of the old
+meter's is read as the new one's.
 
 Renaming a device renames all of its entities at once, and each of them is
 followed. So is a rename made while the integration reloads or waits for Tag

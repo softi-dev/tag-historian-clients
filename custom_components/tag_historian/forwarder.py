@@ -35,6 +35,16 @@ reading Tag Historian may already have, because the live endpoint does not
 deduplicate: a batch that was on the wire when its answer was lost counts as
 delivered, never as a gap.
 
+A RENAMED entity (renames.py) keeps all of that. Its readings - live, read
+back or saved - go into the tag its history is in (``send_as``) until Tag
+Historian has the new name too; and what was saved under its old id, buffer
+and watermark, is taken up under its new one when the rename's own reload
+reads it back (:meth:`StateForwarder.async_restore`). Home Assistant moves
+the recorded history to the new id at the rename, so that is where a gap is
+read back from - except after a rename onto an id with a recorded history of
+its own, where the part before the rename is still under the old id
+(history.py).
+
 Everything it cannot place still moves a counter, because a reading that
 vanishes without one is indistinguishable from a sensor that stopped
 reporting. That invariant covers the batch that is already on the wire as
@@ -89,8 +99,10 @@ from .line_protocol import (
     encode_point,
     is_boolean_domain,
     is_missing_state,
+    retag_line,
     state_to_value,
 )
+from .renames import registry_ids, removed_since, renamed_since
 
 # How long to wait after a connection error before trying again. Shorter than
 # any Retry-After the API sends, because a socket error is usually a blip.
@@ -131,6 +143,15 @@ class Queued(NamedTuple):
     # full precision - the recorder is asked "after this" with exactly it.
     timestamp: float
     line: str
+    # The entity whose tag ``line`` is encoded for, when it is not this one's
+    # own: a renamed entity's old id while its tag has not been renamed yet
+    # (renames.py). Saved with the reading, so a reading still held when the
+    # rename is settled can be sent where the entity's readings go by then.
+    sent_as: str = ""
+
+    @property
+    def encoded_for(self) -> str:
+        return self.sent_as or self.entity_id
 
 
 @dataclass
@@ -229,6 +250,11 @@ class StateForwarder:
         # the wire when its answer was lost. Everything up to it is accounted
         # for; a gap is what lies between it and the oldest reading still held.
         self._acked: dict[str, float] = {}
+        # {entity_id: entity registry id} for what is saved, so the next run
+        # finds a renamed entity's buffer and watermark under its new id.
+        # Taken while the ids are current: by the time a rename's reload saves,
+        # the registry no longer knows the old one.
+        self._registry_ids: dict[str, str] = {}
         self._last_sent: dict[str, datetime] = {}
         self._unsub_state: CALLBACK_TYPE | None = None
         self._unsub_timer: CALLBACK_TYPE | None = None
@@ -323,6 +349,13 @@ class StateForwarder:
         The store is then marked as a run in progress at once, so a crash
         after this does not bring back - and send twice - a buffer this run
         has already sent.
+
+        An entity renamed since the save (renames.py) is picked up under its
+        new id: its watermark, so its gap is read back from where Tag
+        Historian's answers ended rather than from now, and its held
+        readings, so they are its own when the history import asks where the
+        forwarder's part begins - sent to the tag it sends to now, which may
+        have changed with the rename settled (:meth:`_restored`).
         """
         if self._store is None:
             return
@@ -333,12 +366,46 @@ class StateForwarder:
             LOGGER.exception("Tag Historian could not read its saved buffer; starting empty")
             saved = {}
 
-        acked = {str(k): float(v) for k, v in (saved.get("acked") or {}).items()}
+        saved_ids = {str(k): str(v) for k, v in (saved.get("registry_ids") or {}).items()}
+        renamed = renamed_since(self.hass, saved_ids, self._entity_ids)
+        for old, new in renamed.items():
+            LOGGER.info(
+                "Tag Historian: %s was renamed to %s; what was saved for it carries on under %s",
+                old,
+                new,
+                new,
+            )
+        # What was saved for an entity that is gone, under an id a selected
+        # entity has now - the replaced meter's, whose successor was given its
+        # id - is the gone one's. It is put under a name nothing else has, so
+        # it is neither taken for the successor's nor sent to its tag.
+        renamed.update(
+            {
+                entity_id: f"{entity_id} (removed)"
+                for entity_id in removed_since(self.hass, saved_ids)
+                if entity_id in self._entity_ids
+            }
+        )
+        self._registry_ids = {
+            renamed.get(entity_id, entity_id): registry_id
+            for entity_id, registry_id in saved_ids.items()
+            if entity_id not in renamed or renamed[entity_id] in self._entity_ids
+        }
+        self._registry_ids.update(registry_ids(self.hass, self._entity_ids))
+
+        acked: dict[str, float] = {}
+        for saved_id, stamp in (saved.get("acked") or {}).items():
+            entity_id = renamed.get(str(saved_id), str(saved_id))
+            # Two watermarks for one id - one saved with no registry id to
+            # tell whose it was, beside the renamed entity's. The newer holds:
+            # reading back from the older could send what Tag Historian has
+            # answered for already.
+            acked[entity_id] = max(float(stamp), acked.get(entity_id, float("-inf")))
         if saved.get("clean"):
             restored = [
-                Queued(str(item[0]), float(item[1]), str(item[2]))
+                self._restored(item, renamed)
                 for item in saved.get("queue") or []
-                if isinstance(item, list | tuple) and len(item) == 3
+                if isinstance(item, list | tuple) and len(item) in (3, 4)
             ][-MAX_QUEUE_LENGTH:]
             self._queue.extend(restored)
             self.stats.restored += len(restored)
@@ -361,6 +428,34 @@ class StateForwarder:
             self._last_sent.setdefault(entity_id, datetime.fromtimestamp(stamp, UTC))
 
         await self._async_save(clean=False)
+
+    def _restored(self, item: list[Any] | tuple[Any, ...], renamed: dict[str, str]) -> Queued:
+        """One saved reading: under its entity's id as it is now, for the tag it sends to now.
+
+        That tag is the one a reading read back from the recorder now would
+        be sent to, and a held reading goes with it rather than with what was
+        decided when it was saved. A rename confirmed in Tag Historian since
+        then makes no difference to where it lands - the server stores what
+        is sent under a former name in the renamed tag - but a rename that
+        found nothing under the old name ("no history to carry"), or the new
+        tag chosen on the rename card, sends the entity under its own name
+        from then on; a held reading sent under the old one then would start
+        the second tag the rename handling exists to prevent. A reading of an
+        entity that is not selected, or is gone, goes where it was going:
+        nothing says where else.
+        """
+        sent_as = str(item[3] or "") if len(item) > 3 else ""
+        held = Queued(str(item[0]), float(item[1]), str(item[2]), sent_as)
+        entity_id = renamed.get(held.entity_id, held.entity_id)
+        if entity_id in self._entity_ids:
+            target = self._send_as.get(entity_id, entity_id)
+        else:
+            target = held.encoded_for
+        line = retag_line(held.line, held.encoded_for, target)
+        if line is None:
+            # Not encoded as it says it was; better sent as it is than guessed at.
+            line, target = held.line, held.encoded_for
+        return Queued(entity_id, held.timestamp, line, "" if target == entity_id else target)
 
     @callback
     def async_start(self) -> None:
@@ -587,12 +682,15 @@ class StateForwarder:
         for item in self._inflight or []:
             if item.timestamp > acked.get(item.entity_id, float("-inf")):
                 acked[item.entity_id] = item.timestamp
+        queue = [list(item) for item in self._queue] if clean else []
 
         data: dict[str, Any] = {
             "clean": clean,
             "sending_ok": self._sending_ok,
             "acked": acked,
-            "queue": [list(item) for item in self._queue] if clean else [],
+            "queue": queue,
+            # How the next run finds an entity renamed in between (renames.py).
+            "registry_ids": self._registry_ids_of({*acked, *(item[0] for item in queue)}),
             "saved_at": dt_util.utcnow().isoformat(),
             "stopped_at": dt_util.utcnow().isoformat() if clean else None,
         }
@@ -602,6 +700,21 @@ class StateForwarder:
             LOGGER.exception("Tag Historian could not save its buffer")
             return False
         return True
+
+    def _registry_ids_of(self, entity_ids: set[str]) -> dict[str, str]:
+        """The registry ids of these entities: as taken at the start, else as the registry has them now.
+
+        Taken at the start first, because a rename's reload saves after the
+        registry has forgotten the old id. Looked up now for an entity that
+        was not in the registry yet when this run started.
+        """
+        known = {
+            entity_id: registry_id
+            for entity_id, registry_id in self._registry_ids.items()
+            if entity_id in entity_ids
+        }
+        known.update(registry_ids(self.hass, entity_ids - known.keys()))
+        return known
 
     @callback
     def _save_soon(self) -> None:
@@ -679,7 +792,9 @@ class StateForwarder:
             # of history.
             self._let_go(self._queue.popleft())
 
-        self._queue.append(Queued(entity_id, stamp.timestamp(), line))
+        self._queue.append(
+            Queued(entity_id, stamp.timestamp(), line, self._send_as.get(entity_id, ""))
+        )
         self.stats.queued = self._held()
         self._schedule_flush()
 
@@ -761,6 +876,12 @@ class StateForwarder:
         Historian an entity that has never been delivered live has no live
         line yet. None when Tag Historian's own line (its first live reading)
         is the only one.
+
+        Asked by the entity's id as it is now. For one renamed since the last
+        run that is the id its held readings and watermark were restored
+        under (:meth:`async_restore`); under its old id they would not be its
+        own, and the line would come out later than readings still waiting to
+        be delivered.
         """
         candidates = [
             item.timestamp
@@ -908,6 +1029,10 @@ class StateForwarder:
         # against, and neither has its first recorded one here.
         last = throttle_from
         found = 0
+        # Where the recorder keeps this entity's history: its id - or, for one
+        # renamed onto an id that had a history of its own while the rename
+        # waits to be settled, its old id up to the rename (history.py).
+        source = await history.async_source(self.hass, entity_id, self._send_as.get(entity_id))
 
         while cursor < stop and not self._closed:
             window_end = min(cursor + window, stop)
@@ -915,8 +1040,8 @@ class StateForwarder:
             # recorder's strict "after" does not drop a state stamped exactly
             # on a window boundary; the acknowledged reading itself is
             # excluded by the timestamp test below.
-            states = await history.async_recorded_states(
-                self.hass, entity_id, cursor - timedelta(microseconds=1), window_end
+            states = await history.async_states(
+                self.hass, source, cursor - timedelta(microseconds=1), window_end
             )
             for state in states:
                 stamp = state.last_updated.timestamp()
@@ -951,6 +1076,7 @@ class StateForwarder:
                             state.attributes.get("unit_of_measurement"),
                             state.attributes.get("friendly_name"),
                         ),
+                        self._send_as.get(entity_id, ""),
                     )
                 )
                 found += 1

@@ -52,6 +52,21 @@ TWO RULES, each the fix of a way renames were lost:
    nobody listening and was dropped. :func:`async_setup_rename_tracking` is
    called once from ``async_setup`` and listens for as long as Home Assistant
    runs, for every entry, whatever state it is in.
+
+And what is SAVED follows too. The forwarder's buffer and watermarks and the
+history import's progress outlive the run that wrote them, keyed by entity id
+- and the rename's own reload is one of the runs they outlive. Read back
+under the old id, the renamed entity had no watermark, so its gap was read
+from when the new forwarder started and whatever was evicted before that was
+never read back; its held readings were not its own, so the line the history
+import stops at (StateForwarder.history_boundary) passed over readings the
+forwarder still had to deliver; and a running import carried on reading an
+id the recorder no longer holds anything under, because Home Assistant moves
+an entity's recorded history to its new id when it is renamed. So both save
+the entity registry's own id for each entity beside it
+(:func:`registry_ids`), which a rename does not change, and find each one's
+id as it is now when they read it back (:func:`renamed_since`) - or that it
+is gone, and its id another entity's now (:func:`removed_since`).
 """
 
 from __future__ import annotations
@@ -87,7 +102,7 @@ from .const import (
 from .line_protocol import tag_name_for_entity
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Collection, Iterable, Mapping
 
 # hass.data key: {entry_id: asyncio.Lock}. NOT hass.data[DOMAIN], which holds
 # one ForwarderStats per entry id and nothing else (async_get_stats).
@@ -98,6 +113,59 @@ def send_as(options: Mapping[str, Any]) -> dict[str, str]:
     """{entity_id: entity_id whose tag its readings are sent under}, from the options."""
     raw = options.get(CONF_SEND_AS) or {}
     return {str(k): str(v) for k, v in raw.items()}
+
+
+def registry_ids(hass: HomeAssistant, entity_ids: Iterable[str]) -> dict[str, str]:
+    """{entity_id: its entity registry id}, for those of them in the registry.
+
+    The registry id is the one thing about an entity a rename does not
+    change. An entity without a registry entry (no unique id) cannot be
+    renamed in Settings, so there is nothing to follow for it.
+    """
+    registry = er.async_get(hass)
+    return {
+        entity_id: entry.id
+        for entity_id in entity_ids
+        if (entry := registry.async_get(entity_id)) is not None
+    }
+
+
+def renamed_since(
+    hass: HomeAssistant, saved: Mapping[str, str], selected: Collection[str]
+) -> dict[str, str]:
+    """{saved entity id: the id it has now}, for each entity renamed since it was saved.
+
+    ``saved`` is what :func:`registry_ids` gave when it was saved. Only a
+    new id in ``selected`` counts - the selection the caller was built from,
+    which a rename has updated by the time the reload it causes reads it. A
+    rename that lands while an entry is being set up has changed the
+    registry but not yet that selection; followed now, the entity would be
+    sent under a name no part of this setup knows, and its readings to a tag
+    of their own, for the moment until the rename's own reload. Left alone,
+    that reload follows it.
+    """
+    registry = er.async_get(hass)
+    renamed: dict[str, str] = {}
+    for entity_id, registry_id in saved.items():
+        entry = registry.async_get(registry_id)
+        if entry is not None and entry.entity_id != entity_id and entry.entity_id in selected:
+            renamed[entity_id] = entry.entity_id
+    return renamed
+
+
+def removed_since(hass: HomeAssistant, saved: Mapping[str, str]) -> set[str]:
+    """The saved entity ids whose entity is no longer in the registry at all.
+
+    What was saved for one of them belongs to an entity that is gone, not to
+    whatever has its id now - the replaced meter, whose id its successor was
+    given.
+    """
+    registry = er.async_get(hass)
+    return {
+        entity_id
+        for entity_id, registry_id in saved.items()
+        if registry.async_get(registry_id) is None
+    }
 
 
 def renamed_issue_id(entry: ConfigEntry, entity_id: str) -> str:
