@@ -818,7 +818,7 @@ def test_the_plan_number_guard_still_allows_what_an_on_off_entity_stores() -> No
 #
 # Every string here used to say "an API key with write access", and every
 # ingestion guide in the repository said "generate a key on the Settings page"
-# and stopped there. The Create New Key dialog opens on Read, ApiKeyScope.Read
+# and stopped there. The Create New Key dialog opened on Read, ApiKeyScope.Read
 # maps to CustomerRole.Viewer, and the write endpoint requires Editor - so a
 # customer who followed the instruction exactly ended up with a key this
 # integration rejects at setup, and, on the guides with no such detection, with
@@ -913,7 +913,9 @@ def test_every_string_that_tells_somebody_to_create_a_key_names_the_scope() -> N
 
     Three of these strings existed and none of them named a scope: the connect
     screen, its field help, and the reauth screen. A customer following any of
-    them landed on a dialog whose default is the one value that does not work.
+    them landed on a dialog whose default was then the one value that does not
+    work. It opens on Write now, and a key made earlier, or for something else,
+    can still be a Read key - so the screens still name the scope.
     """
     instructing = instructing_strings()
     assert instructing, (
@@ -928,8 +930,8 @@ def test_every_string_that_tells_somebody_to_create_a_key_names_the_scope() -> N
         )
         assert REQUIRED_SCOPE in text, (
             f"{path} tells somebody to create a key without naming the "
-            f"{REQUIRED_SCOPE} scope, and the dialog defaults to the one that "
-            f"cannot forward anything: {text!r}"
+            f"{REQUIRED_SCOPE} scope, and a Read key cannot forward "
+            f"anything: {text!r}"
         )
 
 

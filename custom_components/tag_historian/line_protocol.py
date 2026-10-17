@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import unicodedata
 from datetime import datetime
 
 # ``[A-Za-z][A-Za-z0-9_.-]*``, max 200 - TagNameValidator.MaxLength. Tag names
@@ -220,11 +221,57 @@ def _format_value(value: float) -> str:
     return repr(value)
 
 
+# The two attributes that describe a tag rather than being a reading: what it
+# is called and what it is measured in. Sent as string FIELDS, under the names
+# Home Assistant's own influxdb integration gives a text attribute
+# ("{attribute}_str"), and the API reads exactly these two on a line that has
+# a numeric ``value`` and makes them the tag's description and unit
+# (HomeAssistantAttributes in the API). Without them a chart of
+# sensor.living_room_temperature named the series after the entity id and
+# printed its readings without the degree sign. Fields, never tags: see
+# :func:`encode_point` for what a third tag would do.
+FRIENDLY_NAME_FIELD = "friendly_name_str"
+UNIT_FIELD = "unit_of_measurement_str"
+
+# The longest friendly name and unit the API keeps - its limits on a tag's
+# description and units. Anything longer it ignores rather than cuts, so it is
+# not worth the bytes on every reading.
+MAX_FRIENDLY_NAME_LENGTH = 500
+MAX_UNIT_LENGTH = 50
+
+# Unicode's own line and paragraph separators, which some parsers end a line
+# at as readily as at a newline. The API refuses them for the same reason.
+_LINE_SEPARATORS = frozenset({"\u2028", "\u2029"})
+
+
+def _attribute_text(value: object, max_length: int) -> str | None:
+    """A friendly name or unit worth sending, or ``None``.
+
+    Trimmed, not empty, not too long, and no control characters - the last
+    one is not a nicety: a line break inside a field ends the line, and the
+    API would refuse the whole batch around it as unparsable.
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text or len(text) > max_length:
+        return None
+    if any(unicodedata.category(c) == "Cc" or c in _LINE_SEPARATORS for c in text):
+        return None
+    return text
+
+
+def _string_field(value: str) -> str:
+    """A line protocol string field value: quoted, with backslashes and quotes escaped."""
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 def encode_point(
     entity_id: str,
     value: float,
     timestamp: datetime,
     unit: str | None = None,
+    friendly_name: str | None = None,
 ) -> str:
     """Encode one reading as one line of InfluxDB line protocol.
 
@@ -245,15 +292,29 @@ def encode_point(
     measurement, mirroring the built-in integration; the endpoint ignores it
     entirely when domain and entity_id are present, so it is there for
     recognisability in a packet capture and nothing else.
+
+    ``unit`` and ``friendly_name`` also go out as the string fields
+    :data:`UNIT_FIELD` and :data:`FRIENDLY_NAME_FIELD`, after ``value``. A
+    field is safe where a tag is not: the API takes the reading from ``value``
+    and reads only those two besides, as the tag's unit and description; an
+    API from before that ignored every field but ``value``.
     """
     domain, _, object_id = entity_id.partition(".")
+
+    fields = [f"value={_format_value(value)}"]
+    name_text = _attribute_text(friendly_name, MAX_FRIENDLY_NAME_LENGTH)
+    if name_text is not None:
+        fields.append(f"{FRIENDLY_NAME_FIELD}={_string_field(name_text)}")
+    unit_text = _attribute_text(unit, MAX_UNIT_LENGTH)
+    if unit_text is not None:
+        fields.append(f"{UNIT_FIELD}={_string_field(unit_text)}")
 
     measurement = _escape(unit or entity_id)
     line = (
         f"{measurement},"
         f"domain={_escape(domain, extra='=')},"
         f"entity_id={_escape(object_id, extra='=')} "
-        f"value={_format_value(value)} "
+        f"{','.join(fields)} "
         f"{int(timestamp.timestamp())}"
     )
     return line

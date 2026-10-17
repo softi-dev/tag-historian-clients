@@ -51,11 +51,78 @@ def test_no_extra_line_protocol_tags_are_emitted():
 
 def test_encoded_line_has_the_shape_the_endpoint_documents():
     """One line, one numeric ``value`` field, second-precision timestamp."""
-    line = encode_point("sensor.outdoor_temperature", 21.5, TS, "°C")
+    line = encode_point("sensor.outdoor_temperature", 21.5, TS)
 
     assert line == (
-        "°C,domain=sensor,entity_id=outdoor_temperature value=21.5 1786528800"
+        "sensor.outdoor_temperature,domain=sensor,entity_id=outdoor_temperature "
+        "value=21.5 1786528800"
     )
+
+
+def test_the_friendly_name_and_unit_go_along_as_fields():
+    """What Home Assistant shows, carried to the tag: its name and its unit.
+
+    They used to be dropped, so a chart of the tag named it after the entity id
+    and printed its readings without the degree sign. They travel as string
+    fields after ``value`` - which the API reads as the tag's description and
+    unit - and never as tags, which would rename every tag on the account.
+    """
+    line = encode_point(
+        "sensor.outdoor_temperature", 21.5, TS, "°C", "Outdoor temperature"
+    )
+
+    assert line == (
+        "°C,domain=sensor,entity_id=outdoor_temperature "
+        'value=21.5,friendly_name_str="Outdoor temperature",unit_of_measurement_str="°C" '
+        "1786528800"
+    )
+    tag_section = line.split(" ", 1)[0]
+    assert tag_section.split(",")[1:] == ["domain=sensor", "entity_id=outdoor_temperature"]
+
+
+def test_the_field_names_are_the_ones_the_api_and_home_assistant_use():
+    """Home Assistant's influxdb integration writes a text attribute as
+    ``{attribute}_str``, and the API reads exactly these two
+    (HomeAssistantAttributes in the product). A rename on this side alone would
+    be a field the API skips without a word."""
+    assert line_protocol.FRIENDLY_NAME_FIELD == "friendly_name_str"
+    assert line_protocol.UNIT_FIELD == "unit_of_measurement_str"
+
+
+def test_quotes_and_backslashes_in_a_name_are_escaped_inside_the_field():
+    line = encode_point("sensor.a", 1.0, TS, None, 'The "big" tank \\ east')
+
+    assert 'friendly_name_str="The \\"big\\" tank \\\\ east"' in line
+    assert "\n" not in line
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "",
+        "   ",
+        "Living\nroom",
+        "Living\rroom",
+        "Living" + chr(0x2028) + "room",
+        "Living" + chr(0x07) + "room",
+        "x" * (line_protocol.MAX_FRIENDLY_NAME_LENGTH + 1),
+        None,
+        42,
+    ],
+)
+def test_a_name_that_cannot_travel_whole_is_left_out(name):
+    """A line break inside a field would end the line, and the API refuses the
+    whole batch around an unparsable one; a name too long for the API is one it
+    ignores anyway. Either way the reading itself still goes."""
+    line = encode_point("sensor.a", 1.0, TS, None, name)
+
+    assert "friendly_name_str" not in line
+    assert "value=1.0 " in line
+    assert "\n" not in line and "\r" not in line
+
+
+def test_a_name_is_sent_trimmed():
+    assert 'friendly_name_str="Hall"' in encode_point("light.hall", 1.0, TS, None, "  Hall ")
 
 
 def test_entity_id_is_sent_without_its_domain_prefix():

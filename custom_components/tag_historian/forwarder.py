@@ -424,11 +424,17 @@ class StateForwarder:
             return
         self._last_sent[entity_id] = stamp
 
+        # The unit and the friendly name ride along on every reading, so the
+        # tag in Tag Historian carries what Home Assistant shows - "Living room
+        # temperature", 21.5 °C - and follows a rename here. The attribute,
+        # not State.name: that falls back to a name made from the entity id,
+        # and an entity without a friendly name should not be given one.
         line = encode_point(
             entity_id,
             value,
             stamp,
             new_state.attributes.get("unit_of_measurement"),
+            new_state.attributes.get("friendly_name"),
         )
 
         if len(self._queue) >= MAX_QUEUE_LENGTH:

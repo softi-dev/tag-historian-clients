@@ -48,7 +48,9 @@ What this integration adds:
   last two are different problems and are never described as the same one.
 
 What it does **not** do: read data back out of Tag Historian, replace the
-recorder, or forward attributes. It is a one-way export of entity states.
+recorder, or keep attributes as history. It is a one-way export of entity
+states - each with the entity's friendly name and unit, so the series is called
+what Home Assistant calls it and its readings carry their unit.
 
 ## Install
 
@@ -68,10 +70,9 @@ Copy `custom_components/tag_historian/` into your Home Assistant
 **Settings → Devices & services → Add integration → Tag Historian.**
 
 You will need an API key whose **Scope** is **Write**, created in the Tag
-Historian dashboard under API keys: press **Create New Key**, name it, and set
-**Scope** to **Write**. The dialog opens on **Read**, which is the right default
-for the product and the wrong choice here — a Read key is refused the moment
-this integration tries to forward anything. It is detected during setup and
+Historian dashboard under API keys: press **Create New Key**, name it, and leave
+**Scope** on **Write**, where the dialog opens. A Read key is refused the moment
+this integration tries to forward anything; it is detected during setup and
 named as such, rather than failing quietly later. The key list shows the scope
 beside every key, so you can check one you already have instead of issuing
 another.
@@ -123,7 +124,11 @@ asterisks. The integration sends at most a single numeric reading per state
 change and never a second series for the same entity, so the count on the
 review screen is the count you will be billed for.
 
-Only the entity's own state is sent, never its attributes. A reading is
+Only the entity's own state is sent as a reading, never its attributes. Two
+attributes go along to describe it: the friendly name, which becomes the
+series' description, and the unit of measurement, which becomes its unit -
+what Tag Historian Explorer labels the chart with. Rename the entity in Home
+Assistant and the description follows with its next reading. A reading is
 therefore a number, or one of a small set of words that *are* a number in
 disguise: `on`/`off` for a light, a switch, a fan, an automation, a helper or a
 binary sensor, `open`/`closed` for a cover, `above_horizon`/`below_horizon` for

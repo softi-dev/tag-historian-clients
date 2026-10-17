@@ -111,9 +111,8 @@ it again, so `docker ps` shows `Restarting (78)` until the configuration is fixe
 ## Getting an API key
 
 A key whose **Scope** is **Write**, created in the Tag Historian dashboard under API keys: press
-**Create New Key**, name it, and set **Scope** to **Write**. The dialog opens on **Read**, which
-is the right default for the product and the wrong choice here - a Read key is refused with a
-`403` on the very first write.
+**Create New Key**, name it, and leave **Scope** on **Write**, where the dialog opens. A Read key
+is refused with a `403` on the very first write.
 
 A Write key sends measurements, and creates a tag the first time it writes to a name that does
 not exist yet - against your tag quota. It cannot issue or revoke API keys, not even its own; it

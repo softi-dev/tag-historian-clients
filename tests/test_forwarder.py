@@ -116,6 +116,28 @@ async def _advance(hass: HomeAssistant, freezer, seconds: float) -> None:
     await hass.async_block_till_done()
 
 
+async def test_a_reading_carries_the_entitys_friendly_name_and_unit(
+    hass: HomeAssistant, entry, make_forwarder
+) -> None:
+    """So the tag shows what Home Assistant shows, and follows a rename."""
+    client = StubClient()
+    make_forwarder(hass, entry, client, entities=["sensor.outdoor_temperature"])
+
+    hass.states.async_set(
+        "sensor.outdoor_temperature",
+        "21.5",
+        {"friendly_name": "Outdoor temperature", "unit_of_measurement": "°C"},
+    )
+    await hass.async_block_till_done()
+    await _tick(hass, 2)
+
+    assert len(client.lines) == 1
+    line = client.lines[0]
+    assert line.startswith("°C,domain=sensor,entity_id=outdoor_temperature value=21.5,")
+    assert 'friendly_name_str="Outdoor temperature"' in line
+    assert 'unit_of_measurement_str="°C"' in line
+
+
 async def test_readings_are_batched_rather_than_sent_one_by_one(
     hass: HomeAssistant, entry, make_forwarder
 ) -> None:
