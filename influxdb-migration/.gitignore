@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+# The resume file a run writes into the current directory.
+taghistorian-influx-migration.json
+taghistorian-influx-migration.json.tmp
