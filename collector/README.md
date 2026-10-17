@@ -128,8 +128,9 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 
 - copies the program to `C:\Program Files\Tag Historian\Collector`;
 - creates the data folder `C:\ProgramData\Tag Historian\Collector`, the Windows counterpart of the
-  `/config` volume - configuration, queue, certificates and log - and makes it readable by
-  administrators, SYSTEM and the service only, because your API key goes in it;
+  `/config` volume - configuration, queue, certificates and log - gives it to Administrators and
+  makes it readable by administrators, SYSTEM and the service only, because your API key goes in
+  it;
 - registers the service `TagHistorianCollector`: automatic start, restarted a minute after a crash,
   running as its own virtual account `NT SERVICE\TagHistorianCollector`, which is granted write
   access to its data folder and nothing else;
@@ -147,8 +148,9 @@ Get-Content -Wait -Tail 20 "C:\ProgramData\Tag Historian\Collector\logs\collecto
 ```
 
 Fill the file in as in step 2 above, with one difference: on Windows **the key goes in the file**,
-in `ApiKey`. A service never sees an environment variable set after Windows started, and the folder
-is closed to everyone but administrators and the service.
+in `ApiKey`. A service does not see a system environment variable set after Windows started, and
+the folder is closed to everyone but administrators and the service. Left empty, the key stops the
+service with exit code `78` and says so, rather than leaving it running with nothing to send.
 
 - **Logs.** `logs\collector.log` in the data folder carries the lines `docker logs` shows for the
   container, in files of 5 MiB with the four before the current one kept. Warnings and errors also go
@@ -158,9 +160,12 @@ is closed to everyone but administrators and the service.
   uses the same folder, logs to the console as well, and stops on Ctrl+C. One collector runs from a
   folder at a time; a second one exits with code `75`. `--data-dir <folder>`, or the environment
   variable `TAGHISTORIAN_DATA_DIR`, points it at another folder, and `install.ps1 -DataDirectory`
-  does the same for the service.
-- **Upgrade** by running `install.ps1` from the newer package. **Uninstall** with `uninstall.ps1`
-  from the program folder. Both keep the data folder, the uninstall unless given `-RemoveData`.
+  does the same for the service. Its permissions are replaced, so `install.ps1` refuses a drive
+  root, and a folder that already holds other files unless also given `-Force`.
+- **Upgrade** by running `install.ps1` from the newer package: it keeps the folders the service was
+  installed with. **Uninstall** with `uninstall.ps1`, from the program folder or the extracted zip;
+  it deletes only what `install.ps1` put there. Both keep the data folder, the uninstall unless
+  given `-RemoveData`.
 - **Not signed yet.** Started from Explorer, the program gets "Windows protected your PC": choose
   **More info**, then **Run anyway**. `-ExecutionPolicy Bypass` is what lets the unsigned install
   script run, for that one run. On Windows 11 with Smart App Control turned on, unsigned programs are
@@ -275,7 +280,7 @@ SELinux confines containers, a host directory also needs `:z` on its `-v` option
 
 | Code | Meaning | What to do |
 |---|---|---|
-| `78` | Configuration required. The first start wrote the example `appsettings.json`; placeholders from it are still in the file; `TagHistorian__ApiKey` is still the guide's `<your-api-key>`; or `appsettings.json` does not parse. The output names each placeholder, or the line and position of the parse error. | Edit `/config/appsettings.json` and start the collector again. For the key, remove the container and run it again with your own key: a container's environment is fixed when it is created. |
+| `78` | Configuration required. The first start wrote the example `appsettings.json`; placeholders from it are still in the file; `TagHistorian__ApiKey` is still the guide's `<your-api-key>`; on Windows, `ApiKey` is empty; or `appsettings.json` does not parse. The output names each placeholder, or the line and position of the parse error. | Edit `/config/appsettings.json` and start the collector again. For the key, remove the container and run it again with your own key: a container's environment is fixed when it is created. |
 | `73` | There was no configuration, and the example could not be written to `/config`. The output names the cause: a directory the container user may not write, a read-only mount (`:ro`, or `--read-only` with nothing mounted at `/config`), root started without the `DAC_OVERRIDE` capability, or another error such as a full disk. On Windows: the data folder, or the example in it, could not be created, opened or written. | Do what the output says for that cause. For the commonest, a host directory owned by someone else, use a new named volume as in [Install](#install), without a `--user` option (the volume belongs to the image's own user, uid 999), or a host directory uid 999 can write. On Windows, run from an elevated prompt, or run `install.ps1` again for the service. |
 | `75` | Windows only: another collector is already running from the same data folder - usually the service, when you start one by hand. | Stop the other one first (`Stop-Service TagHistorianCollector`), or give this one a folder of its own with `--data-dir`. |
 | `64` | `--data-dir` was given without a folder after it. | Name the folder. |
