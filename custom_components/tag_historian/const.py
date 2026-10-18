@@ -23,6 +23,25 @@ CONF_API_KEY: Final = "api_key"
 CONF_ENTITIES: Final = "entities"
 CONF_MIN_INTERVAL: Final = "min_interval"
 
+# Whether renaming an entity in Home Assistant renames its tag in Tag Historian
+# too, so the history goes on under the new name (renames.py). Off by default:
+# the user is asked through a repair card instead.
+CONF_FOLLOW_RENAMES: Final = "follow_renames"
+
+# {entity_id: entity_id} - readings of the first are sent under the tag of the
+# second. Only ever set for an entity renamed in Home Assistant whose tag has
+# not been renamed yet, so its readings go on landing in the history they
+# belong to, at no extra tag, until the rename is confirmed (renames.py).
+CONF_SEND_AS: Final = "send_as"
+
+# {entity_id: ISO timestamp} - a renamed entity whose readings went into a tag
+# of its own from that moment, its history left in the old tag: "Start a new
+# tag" or "Keep them apart" on the rename card (renames.py). The history import
+# leaves such an entity alone (importer.py). Kept when the selection changes:
+# deselecting the entity and selecting it again does not make the old tag's
+# history its own.
+CONF_OWN_TAG_SINCE: Final = "own_tag_since"
+
 DEFAULT_HOST: Final = "api.taghistorian.com"
 
 # The three write-path limits below are PROTOCOL facts, not plan facts, so they
@@ -43,8 +62,54 @@ BATCH_TIMEOUT_SECONDS: Final = 1.0
 # Bounded, and bounded on purpose. A queue that grows without limit during an
 # outage turns a 20-minute API blip into an out-of-memory kill of the whole
 # Home Assistant process. When it overflows the OLDEST readings go first and a
-# counter moves - never a silent drop.
+# counter moves - and the backfill reads them back from the recorder once Tag
+# Historian answers again (see forwarder.py). The same bound holds for what is
+# saved to .storage when Home Assistant stops, so that file stays under a few
+# megabytes however long the outage was.
 MAX_QUEUE_LENGTH: Final = 10000
+
+# How many recorded readings one backfill request carries, and how many the
+# backfill holds read-ahead of the wire. Recorder reads are local and quick;
+# the cap keeps a day-long gap from being one enormous list in memory.
+BACKFILL_BATCH_SIZE: Final = 1000
+
+# The recorder is read in windows of this many hours, per entity, for both
+# the backfill and the history import: a chatty sensor writes tens of
+# thousands of states a day, and one query for a whole fortnight of it would
+# be a fortnight of State objects in memory at once.
+RECORDER_WINDOW_HOURS: Final = 24
+
+# Readings per history-import request. Below the endpoint's own per-batch
+# ceiling (ImportService.MaxReadingsPerBatch, 5 000) so one request stays well
+# inside IMPORT_TIMEOUT_SECONDS: the endpoint checks every reading against the
+# day files it would land in before it stores anything.
+IMPORT_BATCH_SIZE: Final = 2000
+
+# An import batch does more work per request than a live write (the
+# duplicate check reads day files), so it gets longer than a write's
+# HTTP_TIMEOUT_SECONDS before it is given up on and retried.
+IMPORT_TIMEOUT_SECONDS: Final = 30
+
+# How long the import waits after a socket error before it tries the same
+# batch again, and how many times in a row it does before it stops - stopped,
+# not finished: running the action again carries on where it left off.
+IMPORT_RETRY_SECONDS: Final = 30
+IMPORT_MAX_CONNECTION_FAILURES: Final = 10
+
+# Services. Stable strings: automations call them by name.
+SERVICE_IMPORT_HISTORY: Final = "import_history"
+ATTR_CONFIG_ENTRY_ID: Final = "config_entry_id"
+ATTR_DAYS: Final = "days"
+
+# .storage keys, one of each per config entry. Version bumps here need a
+# migration; the key names must not change, or a restart forgets what it was
+# holding.
+STORAGE_VERSION: Final = 1
+STORAGE_KEY_FORWARDER: Final = "tag_historian.{entry_id}.forwarder"
+STORAGE_KEY_IMPORT: Final = "tag_historian.{entry_id}.import"
+
+# Dispatcher signal the import sensor listens on.
+SIGNAL_IMPORT_UPDATED: Final = "tag_historian_import_updated_{entry_id}"
 
 # Default minimum seconds between two readings of the SAME entity.
 #
@@ -68,6 +133,12 @@ ISSUE_TAG_QUOTA: Final = "tag_quota_exceeded"
 ISSUE_DAILY_QUOTA: Final = "daily_quota_exceeded"
 ISSUE_WRITE_FORBIDDEN: Final = "write_forbidden"
 ISSUE_SERVICE_UNAVAILABLE: Final = "service_unavailable"
+ISSUE_ENTITY_RENAMED: Final = "entity_renamed"
+
+# How long to wait before asking Tag Historian again to rename a tag after it
+# could not be reached. A rename that waits costs nothing - the readings go on
+# being stored under the old name meanwhile - so this is unhurried.
+RENAME_RETRY_SECONDS: Final = 900
 
 # A single 503 is our problem and none of the user's business. Only after the
 # writes have been failing this long does it become something they should see.

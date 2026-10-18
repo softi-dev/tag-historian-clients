@@ -7,8 +7,12 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from custom_components.tag_historian.api import (
+    ImportOutcome,
+    LineageOutcome,
     TagHistorianAuthError,
     TagHistorianClient,
+    TagHistorianConnectionError,
+    TagHistorianImportRefused,
     WriteOutcome,
     _classify_429,
     _parse_dropped_points,
@@ -251,6 +255,34 @@ async def test_existing_tag_names_come_back_as_a_set(client, aioclient_mock) -> 
     assert await client.async_get_tag_names() == {"sensor.a", "sensor.b"}
 
 
+async def test_former_names_exist_too_and_say_which_tag_they_belong_to(
+    client, aioclient_mock
+) -> None:
+    """A former name is not a tag, but readings sent under it are stored in
+    the tag it belongs to - so it costs no slot to select, and an entity whose
+    old id is a former name of its new id has been renamed already."""
+    aioclient_mock.get(
+        "https://api.taghistorian.com/api/tags?take=1000",
+        json={
+            "totalCount": 2,
+            "tags": [
+                {"tagName": "sensor.energy", "formerNames": ["sensor.energy_2", "sensor.meter"]},
+                {"tagName": "sensor.b", "formerNames": []},
+            ],
+        },
+    )
+
+    assert await client.async_get_tag_index() == {
+        "sensor.energy": "sensor.energy",
+        "sensor.energy_2": "sensor.energy",
+        "sensor.meter": "sensor.energy",
+        "sensor.b": "sensor.b",
+    }
+    assert await client.async_get_tag_names() == {
+        "sensor.energy", "sensor.energy_2", "sensor.meter", "sensor.b"
+    }
+
+
 def test_skipped_tag_parsing_fails_soft() -> None:
     """It is scraping prose out of an English sentence, so it will break one
     day. When it does the repair issue must still appear, just unnamed."""
@@ -269,3 +301,234 @@ def test_a_missing_point_count_is_none_and_not_zero() -> None:
     assert _parse_dropped_points("0 points dropped: tag quota exceeded") == 0
     assert _parse_dropped_points("tag quota exceeded (new tags: a.b)") is None
     assert _parse_dropped_points("") is None
+
+
+# --------------------------------------------------------------------------
+# The history import endpoints
+# --------------------------------------------------------------------------
+
+IMPORT_URL = "https://api.taghistorian.com/api/import"
+BATCH_URL = "https://api.taghistorian.com/api/import/imp-1/readings"
+READING = {"tagName": "sensor.house_power", "timestamp": "2026-10-15T12:00:00Z", "value": 1500.0}
+
+
+async def test_starting_an_import_reads_its_line_and_the_allowance(client, aioclient_mock) -> None:
+    aioclient_mock.post(
+        IMPORT_URL,
+        status=201,
+        json={
+            "importId": "imp-1",
+            "startedAt": "2026-10-17T12:00:00.1234567Z",
+            "windowStart": "2026-10-03T12:00:00Z",
+            "maxReadingsPerBatch": 5000,
+            "allowance": {"total": 900, "used": 100, "remaining": 800, "readingsPerDay": 90, "windowDays": 10},
+        },
+    )
+
+    started = await client.async_start_import()
+
+    assert started.import_id == "imp-1"
+    assert started.started_at.year == 2026 and started.started_at.tzinfo is not None
+    assert started.allowance.remaining == 800
+    assert started.allowance.window_days == 10
+    assert aioclient_mock.mock_calls[0][2] == {"source": "home-assistant"}
+
+
+@pytest.mark.parametrize(
+    ("status", "error", "outcome"),
+    [
+        (402, "Import allowance used up", ImportOutcome.ALLOWANCE_SPENT),
+        (402, "Storage quota exceeded", ImportOutcome.STORAGE_FULL),
+        (403, "Email address not verified", ImportOutcome.FORBIDDEN),
+    ],
+)
+async def test_an_import_that_cannot_start_says_why(
+    client, aioclient_mock, status, error, outcome
+) -> None:
+    aioclient_mock.post(IMPORT_URL, status=status, json={"error": error, "message": f"{error}."})
+
+    with pytest.raises(TagHistorianImportRefused) as refused:
+        await client.async_start_import()
+
+    assert refused.value.outcome is outcome
+    assert refused.value.message == f"{error}."
+
+
+async def test_a_batch_answer_is_read_field_by_field(client, aioclient_mock) -> None:
+    aioclient_mock.post(
+        BATCH_URL,
+        status=200,
+        json={
+            "received": 10,
+            "stored": 4,
+            "compressed": 1,
+            "duplicates": 2,
+            "outsideWindow": 1,
+            "refusedTotal": 2,
+            "refused": {"notHistory": 1, "tagLimit": 1, "allowance": 0, "storage": 0},
+            "refusedTags": ["sensor.extra"],
+            "importableBefore": {"sensor.house_power": "2026-10-16T08:00:00Z"},
+            "allowance": {"remaining": 796},
+            "message": "2 of 10 readings were refused",
+        },
+    )
+
+    result = await client.async_import_batch("imp-1", [READING])
+
+    assert result.outcome is ImportOutcome.TAKEN
+    assert (result.stored, result.compressed, result.duplicates, result.outside_window) == (4, 1, 2, 1)
+    assert result.refused == 2
+    assert result.refused_tags == ["sensor.extra"]
+    assert result.importable_before["sensor.house_power"].hour == 8
+    assert result.allowance_remaining == 796
+    assert aioclient_mock.mock_calls[0][2] == {"readings": [READING]}
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "outcome"),
+    [
+        (402, {"error": "Import allowance used up"}, ImportOutcome.ALLOWANCE_SPENT),
+        (402, {"error": "Storage quota exceeded"}, ImportOutcome.STORAGE_FULL),
+        (403, {"error": "Account scheduled for deletion"}, ImportOutcome.FORBIDDEN),
+        (404, {"error": "No import with that id on this account"}, ImportOutcome.UNKNOWN_IMPORT),
+        (400, {"error": "Every imported reading needs its timestamp"}, ImportOutcome.REJECTED),
+    ],
+)
+async def test_every_batch_refusal_is_its_own_outcome(
+    client, aioclient_mock, status, body, outcome
+) -> None:
+    aioclient_mock.post(BATCH_URL, status=status, json=body)
+
+    result = await client.async_import_batch("imp-1", [READING])
+
+    assert result.outcome is outcome
+
+
+@pytest.mark.parametrize("status", [429, 503])
+async def test_a_busy_import_endpoint_is_a_retry_with_its_wait(client, aioclient_mock, status) -> None:
+    aioclient_mock.post(
+        BATCH_URL, status=status, json={"error": "import_unavailable"}, headers={"Retry-After": "15"}
+    )
+
+    result = await client.async_import_batch("imp-1", [READING])
+
+    assert result.outcome is ImportOutcome.RETRY
+    assert result.retry_after == 15
+
+
+async def test_a_500_from_the_import_endpoint_is_retried_like_a_socket_error(
+    client, aioclient_mock
+) -> None:
+    aioclient_mock.post(BATCH_URL, status=500, json={"error": "An internal error occurred."})
+
+    with pytest.raises(TagHistorianConnectionError):
+        await client.async_import_batch("imp-1", [READING])
+
+
+# --------------------------------------------------------------------------
+# Renaming and merging tags (renames.py)
+# --------------------------------------------------------------------------
+
+RENAME_URL = "https://api.taghistorian.com/api/tags/rename"
+MERGE_URL = "https://api.taghistorian.com/api/tags/merge"
+
+
+async def test_a_rename_sends_the_two_names_and_200_is_done(client, aioclient_mock) -> None:
+    """200 is also what a rename that is already done answers, so a retry is safe."""
+    aioclient_mock.post(RENAME_URL, status=200, json={"applied": False, "alreadyDone": True})
+
+    result = await client.async_rename_tag("sensor.energy_2", "sensor.energy")
+
+    assert result.outcome is LineageOutcome.DONE
+    assert aioclient_mock.mock_calls[0][2] == {"from": "sensor.energy_2", "to": "sensor.energy"}
+
+
+async def test_a_merge_sends_source_and_target(client, aioclient_mock) -> None:
+    aioclient_mock.post(MERGE_URL, status=200, json={"applied": True})
+
+    result = await client.async_merge_tags("sensor.energy_2", "sensor.energy")
+
+    assert result.outcome is LineageOutcome.DONE
+    assert aioclient_mock.mock_calls[0][2] == {"source": "sensor.energy_2", "target": "sensor.energy"}
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "expected"),
+    [
+        # The new name is a tag already: what turns a rename into a merge.
+        (409, {"error": "exists", "code": "target_exists", "details": "A tag named 'x' already exists."},
+         LineageOutcome.TARGET_EXISTS),
+        # No tag under the old name: nothing was ever stored, nothing to carry.
+        (404, {"error": "Tag not found", "code": "not_found", "details": "There is no tag named 'x'."},
+         LineageOutcome.NOT_FOUND),
+        # The deploy handover, or any other moment the API asks to wait.
+        (503, {"error": "switching over", "code": "switching_over", "details": "try again"},
+         LineageOutcome.UNAVAILABLE),
+        # Everything else is the user's to decide, with the API's own words.
+        (409, {"error": "former name", "code": "former_name_of_another_tag", "details": "It is a former name."},
+         LineageOutcome.REFUSED),
+        (402, {"error": "quota", "code": "tag_quota_exceeded", "details": "No tag free."},
+         LineageOutcome.REFUSED),
+        (403, {"error": "Forbidden"}, LineageOutcome.REFUSED),
+    ],
+)
+async def test_a_rename_answer_is_classified_by_what_happens_next(
+    client, aioclient_mock, status, body, expected
+) -> None:
+    aioclient_mock.post(RENAME_URL, status=status, json=body)
+
+    result = await client.async_rename_tag("sensor.energy_2", "sensor.energy")
+
+    assert result.outcome is expected
+    # The sentence written for a person, where there is one.
+    assert result.message == body.get("details", body.get("error"))
+
+
+async def test_a_rename_with_a_revoked_key_asks_for_a_new_one(client, aioclient_mock) -> None:
+    aioclient_mock.post(RENAME_URL, status=401)
+
+    with pytest.raises(TagHistorianAuthError):
+        await client.async_rename_tag("sensor.energy_2", "sensor.energy")
+
+
+async def test_a_rename_that_gets_no_answer_is_tried_again_later(client, aioclient_mock) -> None:
+    aioclient_mock.post(RENAME_URL, exc=TimeoutError())
+
+    result = await client.async_rename_tag("sensor.energy_2", "sensor.energy")
+
+    assert result.outcome is LineageOutcome.UNAVAILABLE
+
+
+@pytest.mark.parametrize("status", [429, 500, 502, 504])
+async def test_a_busy_or_broken_gateway_is_tried_again_and_never_a_refusal(
+    client, aioclient_mock, status
+) -> None:
+    """These were REFUSED: a gateway hiccup during a deploy became a permanent
+    card saying "/api/tags/rename answered 502", and with "Rename tags when
+    entities are renamed" on, the rename was never asked for again."""
+    aioclient_mock.post(RENAME_URL, status=status)
+
+    result = await client.async_rename_tag("sensor.energy_2", "sensor.energy")
+
+    assert result.outcome is LineageOutcome.UNAVAILABLE
+
+
+async def test_a_tag_historian_without_renames_says_so_in_words(client, aioclient_mock) -> None:
+    """A bare 404 - no code - is a route that does not exist: an API older
+    than this integration. The card quotes the message, so it is a sentence."""
+    aioclient_mock.post(RENAME_URL, status=404)
+
+    result = await client.async_rename_tag("sensor.energy_2", "sensor.energy")
+
+    assert result.outcome is LineageOutcome.REFUSED
+    assert "cannot rename or merge tags yet" in result.message
+    assert "404" not in result.message
+
+
+async def test_a_key_that_may_not_rename_says_which_key_can(client, aioclient_mock) -> None:
+    aioclient_mock.post(MERGE_URL, status=403)
+
+    result = await client.async_merge_tags("sensor.energy_2", "sensor.energy")
+
+    assert result.outcome is LineageOutcome.REFUSED
+    assert "Write scope" in result.message

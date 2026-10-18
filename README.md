@@ -12,10 +12,74 @@ your own account, so the numbers on screen are your numbers.
 
 This repository is the public home of Tag Historian's client-side
 integrations. Besides this Home Assistant integration it ships the official
-[Python client](python-client/) and an [MCP server](mcp-server/) for Claude
-Desktop and other AI assistants, and it carries the documentation and public
-image name of the [collector](collector/) for MQTT, OPC UA and Sparkplug B —
-see [Also in this repository](#also-in-this-repository).
+[Python client](python-client/), an [MCP server](mcp-server/) for Claude
+Desktop and other AI assistants, a tool that [copies your history out of
+InfluxDB](influxdb-migration/) and a [Grafana dashboard](grafana/) for Home
+Assistant entities, and it carries the documentation and public image name of
+the [collector](collector/) for MQTT, OPC UA and Sparkplug B — see
+[Also in this repository](#also-in-this-repository).
+
+## Leaving InfluxDB? Bring the history, and skip the next database migration
+
+If Home Assistant writes to an InfluxDB of your own today, you are about to
+move it anyway: Home Assistant is removing the integration's YAML connection,
+and its InfluxDB 1.x app was marked end-of-life on 28 August. This is the move
+that ends the moving — Tag Historian is the database, and somebody else runs
+it.
+
+**What stays the same.** Home Assistant's own InfluxDB integration keeps doing
+the writing: Tag Historian speaks the InfluxDB v2 write API, so the switch is
+the integration's own dialog, and your `include` filter stays as it is. Each
+entity keeps its name — `sensor.outdoor_temperature` is the tag
+`sensor.outdoor_temperature` — and Grafana can still draw it, through Grafana
+Labs' Infinity data source and the dashboard in step 3 rather than your old
+InfluxDB queries.
+
+**What you gain.** No database to run, upgrade or back up. Full resolution for
+as long as your plan keeps it, then hourly minimum, maximum, average and count
+for ten years, on every plan — see
+[how long data is kept](https://taghistorian.com/docs/retention). A nightly
+backup to a geo-redundant vault whose offsite copy sits in a second Swedish
+region. Alerts by email, push and chat when a value crosses a limit or a sensor
+goes quiet.
+
+**What you give up.** InfluxQL and Flux: data comes back out through Tag
+Historian's own API, its charts, exports and Grafana's Infinity data source, not
+through InfluxDB tooling. Text states and attributes are not stored, only
+numbers. And it is a paid service past the free plan's tags.
+
+**The move, in three steps** (in full, with the order that matters, at
+[taghistorian.com/docs/migrate-from-influxdb](https://taghistorian.com/docs/migrate-from-influxdb)):
+
+1. **Copy the history** with [`influxdb-migration/`](influxdb-migration/) while
+   Home Assistant still writes to InfluxDB. It names every tag exactly as live
+   forwarding will, carries each entity's friendly name and unit, and spreads a
+   big history over as many days as your plan's daily allowance needs — with a
+   dry run first and a resume file throughout.
+2. **Point Home Assistant at Tag Historian** straight after the copy's last
+   catch-up run: **Reconfigure** on an InfluxDB 2.x connection; for 1.x, which
+   Reconfigure cannot turn into 2.x, delete the entry and add it again as
+   v2.x. [taghistorian.com/docs/home-assistant](https://taghistorian.com/docs/home-assistant)
+   has both.
+3. **Import [`grafana/home-assistant.json`](grafana/)** into Grafana: an entity
+   dropdown and a chart per entity, in its tag's unit and under its friendly
+   name. The copy gives every entity it copies its unit; for one you add to
+   Home Assistant later, set the unit once on the tag's page in Tag Historian
+   Explorer, because the built-in integration, on its default settings, does
+   not send it in a form Tag Historian reads.
+
+Every limit that decides how long step 1 takes — tags, readings a day — is read
+from your own account when the copy runs, and the dry run prints them.
+
+Using this integration for step 2 instead of the built-in one? Set it up
+straight after the copy's last catch-up run, the same way, and point only one
+of the two at Tag Historian: both would send every reading twice. Its
+[history import](#import-your-history) then adds to the copy and never
+doubles it: Tag Historian counts the copied readings as live data, and an
+import only takes what is older than a series' first live reading, under any
+name the series has had — an entity renamed after the copy included. It
+brings what the recorder has from before your InfluxDB did, if anything, and
+the history of entities your InfluxDB never had.
 
 ## Do I need this? You may not
 
@@ -39,6 +103,10 @@ What this integration adds:
   number of series, not by how much data they hold, so *which* entities you
   send is the decision that matters. This shows you the budget as you spend it,
   and refuses to let you sail past it without saying so.
+- **History that survives a rename.** Rename an entity in Home Assistant, or
+  replace a meter and give the new one the old one's id, and the series follows
+  it with its history intact - nothing is lost, nothing starts over, and it does
+  not cost a second series. See [When you rename an entity](#when-you-rename-an-entity).
 - **It can tell you why data stopped arriving.** The built-in integration
   cannot: it has one failure mode, it never reads the `Retry-After` header, and
   it has no notion of the API's "some of that batch was refused" answer. This
@@ -46,6 +114,18 @@ What this integration adds:
   what to do — a revoked key, entities beyond your plan's series count, the
   daily reading allowance being spent, or Tag Historian simply being busy. The
   last two are different problems and are never described as the same one.
+- **It brings the history you already have.** The recorder on your Home
+  Assistant box holds days of readings from before you installed this — on an
+  SD card, more often than not, the part most likely to fail. One action
+  copies them into Tag Historian with their original timestamps, and imported
+  history does not count against your daily reading allowance. See
+  [Import your history](#import-your-history).
+- **A restart or an outage does not cost you your readings.** Readings it
+  could not deliver are saved when Home Assistant stops and sent when it
+  starts again, and readings it had to let go of during an outage are read
+  back from the recorder while the recorder still has them. See [When the
+  connection or Home Assistant goes
+  away](#when-the-connection-or-home-assistant-goes-away).
 
 What it does **not** do: read data back out of Tag Historian, replace the
 recorder, or keep attributes as history. It is a one-way export of entity
@@ -82,7 +162,10 @@ name that does not exist yet — against your tag allowance. It cannot issue or
 revoke API keys, not even its own; it cannot delete a tag, which is what deletes
 that tag's history; it cannot change your plan or cancel your subscription; and
 it cannot invite or remove anyone from your team. Those endpoints refuse it with
-a `403`; they do not quietly do nothing. The key an account recovery hands you
+a `403`; they do not quietly do nothing. It can rename a tag or merge one into
+another, which is how this integration carries a renamed entity's history
+over. Neither deletes anything: the history stays where it is stored, and both
+can be undone in Tag Historian Explorer. The key an account recovery hands you
 is **Admin**, which is the whole account, and Home Assistant has no use for any
 of it.
 
@@ -115,7 +198,67 @@ If your account has no free series at all and everything you picked would need
 one, setup stops and says so rather than finishing with an empty selection.
 
 Change any of it later: **Settings → Devices & services → Tag Historian →
-Configure.**
+Configure → Change what you keep history for.**
+
+## Import your history
+
+**Settings → Devices & services → Tag Historian → Configure → Import the
+history Home Assistant has already recorded**, or the action
+`tag_historian.import_history` (from **Developer tools → Actions**, a script or
+an automation):
+
+```yaml
+action: tag_historian.import_history
+data:
+  entity_id:            # optional: default is every entity you keep history for
+    - sensor.house_power
+  days: 30              # optional: default is as far back as your plan's window
+```
+
+It reads what Home Assistant's recorder holds for those entities and sends it
+to Tag Historian with the original timestamps, through the same rules as the
+live readings — the same numbers and on/off words, `unavailable` left as a
+gap, the same minimum interval, timestamps to the second. It runs in the
+background: the **Tag Historian history import** sensor shows how far it is
+(`idle`, `running`, `finished` or `stopped`, with the counts as attributes),
+and a notification says when it is done and what it did. A restart carries it
+on where it stopped.
+
+What Tag Historian holds an import to — every number below is read from your
+own account, none of it is written into this integration:
+
+- **Your import allowance, instead of the daily one.** Imported readings do not
+  count against your daily reading allowance. Each account has an import
+  allowance instead: your plan's daily reading allowance times its
+  full-resolution window in days — what the plan could have stored in that
+  window — for all imports together. The import screen shows what is left; a
+  larger plan raises it. When it is used up the import stops and says so, and
+  live readings carry on unaffected.
+- **Your plan's full-resolution window.** Readings older than it are skipped,
+  so the import starts there.
+- **History only.** Readings older than the moment the import started, older
+  than the first reading of the entity Tag Historian received live, and older
+  than the start of the first import of that entity (for a renamed series,
+  under any name it has had). Everything after that is
+  your live data, which this integration sends itself — including readings
+  still waiting to be sent, so nothing arrives twice. Importing the same
+  history again works; feeding an entity fresh readings through imports does
+  not.
+- **The tag limit and the storage cap**, as for live data. An imported entity
+  uses a series like a forwarded one, which is why only entities you keep
+  history for can be imported. It is imported into the series its live
+  readings go to - for an entity you have renamed, the one its history is in
+  (see [When you rename an entity](#when-you-rename-an-entity)).
+
+Running an import twice stores nothing twice: Tag Historian skips a reading it
+already has for that series at that timestamp, and a reading it skips costs no
+allowance.
+
+**Not imported: long-term statistics.** Once the recorder purges its states
+(after 10 days by default), Home Assistant keeps only hourly mean, minimum and
+maximum values. Those are averages, not readings, and Tag Historian stores
+readings — so they are not imported yet, rather than imported as something
+they are not. Import soon after installing to keep the most.
 
 ## What one entity costs
 
@@ -166,6 +309,70 @@ choose it.
 either: they are Home Assistant saying it has nothing to report. A gap in the
 chart means exactly that — Tag Historian never stores an invented zero.
 
+## When you rename an entity
+
+A series is named after its entity's id: `sensor.energy_meter` is stored as the
+series `sensor.energy_meter`. Rename the entity in Home Assistant and this
+integration follows it. The selection is updated to the new id, and readings
+keep arriving - before version 2026.11.0 they stopped without a word, because
+the integration was listening for an id that no longer existed.
+
+The history follows as well, in one of two ways:
+
+- **With "Rename tags when entities are renamed" switched on** (on the Choose
+  screen, and under Configure later), the integration asks Tag Historian to
+  rename the series to the new id straight away. Nothing is copied or moved:
+  the readings from before stay where they are stored and read under the new
+  name, and it is still one series. If the new id already has a series of its
+  own - you replaced a meter and gave the new one the old one's id - the two
+  are merged into one history under that name, and the merged-in one stops
+  counting against your plan. If Tag Historian cannot be reached, the
+  integration asks again later; the readings go on into the old series
+  meanwhile.
+- **With it off** (the default), the readings go on into the series the entity
+  already has, so nothing is lost and no second series is started, and a
+  Repairs card asks what you want: rename the series and keep its history, or
+  start a new series under the new id and leave the history under the old
+  name, which takes one more series on your plan. For a replaced meter, the card
+  asks whether to merge the two histories or keep them apart.
+
+Tag Historian keeps the old id as a *former name* of the series. Anything still
+sent under it - a script, Home Assistant's built-in `influxdb` integration - is
+stored in the renamed series, and a chart or a query that asks for the old name
+gets the renamed series. Both can be undone in Tag Historian Explorer, under
+**Tags**: a rename by renaming the series back, a merge with **Separate** next
+to the name under **Former names**.
+Readings are never adjusted: a replacement meter that started from zero still
+shows the drop where the two histories meet.
+
+What is still on its way when you rename an entity goes with it, into the
+series its readings go to: readings held over a restart or an outage, the ones
+read back from the recorder afterwards, and a history import that is running,
+which carries on under the new id. An entity renamed before you import its
+history has it imported into that series as well, so the import does not
+start a second series beside it either - and once the series has the new
+name, the import still stops where its live readings began under the old one.
+If you chose a new series on the card instead, or to keep a replaced meter's
+two histories apart, the import leaves that entity out: its history stays in
+the old series, as the card says, and what comes after your choice arrives
+live. The recorder is read where Home Assistant keeps the entity's history:
+under the new id, where it moves the history when you rename an entity - or,
+for a replacement meter given the old meter's id, under the id the new meter
+had before, because Home Assistant then leaves both histories where they
+were. While the merge waits - for your
+answer on its card, or for Tag Historian to be reachable - nothing of the old
+meter's is read as the new one's.
+
+Renaming a device renames all of its entities at once, and each of them is
+followed. So is a rename made while the integration reloads or waits for Tag
+Historian to come back. A rename made while this integration is not running -
+disabled, or not yet installed - is not seen: the entity simply stops arriving
+under its old id.
+Select it again under its new id, and rename the old series to the new id in
+Tag Historian Explorer (**Tags**, open the series, **Rename**) to keep its
+history in one piece - or, if readings under the new id have already started a
+series, use **Merge into...** instead.
+
 ## Sensors it adds
 
 | Sensor | What it is |
@@ -173,8 +380,9 @@ chart means exactly that — Tag Historian never stores an invented zero.
 | `sensor.tag_historian_tags_used` | Series in use on your account, with the limit as an attribute |
 | `sensor.tag_historian_readings_today` | Readings stored today, against your daily allowance |
 | `sensor.tag_historian_readings_sent` | Readings this integration has delivered |
-| `sensor.tag_historian_readings_queued` | Readings waiting in memory right now |
+| `sensor.tag_historian_readings_queued` | Readings waiting to be sent right now |
 | `sensor.tag_historian_readings_dropped` | Readings that did not arrive, and why, in the attributes |
+| `sensor.tag_historian_history_import` | Where a history import is, with its counts as attributes |
 
 The last one is there on purpose: nothing is dropped silently, so if data is
 missing there is always a counter that moved. Its state adds up every way a
@@ -183,21 +391,24 @@ reading can fail to become history:
 | Attribute | What it counts |
 |---|---|
 | `dropped_over_quota` | Refused because it needed a series your plan has no room for |
-| `dropped_queue_overflow` | Evicted from a full buffer during a long outage, oldest first |
-| `dropped_on_shutdown` | Still undelivered when the last flush was done, buffered or handed back too late to requeue |
+| `dropped_queue_overflow` | Evicted from a full buffer, oldest first. During an outage they are read back from the recorder once Tag Historian answers again, while the recorder still has them; while today's reading allowance is spent they are over the allowance and are not |
+| `dropped_on_shutdown` | Neither delivered nor saved when the integration stopped: handed back too late to requeue, or a save that failed |
 | `dropped_mid_write` | Already in a request that never came back, because Home Assistant stopped or the entry was reloaded underneath it |
 | `dropped_not_a_number` | The entity reported a word this integration cannot store |
 
 `entities_storing_nothing` names the entities behind that last one, so a chart
 that stays empty says why. `dropped_rate_limited` is on the attributes too but
 is deliberately *not* in the total — those are the readings your minimum
-interval skipped, which is what you asked it to do.
+interval skipped, which is what you asked it to do. Two more attributes are not
+losses but what happened next: `backfilled_from_recorder`, readings read back
+from the recorder to fill a gap, and `restored_after_restart`, readings saved
+at the last stop and sent after it.
 
 The counters keep their values across a reload, so fixing a Repairs card does
 not erase the evidence of what it was telling you about. A Home Assistant
-restart clears them: they are held in memory, next to the buffer they describe.
-Anything the restart could not deliver is written to the log as well as
-counted, and the log is the half that is still there afterwards.
+restart clears them — they are held in memory — while the readings they
+describe are saved and sent, and anything that could not be is written to the
+log as well as counted.
 
 ## When something goes wrong
 
@@ -207,19 +418,27 @@ Everything below shows up in **Settings → Repairs**.
 |---|---|
 | Your API key was revoked | Asks for a new one through Home Assistant's normal re-authentication card, and stops retrying the dead key meanwhile |
 | Some readings exceed your plan's series count | Names the series, counts the readings that were lost, keeps sending everything else, and offers to reopen the picker so you can deselect |
-| Today's reading allowance is spent | Holds readings in memory and waits exactly as long as the API asks — it does not hammer a closed door |
+| Today's reading allowance is spent | Holds the newest readings — through a restart too — and waits exactly as long as the API asks; it does not hammer a closed door. What no longer fits in the buffer meanwhile is over the allowance: counted, not sent later |
 | Tag Historian is busy or briefly unreachable | Holds and retries quietly; only raises a card if it lasts, and that card never mentions your plan, because this is not about your plan |
 | Your account cannot write yet | Shows Tag Historian's own explanation, word for word |
+| An entity you send was renamed | Follows it and keeps its readings arriving in its history; renames the series in Tag Historian if you switched that on, or asks you on a card - see [When you rename an entity](#when-you-rename-an-entity) |
 
-The buffer is held **in memory only**. When Home Assistant stops — a restart,
-an update, a reboot — or when the entry is reloaded because you changed the
-options or fixed a Repairs card, two things happen before it goes:
+## When the connection or Home Assistant goes away
+
+When Home Assistant stops — a restart, an update, a reboot — or when the entry
+is reloaded because you changed the options or fixed a Repairs card, three
+things happen before the buffer is let go of:
 
 - a request that is already on its way out gets up to five seconds to finish,
   so a stop or a reload landing mid-write normally **delivers** those readings
   rather than losing them;
-- whatever is still buffered gets a last few delivery attempts, and anything
-  that will not go is added to the dropped counter and written to the log.
+- whatever is still buffered gets a last few delivery attempts;
+- and anything that will not go is **saved** to Home Assistant's `.storage`
+  (`tag_historian.<entry>.forwarder`), with how far Tag Historian had
+  acknowledged each entity, and sent when the integration starts again. The
+  file is bounded like the buffer — at most ten thousand readings, a few
+  megabytes — and is written when the integration stops and when writes start
+  or stop failing, not on every reading, so it does not wear an SD card.
 
 Both of those apply to both ways out, and that is worth stating because the two
 are not the same underneath. Home Assistant cancels an integration's background
@@ -230,7 +449,7 @@ you the full five seconds on the rarer event and nothing at all on the one that
 happens every time you restart.
 
 A request that does *not* finish in that window is abandoned rather than
-re-sent. Tag Historian does not deduplicate, and the endpoint may already have
+re-sent. The live write endpoint does not deduplicate, and it may already have
 taken the batch before the connection went, so re-sending it would risk
 doubling readings in your history instead of restoring them. Those readings are
 counted as `dropped_mid_write`, which means that counter can *overstate* the
@@ -238,7 +457,36 @@ loss — some of them may have landed. That is the direction chosen on purpose:
 an overstated loss gets asked about, an understated one is invisible.
 
 The buffer is also bounded — during a long outage the oldest go first and
-`dropped_queue_overflow` moves. Nothing is thrown away without being counted.
+`dropped_queue_overflow` moves. They are not gone: the recorder still has
+them. For every entity the integration keeps the time of the last reading Tag
+Historian acknowledged, and after a gap — an outage that overflowed the buffer,
+a restart, a stretch with the integration disabled — it reads the recorder for
+what lies between that reading and the oldest one it still holds, and sends
+that first, oldest first. That is your live data arriving late, so it counts
+against your daily reading allowance like any other reading; a long gap can
+take more than a day's allowance, and then it waits for the allowance like any
+reading does.
+
+What it reads back is what the recorder still has: Home Assistant purges
+states after 10 days by default, and an entity you have excluded from the
+recorder has nothing to read back. And readings let go of while today's
+allowance is spent are not read back at all. Those are over the allowance, not
+lost to an outage, and reading them back at midnight would put the new day's
+readings behind them — every day, for an account that sends more than its
+allowance. The buffer still holds the newest of them and sends those when the
+allowance resets. (One exception: an entity that is still catching up on an
+earlier outage when the allowance runs out has its readings read back as
+usual, so none of that outage is lost.)
+
+It does not re-send a reading Tag Historian may already have. A request that
+was abandoned mid-write counts as delivered, never as a gap, and if Home
+Assistant did not shut down cleanly — a crash, a power cut — while writes were
+going through, nothing is read back: the last moment before it may be missing,
+and nothing is doubled. (The recorder loses its own last few seconds to a power
+cut too.) If writes were failing when it went down, or it had not yet had an
+answer since it started, nothing had been acknowledged since, and the whole
+outage is read back — with the one exception of a retry Tag Historian took in
+the very moment of the crash, which then arrives twice.
 
 ## Development
 
@@ -269,6 +517,16 @@ themselves in place. CI runs Ubuntu, where neither is used.
   history, aggregates, alerts. **Read-only by default** — the three write
   tools don't exist as far as the host is concerned unless you explicitly
   enable them. Its README explains the write gate before you turn it on.
+- **[`influxdb-migration/`](influxdb-migration/)** — `taghistorian-influx-migrate`,
+  a command-line tool that copies Home Assistant's history out of InfluxDB 1.x
+  or 2.x into Tag Historian, under the names live forwarding uses, with each
+  entity's friendly name and unit. Dry run first, a resume file throughout, and
+  the daily allowance shared politely with live data. `requests` is its only
+  dependency; installed from this repository.
+- **[`grafana/`](grafana/)** — `home-assistant.json`, a Grafana dashboard for
+  Home Assistant entities stored in Tag Historian: an entity dropdown and one
+  chart per entity, in its tag's unit and under its friendly name, through
+  Grafana Labs' Infinity data source.
 - **[`collector/`](collector/)** —
   `ghcr.io/softi-dev/tag-historian-clients/collector`, the container image
   you run next to your MQTT broker, OPC UA server or Sparkplug B namespace.
@@ -278,9 +536,10 @@ themselves in place. CI runs Ubuntu, where neither is used.
   that its image, documentation and issue tracker are somewhere public. What
   lives here is its README.
 
-The two Python packages each have their own README, test suite and Python
-floor, the collector has its README and nothing to build, and everything
-ships on its own cadence — they only meet in this repository.
+The three Python packages each have their own README, test suite and Python
+floor, the collector has its README and nothing to build, the dashboard is a
+file to import, and everything ships on its own cadence — they only meet in
+this repository.
 
 ## License
 

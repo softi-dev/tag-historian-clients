@@ -1,7 +1,8 @@
-# Validation for all three Python packages in this repository: the Home
-# Assistant integration at the root (hassfest + HACS structure + its test
-# suite), and the python-client/ and mcp-server/ packages (each package's own
-# pytest and ruff, on that package's own Python floor).
+# Validation for every Python package in this repository: the Home Assistant
+# integration at the root (hassfest + HACS structure + its test suite, which
+# also holds the published Grafana dashboard to its shape), and the
+# python-client/, mcp-server/ and influxdb-migration/ packages (each package's
+# own pytest and ruff, on that package's own Python floor).
 #
 # collector/ is deliberately absent: it is documentation for the collector
 # container image, whose source and build live in the private product
@@ -113,6 +114,30 @@ jobs:
       # mcp-server's pyproject does not declare it (see the TODO there), so
       # the sibling checkout is the dependency.
       - run: pip install -e ../python-client
+      - run: pip install -e ".[dev]"
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: python -m pytest
+
+  influxdb-migration:
+    name: InfluxDB migration (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # The package's declared floor and the newest release, as for
+        # python-client: the copy runs once, on whatever machine can reach the
+        # InfluxDB - often an old Raspberry Pi or a NAS.
+        python-version: ["3.9", "3.13"]
+    defaults:
+      run:
+        working-directory: influxdb-migration
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: influxdb-migration/pyproject.toml
       - run: pip install -e ".[dev]"
       - run: ruff check .
       - run: ruff format --check .

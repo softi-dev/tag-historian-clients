@@ -29,17 +29,19 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 import voluptuous as vol
-from homeassistant.config_entries import SOURCE_REAUTH, SOURCE_USER
+from homeassistant.config_entries import SOURCE_REAUTH, SOURCE_USER, ConfigEntryState
 from homeassistant.core import HomeAssistant
+from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.tag_historian import repairs
+from custom_components.tag_historian import renames, repairs
 from custom_components.tag_historian.api import (
     QuotaSnapshot,
     TagHistorianClient,
@@ -250,6 +252,7 @@ async def test_every_issue_string_gets_the_placeholders_it_asks_for(
     repairs.async_raise_daily_quota_issue(hass, entry, 3600)
     repairs.async_raise_forbidden_issue(hass, entry, "Confirm your email address.")
     repairs.async_maybe_raise_unavailable_issue(hass, entry, 3600)
+    renames.async_raise_renamed_issue(hass, entry, "sensor.energy", "sensor.energy_2", merge=False)
 
     registry = ir.async_get(hass)
     raised = [
@@ -257,7 +260,7 @@ async def test_every_issue_string_gets_the_placeholders_it_asks_for(
         for issue in registry.issues.values()
         if issue.domain == DOMAIN
     ]
-    assert len(raised) == 4, "every card this integration can show"
+    assert len(raised) == 5, "every card this integration can show"
 
     for issue in raised:
         supplied = set(issue.translation_placeholders or {})
@@ -387,6 +390,7 @@ def render_step(section: str, result) -> str:
     strings = TRANSLATIONS[section]["step"][result["step_id"]]
     placeholders = dict(result.get("description_placeholders") or {})
     parts = [strings["title"], strings.get("description", "")]
+    parts += list(strings.get("menu_options", {}).values())
     parts += list(strings.get("data", {}).values())
     parts += list(strings.get("data_description", {}).values())
     return "\n".join(part.format(**placeholders) for part in parts)
@@ -408,6 +412,15 @@ def audit_step(section: str, result) -> str:
     assert supplied - FRAMEWORK_PLACEHOLDERS <= wanted, (
         f"{where} is handed {supplied - wanted} that nothing prints"
     )
+
+    if result["type"] is FlowResultType.MENU:
+        # A menu draws its options, not fields: every option it offers has
+        # words, and no words are left over for an option it does not offer.
+        assert set(strings.get("menu_options", {})) == set(result["menu_options"]), (
+            f"{where} names {set(strings.get('menu_options', {})) ^ set(result['menu_options'])} "
+            "that its menu does not offer"
+        )
+        return render_step(section, result)
 
     fields = fields_on(result)
     assert set(strings.get("data", {})) == fields, (
@@ -462,7 +475,8 @@ async def _walk_config_flow(hass: HomeAssistant, client) -> dict[str, dict]:
 
 
 async def _walk_options_flow(hass: HomeAssistant, client) -> dict[str, dict]:
-    """The same two screens again, from Configure rather than Add."""
+    """The same two screens again, from Configure rather than Add - and the
+    menu in front of them, and the history import beside them."""
     entry = MockConfigEntry(
         domain=DOMAIN,
         data=CREDENTIALS,
@@ -479,6 +493,11 @@ async def _walk_options_flow(hass: HomeAssistant, client) -> dict[str, dict]:
         flow_id = result["flow_id"]
 
         result = await hass.config_entries.options.async_configure(
+            flow_id, {"next_step_id": "choose"}
+        )
+        seen[result["step_id"]] = result
+
+        result = await hass.config_entries.options.async_configure(
             flow_id,
             {
                 CONF_ENTITIES: ["sensor.house_power", "sensor.outdoor_temperature"],
@@ -487,7 +506,26 @@ async def _walk_options_flow(hass: HomeAssistant, client) -> dict[str, dict]:
         )
         seen[result["step_id"]] = result
         hass.config_entries.options.async_abort(flow_id)
+
+    seen["import_history"] = await _open_import_screen(hass, entry, client)
     return seen
+
+
+async def _open_import_screen(hass: HomeAssistant, entry, client) -> dict:
+    """The import form, as a loaded entry with a recorder draws it."""
+    entry.mock_state(hass, ConfigEntryState.LOADED)
+    entry.runtime_data = SimpleNamespace(importer=SimpleNamespace(running=False))
+    with patch(FLOW_CLIENT_PATH, return_value=client), patch(
+        "custom_components.tag_historian.config_flow.history.recorder_ready",
+        return_value=True,
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {"next_step_id": "import_history"}
+        )
+        hass.config_entries.options.async_abort(result["flow_id"])
+    entry.mock_state(hass, ConfigEntryState.NOT_LOADED)
+    return result
 
 
 async def test_every_config_flow_screen_renders_and_matches_its_own_form(
@@ -1054,3 +1092,62 @@ def test_docs_url_is_the_page_the_manifest_links() -> None:
         ).read_text(encoding="utf-8")
     )
     assert manifest["documentation"] == DOCS_URL
+
+
+# --------------------------------------------------------------------------
+# The rename card - what it promises, rendered from what the flow supplies
+# --------------------------------------------------------------------------
+
+
+def render_menu(result) -> str:
+    """A fix flow menu's title, description and choices, with the flow's own placeholders."""
+    strings = TRANSLATIONS["issues"][renames.ISSUE_ENTITY_RENAMED]["fix_flow"]["step"][result["step_id"]]
+    placeholders = result.get("description_placeholders") or {}
+    parts = [strings["title"], strings["description"], *strings["menu_options"].values()]
+    return "\n".join(part.format(**placeholders) for part in parts)
+
+
+@pytest.mark.parametrize("merge", [False, True])
+async def test_the_rename_card_names_both_tags_and_says_nothing_is_lost(
+    hass: HomeAssistant, entry, merge
+) -> None:
+    """The card is read at the moment a person decides about their history.
+
+    Every claim on it has to be one the code makes true: the readings go on
+    into the old tag while it waits (send_as), nothing is copied (the API
+    renames metadata only), and the step can be undone in the dashboard.
+    """
+    renames.async_raise_renamed_issue(hass, entry, "sensor.energy", "sensor.energy_2", merge=merge)
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, renames.renamed_issue_id(entry, "sensor.energy"))
+
+    flow = await repairs.async_create_fix_flow(hass, issue.issue_id, issue.data)
+    flow.hass = hass
+    menu = await flow.async_step_init()
+
+    step = TRANSLATIONS["issues"][renames.ISSUE_ENTITY_RENAMED]["fix_flow"]["step"][menu["step_id"]]
+    assert set(step["menu_options"]) == set(menu["menu_options"]), "every choice is labelled, and only those"
+    wanted = placeholders_in(step["title"] + " " + step["description"])
+    assert wanted <= set(menu["description_placeholders"]), "the menu prints only what the flow supplies"
+
+    text = render_menu(menu)
+    assert "sensor.energy_2" in text and "sensor.energy" in text
+    assert "Nothing is copied" in text
+    assert "undone" in text or "renamed back" in text
+    # Both cards: until it is answered, the readings go on into the old tag
+    # (renames.py), for a merge as much as for a rename.
+    assert "nothing is lost" in text
+    if not merge:
+        assert "one more tag" in text, "starting a new tag costs a slot, and the card says so"
+
+
+async def test_a_refusal_is_quoted_on_the_card(hass: HomeAssistant, entry) -> None:
+    renames.async_raise_renamed_issue(
+        hass, entry, "sensor.energy", "sensor.energy_2", merge=False,
+        refusal="'sensor.energy' is a former name of 'sensor.meter'.",
+    )
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, renames.renamed_issue_id(entry, "sensor.energy"))
+
+    flow = await repairs.async_create_fix_flow(hass, issue.issue_id, issue.data)
+    flow.hass = hass
+
+    assert "former name of 'sensor.meter'" in render_menu(await flow.async_step_init())

@@ -77,6 +77,11 @@ def make_forwarder(hass: HomeAssistant, entry: MockConfigEntry):
     Home Assistant's test harness fails a test that leaves a timer behind, and
     a forwarder always has one pending while its buffer is non-empty. Stopping
     them here is what a real unload does through ``entry.async_on_unload``.
+
+    These forwarders have no store: the tests in this file are about the wire,
+    and a forwarder whose buffer cannot be saved is also the case where the
+    shutdown counters must still move. Saving and restoring the buffer, and
+    reading gaps back from the recorder, are tests/test_persistence.py.
     """
     built: list[StateForwarder] = []
 
@@ -662,7 +667,11 @@ async def test_stopping_home_assistant_flushes_the_buffer(
 async def test_what_cannot_be_flushed_on_shutdown_is_counted(
     hass: HomeAssistant, entry, make_forwarder
 ) -> None:
-    """The buffer is memory only. Losing it is allowed; losing it quietly is not.
+    """A buffer that cannot be saved may be lost, never lost quietly.
+
+    With a store (always, in Home Assistant) these readings are saved and sent
+    after the restart - tests/test_persistence.py. Without one, or when the
+    save fails, this is the counter that moves.
 
     The README's promise is that if data is missing there is always a counter
     that moved, and this is the case that made it false.
