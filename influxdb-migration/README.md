@@ -6,12 +6,20 @@ app, or from InfluxDB 2.x — and writes it into
 [Tag Historian](https://taghistorian.com), under exactly the tag names Home
 Assistant's live data gets there, with each entity's friendly name and unit.
 
-It is the missing half of leaving InfluxDB. Pointing Home Assistant's InfluxDB
-integration at Tag Historian moves your live data in one dialog
+It is the missing half of leaving InfluxDB. Your live data moves in one setup:
+the Tag Historian integration for Home Assistant, installed through HACS
+([this repository's README](../README.md),
+[taghistorian.com/docs/home-assistant-hacs](https://taghistorian.com/docs/home-assistant-hacs)),
+or, without HACS, Home Assistant's own InfluxDB integration pointed at Tag
+Historian in one dialog
 ([taghistorian.com/docs/home-assistant](https://taghistorian.com/docs/home-assistant)).
-This brings the years you already have along with it, so the next database
-migration — the end-of-life InfluxDB 1.x app, the next major version — is one
-you skip. The whole move, with the order that matters, is at
+If your InfluxDB configuration adds tags of its own, from a `tags:` block for
+instance, take the built-in one: this copy puts those tags in the tag names, as
+the built-in integration does, and the Tag Historian integration does not.
+This brings the years you already have along with it, so leaving the database
+behind does not mean leaving its history behind, and there is no database left
+on your side to upgrade the next time a major version lands. The whole move,
+with the order that matters, is at
 [taghistorian.com/docs/migrate-from-influxdb](https://taghistorian.com/docs/migrate-from-influxdb).
 
 ## What it copies, and what it does not
@@ -20,11 +28,12 @@ you skip. The whole move, with the order that matters, is at
 Home Assistant writes with a `domain` and an `entity_id` tag and a numeric
 `value` field. On/off entities count: Home Assistant writes `on` and `off` as 1
 and 0. Each entity becomes one tag, named `{domain}.{entity_id}` — the name
-Tag Historian gives the same entity when Home Assistant writes to it live, extra
-tags from a `tags:` block in your InfluxDB configuration included — with its
-friendly name as the tag's description and its unit as the tag's unit. An entity
-whose unit changed (W to kW) is two series in InfluxDB and one tag here, as it is
-one entity in Home Assistant.
+Tag Historian gives the same entity live, through either integration — with its
+friendly name as the tag's description and its unit as the tag's unit. Extra
+tags from a `tags:` block in your InfluxDB configuration go into the name as
+well, as they do in the built-in integration's live data. An entity whose unit
+changed (W to kW) is two series in InfluxDB and one tag here, as it is one
+entity in Home Assistant.
 
 **Not copied:**
 
