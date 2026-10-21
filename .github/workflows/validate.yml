@@ -39,14 +39,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Nothing is ignored, on purpose: the HACS default store accepts a
+      # repository only when this action passes with no ignores at all, and
+      # the PR to hacs/default links a run of it. The brands check is met by
+      # custom_components/tag_historian/brand/icon.png - HACS looks there
+      # before it falls back to home-assistant/brands, and since Home
+      # Assistant 2026.3 a custom integration ships its images that way
+      # rather than through a brands PR.
       - uses: hacs/action@main
         with:
           category: integration
-          # Until a brand exists at home-assistant/brands (or a brand/ folder
-          # is added here), the brands check has nothing to find. Ignoring it
-          # keeps the rest of the validation meaningful instead of permanently
-          # red; remove this line once the brands PR lands.
-          ignore: brands
 
   test:
     name: Home Assistant tests
