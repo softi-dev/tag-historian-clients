@@ -16,8 +16,8 @@ integrations. Besides this Home Assistant integration it ships the official
 Desktop and other AI assistants, a tool that [copies your history out of
 InfluxDB](influxdb-migration/) and a [Grafana dashboard](grafana/) for Home
 Assistant entities, and it carries the documentation and public image name of
-the [collector](collector/) for MQTT, OPC UA and Sparkplug B — see
-[Also in this repository](#also-in-this-repository).
+the [collector](collector/) for MQTT, OPC UA, Sparkplug B and Modbus TCP —
+see [Also in this repository](#also-in-this-repository).
 
 ## Running InfluxDB for Home Assistant? Keep it, or drop the server
 
@@ -542,8 +542,9 @@ themselves in place. CI runs Ubuntu, where neither is used.
   Grafana Labs' Infinity data source.
 - **[`collector/`](collector/)** —
   `ghcr.io/softi-dev/tag-historian-clients/collector`, the container image
-  you run next to your MQTT broker, OPC UA server or Sparkplug B namespace.
-  It connects outward only and buffers to disk when the uplink drops.
+  you run next to your MQTT broker, OPC UA server, Sparkplug B namespace or
+  Modbus TCP devices. It connects outward only and buffers to disk when the
+  uplink drops.
   **Source not included** — the collector is part of the proprietary
   product, built in its private repository and published under this one so
   that its image, documentation and issue tracker are somewhere public. What
