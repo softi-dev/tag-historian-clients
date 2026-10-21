@@ -118,8 +118,17 @@ fixed.
 ### Updating the collector
 
 A container keeps the image it was created from, so `docker restart tag-collector` starts the same
-collector again. To move to the newest, pull it and create the container again on the same volume;
-the configuration and the readings not yet sent stay where they are:
+collector again. To move to the newest, pull it and create the container again on the same volume.
+What is on the volume stays: `appsettings.json`, tag files, certificates and the readings not yet
+sent. The `-e` options do not: they belong to the container, so give the new one the same ones. If
+you no longer have them, list them before you remove the old one:
+
+```bash
+docker inspect tag-collector --format '{{json .Config.Env}}'
+```
+
+`PATH`, `APP_UID`, `ASPNETCORE_HTTP_PORTS` and the `DOTNET_` entries come with the image; the rest
+are yours. Then:
 
 ```bash
 docker pull ghcr.io/softi-dev/tag-historian-clients/collector:latest
@@ -128,10 +137,13 @@ docker rm tag-collector
 docker run -d --name tag-collector --restart unless-stopped -v tag-collector:/config -e TagHistorian__ApiKey="<your-api-key>" ghcr.io/softi-dev/tag-historian-clients/collector:latest
 ```
 
-with your key in place of `<your-api-key>`, as before. `docker stop` lets the collector close its
-queue before the container goes, which `docker rm -f` would not. With compose, `docker compose pull`
-and then `docker compose up -d` do the same. On Windows, run `install.ps1` from the newer zip - see
-[Windows, without Docker](#windows-without-docker).
+with your key in place of `<your-api-key>`, as before, and your other `-e` options beside it. A
+setting left out falls back to the file or its default: a raised `MaxQueueBytes` drops back to
+512 MiB, and a collector set up only through the environment finds no source, writes the example
+file and stops with exit code `78`. `docker stop` lets the collector close its queue before the
+container goes, which `docker rm -f` would not. With compose the environment is in
+`docker-compose.yml`, so `docker compose pull` and then `docker compose up -d` do the same. On
+Windows, run `install.ps1` from the newer zip - see [Windows, without Docker](#windows-without-docker).
 
 OPC UA tag files, [browse](#opc-ua-browse-and-tag-files) and
 [Modbus devices](#modbus-tcp-devices-beta) need collector **1.0.47** or later. An older one ignores
@@ -313,9 +325,13 @@ against one, tell us how it went in this repository's issues.
   A `Float32` that reads as nonsense is usually in the other word order: try
   `"WordOrder": "LowWordFirst"`.
 - **Only changes are sent.** Every tag is read every `PollIntervalMs`, and a reading goes out when
-  the value has moved by more than the tag's `Deadband` (in its own units, after `Scale`), or when
+  the value has moved by more than the row's `Deadband` (in its own units, after `Scale`), or when
   it is readable again after an outage. A device that stops answering gets an outage marker in its
   tags' history, never an invented value.
+- **A steady value is not sent again.** A ["no data for" alert](https://taghistorian.com/docs/alerts)
+  on a tag that rarely moves can then fire while the device is fine. For such a tag, set the
+  device's `HeartbeatSeconds`: an unchanged value is then sent again that often, each time a
+  reading against your plan, which is why it is off by default.
 - **Tags from a CSV file.** `TagsFile` names one in the collector's folder, its header naming the
   columns as the settings of a `Tags` row are named: `TagName` and `Address` required,
   `RegisterType`, `DataType`, `Scale`, `Units` and the rest optional, with the same defaults. A row
@@ -406,8 +422,8 @@ answers `browse` as a second collector, which stops at once because the service 
 
 browse exits with `0` when the list was written, `69` when the server could not be reached or
 browsed (the reason is printed), `73` when the list could not be written - including over a file a
-`TagsFile` names - `78` when `appsettings.json` has no OPC UA server with an `EndpointUrl` to browse
-yet, and `64` for an option it cannot use.
+`TagsFile` names - `78` when there is no OPC UA server with an `EndpointUrl` to browse yet or
+`appsettings.json` does not parse, and `64` for an option it cannot use.
 
 ### The tag file
 
