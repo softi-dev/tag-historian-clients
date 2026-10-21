@@ -9,9 +9,10 @@ Assistant's live data gets there, with each entity's friendly name and unit.
 It is the missing half of leaving InfluxDB. Pointing Home Assistant's InfluxDB
 integration at Tag Historian moves your live data in one dialog
 ([taghistorian.com/docs/home-assistant](https://taghistorian.com/docs/home-assistant)).
-This brings the years you already have along with it, so the next database
-migration — the end-of-life InfluxDB 1.x app, the next major version — is one
-you skip. The whole move, with the order that matters, is at
+This brings the years you already have along with it, so leaving the database
+behind does not mean leaving its history behind, and there is no database left
+on your side to upgrade the next time a major version lands. The whole move,
+with the order that matters, is at
 [taghistorian.com/docs/migrate-from-influxdb](https://taghistorian.com/docs/migrate-from-influxdb).
 
 ## What it copies, and what it does not

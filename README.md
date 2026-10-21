@@ -19,13 +19,13 @@ Assistant entities, and it carries the documentation and public image name of
 the [collector](collector/) for MQTT, OPC UA and Sparkplug B — see
 [Also in this repository](#also-in-this-repository).
 
-## Leaving InfluxDB? Bring the history, and skip the next database migration
+## Running InfluxDB for Home Assistant? Keep it, or drop the server
 
-If Home Assistant writes to an InfluxDB of your own today, you are about to
-move it anyway: Home Assistant is removing the integration's YAML connection,
-and its InfluxDB 1.x app was marked end-of-life on 28 August. This is the move
-that ends the moving — Tag Historian is the database, and somebody else runs
-it.
+If Home Assistant writes to an InfluxDB of your own and you are happy running
+it, keep it: a local database costs only the machine it is on, and nothing here
+asks you to move. Move when you would rather not run a database for this at
+all — then Tag Historian is the database, somebody else runs it, and the
+history you already have comes along.
 
 **What stays the same.** Home Assistant's own InfluxDB integration keeps doing
 the writing: Tag Historian speaks the InfluxDB v2 write API, so the switch is
@@ -73,7 +73,11 @@ from your own account when the copy runs, and the dry run prints them.
 
 Using this integration for step 2 instead of the built-in one? Set it up
 straight after the copy's last catch-up run, the same way, and point only one
-of the two at Tag Historian: both would send every reading twice. Its
+of the two at Tag Historian: both would send every reading twice. It names a
+tag after the entity id, as the copy does — unless your InfluxDB configuration
+adds tags of its own, from a `tags:` block for instance: the copy puts those in
+the tag names, as the built-in integration does, and this integration does not,
+so keep the built-in one for step 2 then. Its
 [history import](#import-your-history) then adds to the copy and never
 doubles it: Tag Historian counts the copied readings as live data, and an
 import only takes what is older than a series' first live reading, under any
@@ -81,14 +85,17 @@ name the series has had — an entity renamed after the copy included. It
 brings what the recorder has from before your InfluxDB did, if anything, and
 the history of entities your InfluxDB never had.
 
-## Do I need this? You may not
+## This one, or the built-in integration?
 
-Home Assistant's **built-in `influxdb` integration already works** with Tag
-Historian and is fully supported. If you have it running and you are happy with
-it, there is nothing here you have to move to. The setup is documented at
-[taghistorian.com/docs/home-assistant](https://taghistorian.com/docs/home-assistant).
+This one, if you can install HACS: it is the way Tag Historian recommends
+sending Home Assistant history, on every page of
+[taghistorian.com](https://taghistorian.com/docs/home-assistant-hacs) and in the
+Explorer. Without HACS, Home Assistant's **built-in `influxdb` integration
+works** with Tag Historian too — its setup is at
+[taghistorian.com/docs/home-assistant](https://taghistorian.com/docs/home-assistant) —
+and if you already run it and are happy with it, nothing forces a move.
 
-What this integration adds:
+What this integration has that the built-in one does not:
 
 - **No YAML, no restart.** Entity selection is a picker, and changing it later
   is a picker again.
