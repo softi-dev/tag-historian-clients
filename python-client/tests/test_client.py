@@ -252,6 +252,32 @@ def test_400_with_violations_surfaces_them_on_the_exception(make_client):
     assert excinfo.value.violations == ["must not contain spaces", "must not start with a digit"]
 
 
+@responses.activate
+def test_create_tag_documents_the_deadband_as_the_fraction_the_server_holds_it_to(make_client):
+    # Since Tag Historian 1.0.48, POST /api/tags refuses a compressionDeadband
+    # outside 0..1: it is a fraction of the last stored value, not a distance
+    # in the tag's unit. The parameter's documentation is where a caller
+    # learns that before the 400, so it is held here; the client itself sends
+    # the number as given and lets the server say what is wrong with it.
+    doc = TagHistorianClient.create_tag.__doc__ or ""
+    assert "fraction of the last stored value" in doc
+    assert "from 0 to 1" in doc
+
+    responses.add(
+        responses.POST,
+        f"{BASE_URL}/api/tags",
+        json={"error": "compressionDeadband must be from 0 to 1 (received 2)."},
+        status=400,
+    )
+
+    client = make_client()
+    with pytest.raises(TagHistorianAPIError) as excinfo:
+        client.create_tag("boiler.temperature", compression_deadband=2)
+
+    assert excinfo.value.status_code == 400
+    assert json.loads(responses.calls[0].request.body)["compressionDeadband"] == 2
+
+
 # -- customerId cached across reads -----------------------------------------
 
 
