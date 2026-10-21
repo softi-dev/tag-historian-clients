@@ -6,3 +6,6 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+
+# Local worktrees used while developing; never part of the repo
+.claude/
