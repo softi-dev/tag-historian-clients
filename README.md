@@ -27,13 +27,14 @@ asks you to move. Move when you would rather not run a database for this at
 all — then Tag Historian is the database, somebody else runs it, and the
 history you already have comes along.
 
-**What stays the same.** Home Assistant's own InfluxDB integration keeps doing
-the writing: Tag Historian speaks the InfluxDB v2 write API, so the switch is
-the integration's own dialog, and your `include` filter stays as it is. Each
-entity keeps its name — `sensor.outdoor_temperature` is the tag
-`sensor.outdoor_temperature` — and Grafana can still draw it, through Grafana
+**What stays the same.** Each entity keeps its name —
+`sensor.outdoor_temperature` is the tag `sensor.outdoor_temperature`, in the
+copied history and live alike — and Grafana can still draw it, through Grafana
 Labs' Infinity data source and the dashboard in step 3 rather than your old
-InfluxDB queries.
+InfluxDB queries. The live sending moves to this integration, with a picker in
+place of your `include` filter. Without HACS, Home Assistant's own InfluxDB
+integration can keep doing it: Tag Historian speaks the InfluxDB v2 write API,
+so that switch is the integration's own dialog, and the filter stays as it is.
 
 **What you gain.** No database to run, upgrade or back up. Full resolution for
 as long as your plan keeps it, then hourly minimum, maximum, average and count
@@ -56,42 +57,47 @@ numbers. And it is a paid service past the free plan's tags.
    forwarding will, carries each entity's friendly name and unit, and spreads a
    big history over as many days as your plan's daily allowance needs — with a
    dry run first and a resume file throughout.
-2. **Point Home Assistant at Tag Historian** straight after the copy's last
-   catch-up run: **Reconfigure** on an InfluxDB 2.x connection; for 1.x, which
-   Reconfigure cannot turn into 2.x, delete the entry and add it again as
-   v2.x. [taghistorian.com/docs/home-assistant](https://taghistorian.com/docs/home-assistant)
-   has both.
+2. **Switch the live data to Tag Historian** straight after the copy's last
+   catch-up run, one of two ways — and only one of them, because both would
+   send every reading twice:
+   - **This integration**, if you can install HACS: [install](#install) and
+     [set it up](#set-up), pick the entities the copy took, then delete the
+     InfluxDB entry, or leave it writing to your own InfluxDB if you are keeping
+     that too. It names a tag after the entity id, as the copy does — unless
+     your InfluxDB configuration adds tags of its own, from a `tags:` block for
+     instance: the copy puts those in the tag names, as the built-in integration
+     does, and this integration does not, so take the second way then.
+   - **Home Assistant's built-in InfluxDB integration**, pointed at Tag
+     Historian: **Reconfigure** on an InfluxDB 2.x connection; for 1.x, which
+     Reconfigure cannot turn into 2.x, delete the entry and add it again as
+     v2.x. [taghistorian.com/docs/home-assistant](https://taghistorian.com/docs/home-assistant)
+     has both.
 3. **Import [`grafana/home-assistant.json`](grafana/)** into Grafana: an entity
    dropdown and a chart per entity, in its tag's unit and under its friendly
-   name. The copy gives every entity it copies its unit; for one you add to
-   Home Assistant later, set the unit once on the tag's page in Tag Historian
-   Explorer, because the built-in integration, on its default settings, does
-   not send it in a form Tag Historian reads.
+   name. The copy gives every entity it copies its unit, and this integration
+   sends the unit of every entity that has one. With the built-in integration,
+   set the unit of an entity you add to Home Assistant later once on the tag's
+   page in Tag Historian Explorer, because on its default settings it does not
+   send it in a form Tag Historian reads.
 
 Every limit that decides how long step 1 takes — tags, readings a day — is read
 from your own account when the copy runs, and the dry run prints them.
 
-Using this integration for step 2 instead of the built-in one? Set it up
-straight after the copy's last catch-up run, the same way, and point only one
-of the two at Tag Historian: both would send every reading twice. It names a
-tag after the entity id, as the copy does — unless your InfluxDB configuration
-adds tags of its own, from a `tags:` block for instance: the copy puts those in
-the tag names, as the built-in integration does, and this integration does not,
-so keep the built-in one for step 2 then. Its
-[history import](#import-your-history) then adds to the copy and never
-doubles it: Tag Historian counts the copied readings as live data, and an
-import only takes what is older than a series' first live reading, under any
-name the series has had — an entity renamed after the copy included. It
-brings what the recorder has from before your InfluxDB did, if anything, and
-the history of entities your InfluxDB never had.
+With this integration doing step 2, its [history import](#import-your-history)
+adds to the copy and never doubles it: Tag Historian counts the copied readings
+as live data, and an import only takes what is older than a series' first live
+reading, under any name the series has had — an entity renamed after the copy
+included. It brings what the recorder has from before your InfluxDB did, if
+anything, and the history of entities your InfluxDB never had.
 
 ## This one, or the built-in integration?
 
 This one, if you can install HACS: it is the way Tag Historian recommends
-sending Home Assistant history, on every page of
-[taghistorian.com](https://taghistorian.com/docs/home-assistant-hacs) and in the
-Explorer. Without HACS, Home Assistant's **built-in `influxdb` integration
-works** with Tag Historian too — its setup is at
+sending Home Assistant history, on
+[taghistorian.com](https://taghistorian.com/docs/home-assistant-hacs) and on the
+Explorer's first screen. Without HACS, Home Assistant's **built-in `influxdb`
+integration works** with Tag Historian
+too — its setup is at
 [taghistorian.com/docs/home-assistant](https://taghistorian.com/docs/home-assistant) —
 and if you already run it and are happy with it, nothing forces a move.
 
