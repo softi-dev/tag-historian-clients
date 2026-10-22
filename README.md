@@ -147,7 +147,16 @@ what Home Assistant calls it and its readings carry their unit.
 
 ## Install
 
-### Through HACS (custom repository)
+### Through HACS
+
+[![Open your Home Assistant instance and open the Tag Historian repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=softi-dev&repository=tag-historian-clients&category=integration)
+
+The button opens this repository in HACS on your own Home Assistant, through
+My Home Assistant, which asks for your Home Assistant's address the first time.
+HACS asks whether to add it as a custom repository: press **Add**, then
+**Download**, and restart Home Assistant.
+
+Without the button:
 
 1. HACS → three-dot menu → **Custom repositories**
 2. Repository: the URL of this repository. Category: **Integration**.
@@ -160,7 +169,10 @@ Copy `custom_components/tag_historian/` into your Home Assistant
 
 ## Set up
 
-**Settings → Devices & services → Add integration → Tag Historian.**
+**Settings → Devices & services → Add integration → Tag Historian**, or, once
+it is installed and Home Assistant has restarted:
+
+[![Open your Home Assistant instance and start setting up the Tag Historian integration.](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start/?domain=tag_historian)
 
 You will need an API key whose **Scope** is **Write**, created in the Tag
 Historian dashboard under API keys: press **Create New Key**, name it, and leave
