@@ -110,10 +110,11 @@ same applies when every source list is empty - there has to be at least one of `
 `OpcServers`, `SparkplugSources` or `ModbusDevices` with an entry in it, or there is nothing to do
 and the log says so. A key left at `<your-api-key>`, a placeholder left in the file, and a file that
 no longer parses after an edit each stop it at startup with exit code `78` and a message naming the
-setting, or the line and position where the parser gave up; so does an OPC UA
-[tag file](#the-tag-file) with a row the collector cannot read. Under `--restart unless-stopped`
-Docker keeps starting it again, so `docker ps` shows `Restarting (78)` until the configuration is
-fixed.
+setting, or the line and position where the parser gave up; so does a
+[tag file](#the-tag-file), OPC UA or Modbus, that is not there, cannot be read, or has not one row
+the collector can use. A tag file with a bad row among good ones does not stop it: that row is
+skipped and named in the log. Under `--restart unless-stopped` Docker keeps starting it again, so
+`docker ps` shows `Restarting (78)` until the configuration is fixed.
 
 ### Updating the collector
 
@@ -149,6 +150,13 @@ OPC UA tag files, [browse](#opc-ua-browse-and-tag-files) and
 [Modbus devices](#modbus-tcp-devices-beta) need collector **1.0.47** or later. An older one ignores
 `TagsFile` and `ModbusDevices` without a word and does not know `browse`, so update a collector you
 started before then.
+
+**1.0.48** changes four things you may notice after the update. A tag file's bad row is skipped
+instead of stopping the start ([The tag file](#the-tag-file)). A Modbus value that holds steady is
+sent again every 5 minutes, so it costs readings it did not before
+([Modbus TCP devices](#modbus-tcp-devices-beta)). A tag name is collected from one source only
+([One tag name, one source](#one-tag-name-one-source)). And the start warns once when the tags in
+the configuration will not fit your plan ([The log](#the-log-is-the-diagnostic-surface)).
 
 ## Windows, without Docker
 
@@ -216,7 +224,7 @@ service with exit code `78` and says so, rather than leaving it running with not
   [the latest release](https://github.com/softi-dev/tag-historian-clients/releases/latest) and
   running its `install.ps1` the same way: it stops the service, replaces the program, starts it
   again and keeps the folders the service was installed with. The zip's file name carries the
-  collector's version, `TagHistorianCollector-1.0.47-win-x64.zip` for 1.0.47; OPC UA tag files,
+  collector's version, `TagHistorianCollector-1.0.48-win-x64.zip` for 1.0.48; OPC UA tag files,
   browse and Modbus devices need 1.0.47 or later, and an older program ignores `TagsFile` and
   `ModbusDevices` without a word. **Uninstall** with `uninstall.ps1`, from the program folder or
   the extracted zip; it deletes only what `install.ps1` put there. Both keep the data folder, the
@@ -328,16 +336,21 @@ against one, tell us how it went in this repository's issues.
   the value has moved by more than the row's `Deadband` (in its own units, after `Scale`), or when
   it is readable again after an outage. A device that stops answering gets an outage marker in its
   tags' history, never an invented value.
-- **A steady value is not sent again.** A ["no data for" alert](https://taghistorian.com/docs/alerts)
-  on a tag that rarely moves can then fire while the device is fine. For such a tag, set the
-  device's `HeartbeatSeconds`: an unchanged value is then sent again that often, each time a
-  reading against your plan, which is why it is off by default.
+- **A steady value is still sent every 5 minutes.** From collector 1.0.48 the device's
+  `HeartbeatSeconds` is `300` by default: a value that has not changed is sent again five minutes
+  after the tag's last reading, so a ["no data for" alert](https://taghistorian.com/docs/alerts) on
+  a setpoint that holds all day fires when the device stops answering, not because the setpoint
+  held. That is at most 288 extra readings a day for a tag that never changes, against your plan,
+  and none for a tag that changes at least every five minutes. `0` sends changes only, or set it
+  higher to send fewer. A collector older than 1.0.48 sends changes only unless you set it.
 - **Tags from a CSV file.** `TagsFile` names one in the collector's folder, its header naming the
   columns as the settings of a `Tags` row are named: `TagName` and `Address` required,
   `RegisterType`, `DataType`, `Scale`, `Units` and the rest optional, with the same defaults. A row
-  that cannot be used is skipped with an error in the log naming its line, and the device's other
-  rows are collected - the opposite of an [OPC UA tag file](#the-tag-file). `TagPrefix` lets
-  identical meters share one file. The file is read at start.
+  that cannot be used is skipped with an error in the log naming its line and column, and the
+  device's other rows are collected, as in an [OPC UA tag file](#the-tag-file); a line starting
+  with `#` is always skipped. A file the collector cannot read at all, or in which not one row can
+  be used, stops it at start with exit code `78` (from 1.0.48; 1.0.47 started the device without
+  the file's tags). `TagPrefix` lets identical meters share one file. The file is read at start.
 - **No serial port.** Modbus RTU over RS-485 goes through a Modbus TCP gateway, one entry per
   device behind it, each with its own `UnitId`.
 
@@ -400,7 +413,8 @@ docker cp tags.csv tag-collector:/config/tags.csv
 ```
 
 A PLC easily has more variables than your plan has tags, and browse lists all of them: keep the ones
-you want history of. Then set `"TagsFile": "tags.csv"` on the server in `appsettings.json`, copied
+you want history of. From 1.0.48 the collector says at start when the tags it is configured with
+will not fit ([The log](#the-log-is-the-diagnostic-surface)). Then set `"TagsFile": "tags.csv"` on the server in `appsettings.json`, copied
 out and back in as in step 2, and run `docker restart tag-collector`. The log says how many tags
 came from the file, ahead of the usual `Creating subscription with ... tags`. browse writes over its
 own `browse-*.csv` files when it runs again, never over a file a `TagsFile` names, so you can browse
@@ -447,17 +461,39 @@ with browse, export it from your PLC software, or type it: any CSV file with the
   opens a comma file in a single column: run browse with `--delimiter semicolon` for one it splits.
 - UTF-8, which is Excel's **CSV UTF-8**. Blank lines and lines starting with `#` are skipped, unless
   the line holds a NodeId.
-- A NodeId in both the file and `Tags` is taken as `Tags` has it, and the log says so.
+- A NodeId in both the file and `Tags` is taken as `Tags` has it, and the log says so. One tag name
+  for two different nodes, one in each list, skips the file's row with an error.
 - The file is read at start: restart the collector after you change it. A NodeId the server does
   not know shows up as a per-item error in the log, as in `Tags`, while the rest keep working.
 
-**A row the collector cannot read stops it at start**, with exit code `78` and every bad row's line
-and column, lettered as in Excel: a NodeId that is not one, a tag name the API would refuse, the
-same NodeId or tag name on two rows, or a tag name another server in `OpcServers` collects too. So
-does a `TagsFile` that is not there. It does not start without them, because a tag you listed would
-otherwise stay empty with nothing to tell you why. A Modbus tag file is the one that differs: there
-a bad row is skipped with an error in the log and the device's other rows are collected
+**A row the collector cannot use is skipped, and the rest are collected.** Each one is named in the
+log at start as an error with its line and column, lettered as in Excel: a NodeId that is not one, a
+tag name the API would refuse, a value that is not a number, the same NodeId or tag name on a second
+row (the first one is kept), or a tag name another source already collects
+([below](#one-tag-name-one-source)). The server's health line counts them every minute as
+`tagsSkipped`, so a skipped row stays in sight. A row with `Enabled` `false` is left out quietly.
+
+**A file the collector cannot read at all, or in which not one row can be used, stops it at
+start**, with exit code `78` and the reason for each row; so does a `TagsFile` that is not there.
+That is the wrong file or the wrong format, and running without any of its tags would leave them
+all empty. A Modbus tag file is read by the same rule
 ([Modbus TCP devices](#modbus-tcp-devices-beta)).
+
+Both rules are collector 1.0.48's. 1.0.47 stopped at start on any bad row of an OPC UA tag file,
+with the same line and column.
+
+### One tag name, one source
+
+From collector 1.0.48 the tag names are one list for the whole collector: every server in
+`OpcServers`, every device in `ModbusDevices`, and the MQTT and Sparkplug B sources. One name from
+two places would mix two devices' readings into one tag, so a name is collected from the first
+place that lists it - the OPC UA servers in their order, then the Modbus devices, then MQTT and
+Sparkplug B as their readings arrive - and skipped everywhere else, with an error in the log naming
+both places. The rest of each source is collected. Identical PLCs browsed alike get identical
+names: put the server's `Name` in front of one set, or give a Modbus device or an MQTT source a
+`TagPrefix`. 1.0.47 compared a name only with the sources of its own kind: on two OPC UA servers it
+stopped the collector at start, on two Modbus devices the second was skipped, and nothing else was
+compared.
 
 ### CompressionDeadband is a filter at the PLC
 
@@ -478,7 +514,7 @@ before sending. The OPC UA guide shows
 | Path | Direction | What it is |
 |---|---|---|
 | `/config/appsettings.json` | yours | The configuration. Written as a commented example by the first start when it is missing, and never touched by the collector after that. |
-| `/config/queue/` | the collector's | The store-and-forward queue. Bounded by `TagHistorian:StoreAndForward`: 168 hours / 512 MiB by default (about 1.5 to 1.7 million readings), oldest evicted first, every eviction logged at `Error` as data loss. |
+| `/config/queue/` | the collector's | The store-and-forward queue. Bounded by `TagHistorian:StoreAndForward`: 168 hours / 512 MiB by default (about 1.5 to 1.7 million readings), oldest evicted first, every eviction logged at `Error` as data loss. A queue whose files were deleted, or that was restored from a copy, is sent from its oldest file, with a warning that readings sent before may go again - from 1.0.48; an older collector took such files as already sent. |
 | `/config/queue/poison/` | the collector's | Records the API permanently rejected, quarantined as recoverable JSON lines rather than discarded. |
 | `/config/pki/` | the collector's | OPC UA certificate stores. The client certificate is generated on first start, and its identity is persisted so a container recreate does not regenerate it and break the trust you established on the PLC side. |
 | `/config/sparkplug-discovery/` | the collector's | One JSON inventory per Sparkplug edge node or device, rewritten at each birth, naming every metric it announced. |
@@ -497,7 +533,7 @@ SELinux confines containers, a host directory also needs `:z` on its `-v` option
 
 | Code | Meaning | What to do |
 |---|---|---|
-| `78` | Configuration required. The first start wrote the example `appsettings.json`; placeholders from it are still in the file; `TagHistorian__ApiKey` is still the guide's `<your-api-key>`; on Windows, `ApiKey` is empty; `appsettings.json` does not parse; or an OPC UA `TagsFile` is not there or has a row that cannot be read. The output names each placeholder, the line and position of the parse error, or each bad row's line and column. | Edit `/config/appsettings.json`, or the tag file, and start the collector again. For the key, remove the container and run it again with your own key: a container's environment is fixed when it is created. |
+| `78` | Configuration required. The first start wrote the example `appsettings.json`; placeholders from it are still in the file; `TagHistorian__ApiKey` is still the guide's `<your-api-key>`; on Windows, `ApiKey` is empty; `appsettings.json` does not parse; or a `TagsFile`, OPC UA or Modbus, is not there, cannot be read, or has not one row that can be used. The output names each placeholder, the line and position of the parse error, or the file and each bad row's line and column. A file with some rows that can be used starts with them (1.0.48 and later). | Edit `/config/appsettings.json`, or the tag file, and start the collector again. For the key, remove the container and run it again with your own key: a container's environment is fixed when it is created. |
 | `73` | There was no configuration, and the example could not be written to `/config`. The output names the cause: a directory the container user may not write, a read-only mount (`:ro`, or `--read-only` with nothing mounted at `/config`), root started without the `DAC_OVERRIDE` capability, or another error such as a full disk. On Windows: the data folder, or the example in it, could not be created, opened or written. | Do what the output says for that cause. For the commonest, a host directory owned by someone else, use a new named volume as in [Install](#install), without a `--user` option (the volume belongs to the image's own user, uid 999), or a host directory uid 999 can write. On Windows, run from an elevated prompt, or run `install.ps1` again for the service. |
 | `75` | Windows only: another collector is already running from the same data folder - usually the service, when you start one by hand. | Stop the other one first (`Stop-Service TagHistorianCollector`), or give this one a folder of its own with `--data-dir`. |
 | `64` | `--data-dir` was given without a folder after it. | Name the folder. |
@@ -515,8 +551,9 @@ There is no HTTP health endpoint and no metrics port, because there is no listen
 all. Instead, a health line per concern on a fixed cadence (60 s by default): the
 store-and-forward line with queue depth, delivery counters and backoff state, and a line per OPC
 UA server, Sparkplug source and Modbus device. The Modbus line starts
-`modbus health: device=meter connected=True tagsGood=4 tagsBad=0` and goes on with the device's
-poll, reading and outage-marker counters. The store-and-forward line is followed by a warning when the
+`modbus health: device=meter connected=True tagsGood=4 tagsBad=0 tagsSkipped=0` and goes on with
+the device's poll, reading and outage-marker counters; `tagsSkipped`, on the OPC UA line too, counts
+the rows of the configuration not collected for a mistake the start named. The store-and-forward line is followed by a warning when the
 collector is behind with every upload full at a `BatchSize` under 5000, naming the setting in
 effect (`TagHistorian:StoreAndForward:BatchSize` where it is set, otherwise
 `TagHistorian:BatchSize`). The lines escalate to `Warning` when something needs attention
@@ -525,6 +562,13 @@ week is history, not a standing alarm; the Modbus line while its device is not c
 of its tags could not be read at the last poll), and everything that costs data - retention
 eviction, quarantine, an unreadable segment - logs at `Error` with exact counts. Nothing is
 dropped silently.
+
+From 1.0.48 the start also asks the API, with the collector's own key, how many tags your plan holds
+and how many are in use. If the tags in `OpcServers` and `ModbusDevices` will not all fit, one
+warning says how many the API will refuse and names the ones not in your account yet; a refused
+tag's readings are set aside in `/config/queue/poison/`. MQTT and Sparkplug B tags are not counted,
+because they are named as their readings arrive. If the API cannot be asked yet, the start goes on
+without the check.
 
 ## Image tags
 

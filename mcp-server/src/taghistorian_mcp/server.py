@@ -353,8 +353,22 @@ def _register_write_tools(mcp: FastMCP, client: TagHistorianClient) -> None:
         enable_compression: Annotated[
             bool | None, Field(description="Whether to enable deadband compression.")
         ] = None,
+        # A fraction, not a width: the API reads it as a share of the last
+        # stored value and refuses anything outside 0..1 with a 400 since
+        # 1.0.48. Described as a "width" it invited "2" for two degrees -
+        # now refused - and "0.5" for half a degree, which is accepted as 50%
+        # and stores almost nothing from then on.
         compression_deadband: Annotated[
-            float | None, Field(description="Deadband width, if compression is enabled.")
+            float | None,
+            Field(
+                description=(
+                    "The tag's deadband, if compression is enabled: a fraction of the last "
+                    "stored value, from 0 to 1, NOT a distance in the tag's unit. 0.01 stores "
+                    "a reading when it moves more than 1% from the last one stored, 0.001 "
+                    "(0.1%) is the default, and 0 means the default. A number above 1 is "
+                    "refused."
+                )
+            ),
         ] = None,
         scale_min: Annotated[
             float | None,

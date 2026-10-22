@@ -292,7 +292,7 @@ async def test_create_tag_happy_path(mock_client):
         units="C",
         tag_type="Analog",
         enable_compression=True,
-        compression_deadband=0.5,
+        compression_deadband=0.005,
         total_measurements=0,
         compressed_measurements=0,
         compression_ratio=0.0,
@@ -308,3 +308,19 @@ async def test_create_tag_happy_path(mock_client):
     assert result.isError is False
     assert "boiler.temperature" in result.content[0].text
     mock_client.create_tag.assert_called_once()
+
+
+async def test_create_tag_tells_the_llm_the_deadband_is_a_fraction_not_a_width(mock_client):
+    # The API reads compressionDeadband as a fraction of the last stored value
+    # and refuses one outside 0..1 since 1.0.48. The parameter used to be
+    # described as a "width": an LLM then sent 2 for two degrees (refused) or
+    # 0.5 for half a degree (accepted as 50%, and the tag stored almost
+    # nothing from then on). The description is all the LLM reads.
+    mcp = build_server(mock_client, make_config(enable_write=True))
+    tools = {t.name: t for t in await mcp.list_tools()}
+
+    text = tools["create_tag"].inputSchema["properties"]["compression_deadband"]["description"]
+
+    assert "fraction of the last stored value" in text
+    assert "from 0 to 1" in text
+    assert "width" not in text.lower()

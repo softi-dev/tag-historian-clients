@@ -345,6 +345,13 @@ class TagHistorianClient:
         Write scope.
 
         :param tag_type: ``"Analog"`` or ``"Discrete"``.
+        :param compression_deadband: A fraction of the last stored value,
+            from 0 to 1 - not a distance in the tag's unit. ``0.01`` stores
+            a reading when it moves more than 1% from the last one stored;
+            ``0`` means the default, ``0.001`` (0.1%). The server refuses a
+            number outside 0 to 1 with a 400, which this client raises as
+            :class:`TagHistorianAPIError`: ``2`` meant as "two degrees"
+            would be 200% and store almost nothing.
         :param scale_min: Configured chart axis lower bound. Must be
             supplied together with ``scale_max`` or not at all - the server
             enforces this (400 naming both fields) and this client
