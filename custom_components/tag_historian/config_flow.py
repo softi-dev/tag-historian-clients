@@ -84,6 +84,7 @@ from .const import (
     CONF_MIN_INTERVAL,
     CONF_OWN_TAG_SINCE,
     CONF_SEND_AS,
+    CONF_SHARE_LOCATION,
     DEFAULT_HOST,
     DEFAULT_MIN_INTERVAL_SECONDS,
     DOMAIN,
@@ -188,6 +189,8 @@ class SelectionStepsMixin:
     _show_everything: bool = False
     _selection_touched: bool = False
     _follow_renames: bool = False
+    # Off until the user ticks it: a location is theirs to give (place.py).
+    _share_location: bool = False
     # Entities renamed in Home Assistant whose readings still go under their
     # old tag (renames.py) - empty for an entry being created.
     _send_as: dict[str, str] = {}  # noqa: RUF012 - replaced, never mutated
@@ -220,6 +223,7 @@ class SelectionStepsMixin:
             self._selected = list(user_input[CONF_ENTITIES])
             self._min_interval = int(user_input[CONF_MIN_INTERVAL])
             self._follow_renames = bool(user_input.get(CONF_FOLLOW_RENAMES, False))
+            self._share_location = bool(user_input.get(CONF_SHARE_LOCATION, False))
             self._selection_touched = True
             asked_for_everything = bool(user_input.get(CONF_SHOW_ALL, False))
 
@@ -274,6 +278,9 @@ class SelectionStepsMixin:
                 ): bool,
                 vol.Required(
                     CONF_FOLLOW_RENAMES, default=self._follow_renames
+                ): bool,
+                vol.Required(
+                    CONF_SHARE_LOCATION, default=self._share_location
                 ): bool,
             }
         )
@@ -505,6 +512,7 @@ class TagHistorianConfigFlow(SelectionStepsMixin, ConfigFlow, domain=DOMAIN):
                 CONF_ENTITIES: self._selected,
                 CONF_MIN_INTERVAL: self._min_interval,
                 CONF_FOLLOW_RENAMES: self._follow_renames,
+                CONF_SHARE_LOCATION: self._share_location,
             },
         )
 
@@ -573,6 +581,7 @@ class TagHistorianOptionsFlow(SelectionStepsMixin, OptionsFlow):
             entry.options.get(CONF_MIN_INTERVAL, DEFAULT_MIN_INTERVAL_SECONDS)
         )
         self._follow_renames = bool(entry.options.get(CONF_FOLLOW_RENAMES, False))
+        self._share_location = bool(entry.options.get(CONF_SHARE_LOCATION, False))
         self._send_as = send_as(entry.options)
 
         client = TagHistorianClient(
@@ -601,6 +610,7 @@ class TagHistorianOptionsFlow(SelectionStepsMixin, OptionsFlow):
             CONF_ENTITIES: self._selected,
             CONF_MIN_INTERVAL: self._min_interval,
             CONF_FOLLOW_RENAMES: self._follow_renames,
+            CONF_SHARE_LOCATION: self._share_location,
             # Kept for the entities still selected: a rename waiting to be
             # confirmed is not undone by changing something else. An
             # entity no longer selected sends nothing, under any name.

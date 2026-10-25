@@ -532,3 +532,31 @@ async def test_a_key_that_may_not_rename_says_which_key_can(client, aioclient_mo
 
     assert result.outcome is LineageOutcome.REFUSED
     assert "Write scope" in result.message
+
+
+PROPOSAL_URL = "https://api.taghistorian.com/api/account/settings/proposal"
+
+
+async def test_the_place_is_proposed_as_given_and_named_as_home_assistants(
+    client, aioclient_mock
+) -> None:
+    aioclient_mock.post(PROPOSAL_URL, status=200, json={"place": {"lat": 59.3, "lon": 18.1}})
+
+    assert await client.async_propose_place(59.3, 18.1) is True
+
+    body = aioclient_mock.mock_calls[0][2]
+    assert body == {"place": {"lat": 59.3, "lon": 18.1}, "source": "ha"}
+
+
+async def test_a_tag_historian_without_the_weather_is_not_an_error(client, aioclient_mock) -> None:
+    """An older server answers 404; nothing depends on the proposal."""
+    aioclient_mock.post(PROPOSAL_URL, status=404)
+
+    assert await client.async_propose_place(59.3, 18.1) is None
+
+
+async def test_a_refused_key_on_the_proposal_is_the_auth_error(client, aioclient_mock) -> None:
+    aioclient_mock.post(PROPOSAL_URL, status=401)
+
+    with pytest.raises(TagHistorianAuthError):
+        await client.async_propose_place(59.3, 18.1)

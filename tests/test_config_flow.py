@@ -28,6 +28,7 @@ from custom_components.tag_historian.const import (
     CONF_MIN_INTERVAL,
     CONF_OWN_TAG_SINCE,
     CONF_SEND_AS,
+    CONF_SHARE_LOCATION,
     DOMAIN,
 )
 
@@ -111,6 +112,8 @@ async def test_happy_path_creates_an_entry(hass: HomeAssistant, house) -> None:
         # Off unless asked for: renaming a tag is a decision about the
         # customer's data, offered on a repair card instead (renames.py).
         CONF_FOLLOW_RENAMES: False,
+        # Off unless ticked: the location is the user's to give (place.py).
+        CONF_SHARE_LOCATION: False,
     }
     # The stable customer id, not the host - two entries for one account would
     # send every reading twice and bill for it twice.
@@ -430,6 +433,7 @@ async def test_options_flow_changes_the_selection(hass: HomeAssistant, house) ->
         CONF_ENTITIES: ["sensor.outdoor_temperature", "binary_sensor.heat_pump_running"],
         CONF_MIN_INTERVAL: 30,
         CONF_FOLLOW_RENAMES: False,
+        CONF_SHARE_LOCATION: False,
         CONF_SEND_AS: {},
     }
 
@@ -898,3 +902,78 @@ async def test_an_import_of_nothing_is_asked_again(hass: HomeAssistant, loaded_e
 
     assert result["type"] is FlowResultType.FORM
     assert result["errors"] == {"base": "import_nothing_selected"}
+
+
+async def test_the_location_for_the_weather_is_offered_unticked_and_kept_when_ticked(
+    hass: HomeAssistant, house
+) -> None:
+    """A location is the user's to give: the box starts empty, and only a tick sends it."""
+    client = make_client()
+
+    with patch(CLIENT_PATH, return_value=client), patch(SETUP_PATH, return_value=True):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": SOURCE_USER}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], CREDENTIALS
+        )
+        assert result["step_id"] == "select"
+        defaults = {
+            str(key): key.default() for key in result["data_schema"].schema
+            if hasattr(key, "default") and callable(key.default)
+        }
+        assert defaults[CONF_SHARE_LOCATION] is False
+
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {
+                CONF_ENTITIES: ["sensor.house_power"],
+                CONF_MIN_INTERVAL: 10,
+                CONF_SHARE_LOCATION: True,
+            },
+        )
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["options"][CONF_SHARE_LOCATION] is True
+    # Choosing it proposes nothing yet: the entry's setup does (place.py).
+    client.async_propose_place.assert_not_called()
+
+
+async def test_the_options_flow_shows_the_location_choice_as_it_is_and_can_untick_it(
+    hass: HomeAssistant, house
+) -> None:
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=STUB_ACCOUNT["customerId"],
+        data=CREDENTIALS,
+        options={
+            CONF_ENTITIES: ["sensor.house_power"],
+            CONF_MIN_INTERVAL: 10,
+            CONF_SHARE_LOCATION: True,
+        },
+    )
+    entry.add_to_hass(hass)
+
+    with patch(CLIENT_PATH, return_value=make_client()), patch(
+        SETUP_PATH, return_value=True
+    ):
+        result = await _open_choose(hass, entry)
+        defaults = {
+            str(key): key.default() for key in result["data_schema"].schema
+            if hasattr(key, "default") and callable(key.default)
+        }
+        assert defaults[CONF_SHARE_LOCATION] is True
+
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {
+                CONF_ENTITIES: ["sensor.house_power"],
+                CONF_MIN_INTERVAL: 10,
+                CONF_SHARE_LOCATION: False,
+            },
+        )
+        result = await hass.config_entries.options.async_configure(result["flow_id"], {})
+        await hass.async_block_till_done()
+
+    assert entry.options[CONF_SHARE_LOCATION] is False

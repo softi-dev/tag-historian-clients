@@ -42,6 +42,13 @@ CONF_SEND_AS: Final = "send_as"
 # history its own.
 CONF_OWN_TAG_SINCE: Final = "own_tag_since"
 
+# Whether Tag Historian may be told this Home Assistant's approximate location,
+# so the account can show the outdoor weather from SMHI's nearest stations
+# beside its charts (place.py). OFF by default: a location is the user's to
+# give, and they tick it. Rounded to a tenth of a degree - about 10 km - here,
+# before it leaves Home Assistant, and again by the API.
+CONF_SHARE_LOCATION: Final = "share_approximate_location"
+
 DEFAULT_HOST: Final = "api.taghistorian.com"
 
 # The three write-path limits below are PROTOCOL facts, not plan facts, so they

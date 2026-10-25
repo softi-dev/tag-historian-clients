@@ -20,13 +20,15 @@
           "entities": "Entities to historise",
           "min_interval": "Minimum seconds between readings",
           "show_all": "Show every entity",
-          "follow_renames": "Rename tags when entities are renamed"
+          "follow_renames": "Rename tags when entities are renamed",
+          "share_approximate_location": "Use my approximate location (about 10 km) for outdoor weather from SMHI"
         },
         "data_description": {
           "entities": "One entity costs one tag. Sensors with no device class and no state class are listed but left unticked, because Home Assistant knows nothing about them either way: most are hand-written template sensors reporting a number, but a few report a word - a house mode sitting at \"away\", a status sitting at \"idle\" - and those store nothing at all. Whatever stores nothing is counted on the \"readings dropped\" sensor and the entity is named there, so a series that stays empty says why. Anything you have already ticked stays in the list whatever else changes.",
           "min_interval": "Readings arriving sooner than this after the previous one for the same entity are skipped. Your daily reading allowance is spent on everything sent, so this is the setting that keeps a chatty sensor from using it up.",
           "show_all": "Puts every entity in the install in the list, unfiltered. Some of them store a 1 or a 0 - a light, a switch, a cover, an automation. The rest store nothing: a lock, a person, a climate mode and a media player all report words, and only entities whose state is a number or a plain on/off can become a reading.",
-          "follow_renames": "When you rename an entity in Home Assistant, rename its tag in Tag Historian too, so its history goes on under the new name. Nothing is copied: the readings from before stay where they are and read under the new name. Off: the readings go on into the old tag, and a repair card asks whether to rename it."
+          "follow_renames": "When you rename an entity in Home Assistant, rename its tag in Tag Historian too, so its history goes on under the new name. Nothing is copied: the readings from before stay where they are and read under the new name. Off: the readings go on into the old tag, and a repair card asks whether to rename it.",
+          "share_approximate_location": "Tells Tag Historian where this Home Assistant is, rounded to about 10 km before it is sent, so your charts can show the outdoor temperature and precipitation from the Swedish Meteorological and Hydrological Institute's nearest weather stations. Sweden only. It is only a proposal: a place already set in Tag Historian's Settings stays as it is, and that is where you change or remove it. Off: nothing about your location is sent."
         }
       },
       "review": {
@@ -83,13 +85,15 @@
           "entities": "Entities to historise",
           "min_interval": "Minimum seconds between readings",
           "show_all": "Show every entity",
-          "follow_renames": "Rename tags when entities are renamed"
+          "follow_renames": "Rename tags when entities are renamed",
+          "share_approximate_location": "Use my approximate location (about 10 km) for outdoor weather from SMHI"
         },
         "data_description": {
           "entities": "One entity costs one tag. An entity that is currently unavailable or unknown stays in this list and stays selected - it is only the readings that pause, not the choice. An entity whose state is a word rather than a number stores nothing at all; those are counted and named on the \"readings dropped\" sensor.",
           "min_interval": "Readings arriving sooner than this after the previous one for the same entity are skipped.",
           "show_all": "Puts every entity in the install in the list, unfiltered - including ones that can store nothing.",
-          "follow_renames": "When you rename an entity in Home Assistant, rename its tag in Tag Historian too, so its history goes on under the new name. Nothing is copied: the readings from before stay where they are and read under the new name. Off: the readings go on into the old tag, and a repair card asks whether to rename it."
+          "follow_renames": "When you rename an entity in Home Assistant, rename its tag in Tag Historian too, so its history goes on under the new name. Nothing is copied: the readings from before stay where they are and read under the new name. Off: the readings go on into the old tag, and a repair card asks whether to rename it.",
+          "share_approximate_location": "Tells Tag Historian where this Home Assistant is, rounded to about 10 km before it is sent, so your charts can show the outdoor temperature and precipitation from the Swedish Meteorological and Hydrological Institute's nearest weather stations. Sweden only. It is only a proposal: a place already set in Tag Historian's Settings stays as it is, and that is where you change or remove it. Off: nothing about your location is sent."
         }
       },
       "review": {

@@ -460,6 +460,33 @@ class TagHistorianClient:
         except (TimeoutError, aiohttp.ClientError) as err:
             return LineageResult(LineageOutcome.UNAVAILABLE, str(err))
 
+    async def async_propose_place(self, lat: float, lon: float) -> bool | None:
+        """Propose the account's coarse place (``POST /api/account/settings/proposal``).
+
+        A proposal only fills what the account has not got: a place an Admin
+        set in Settings, or one proposed before, stays as it is, so sending it
+        again is harmless. True when the API answered, and None when it could
+        not be asked or does not know the endpoint (a Tag Historian older than
+        the weather) - nothing here depends on it, so neither is an error.
+        """
+        path = "/api/account/settings/proposal"
+        try:
+            async with self._session.post(
+                self._base.join(URL(path)),
+                headers=self._headers(),
+                json={"place": {"lat": lat, "lon": lon}, "source": "ha"},
+                timeout=aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SECONDS),
+            ) as response:
+                if response.status == 401:
+                    raise TagHistorianAuthError(path)
+                if response.status >= 400:
+                    LOGGER.debug("%s answered %s; the place was not proposed", path, response.status)
+                    return None
+                return True
+        except (TimeoutError, aiohttp.ClientError) as err:
+            LOGGER.debug("%s could not be reached (%s); the place was not proposed", path, err)
+            return None
+
     async def async_get_import_allowance(self) -> ImportAllowance:
         """How much history this account may still import, and where the window starts."""
         return ImportAllowance.from_json(await self._get_json("/api/import/allowance"))

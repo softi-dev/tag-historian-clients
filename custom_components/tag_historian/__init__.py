@@ -50,6 +50,7 @@ from .const import (
     CONF_ENTITIES,
     CONF_HOST,
     CONF_MIN_INTERVAL,
+    CONF_SHARE_LOCATION,
     DEFAULT_MIN_INTERVAL_SECONDS,
     DOMAIN,
     SERVICE_IMPORT_HISTORY,
@@ -60,6 +61,7 @@ from .const import (
 from .coordinator import QuotaCoordinator
 from .forwarder import ForwarderStats, StateForwarder
 from .importer import HistoryImporter, ImportAlreadyRunning
+from .place import async_propose_place
 from .renames import (
     async_clear_renamed_issues,
     async_resume,
@@ -293,6 +295,14 @@ async def async_setup_entry(
     # a restart or an unreachable API - is taken up: a card, or the request to
     # rename the tag in Tag Historian (renames.py).
     async_resume(hass, entry)
+
+    # The approximate location for the account's outdoor weather, only when
+    # the user ticked it (place.py). In the background: nothing waits on it,
+    # and an API that does not answer must not hold up the readings.
+    if options.get(CONF_SHARE_LOCATION, False):
+        entry.async_create_background_task(
+            hass, async_propose_place(hass, client), f"{DOMAIN} propose place"
+        )
 
     return True
 

@@ -778,8 +778,10 @@ async def test_every_dropped_attribute_the_readme_names_actually_exists(
         await hass.async_block_till_done()
 
 
-# The digit runs that appear in a screen string and are not plan numbers. There
-# is one, and it is the sentence describing what an on/off entity stores.
+# The digit runs that appear in a screen string and are not plan numbers: the
+# sentence describing what an on/off entity stores, and how far the location
+# for the outdoor weather is rounded (place.py) - a fact of this integration,
+# which rounds to a tenth of a degree before anything is sent.
 #
 # An allow-list rather than a clever pattern, because the pattern is what went
 # wrong: this guard used to look for four-or-more digits, which caught the daily
@@ -788,7 +790,7 @@ async def test_every_dropped_attribute_the_readme_names_actually_exists(
 # into these strings, and it is exactly the shape the guard could not see.
 # Every number on these screens comes from GET /api/usage/limits as a
 # placeholder, so a new digit here is a decision, and it should have to be one.
-DIGITS_THAT_ARE_NOT_PLAN_NUMBERS = ("a 1 or a 0",)
+DIGITS_THAT_ARE_NOT_PLAN_NUMBERS = ("a 1 or a 0", "about 10 km")
 
 
 def plan_number_digits(text: str) -> list[str]:

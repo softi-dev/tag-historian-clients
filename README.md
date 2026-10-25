@@ -208,6 +208,16 @@ Three screens:
    minimum interval, which is how you stop a chatty sensor spending your daily
    reading allowance.
 
+   The same screen has **Use my approximate location (about 10 km) for
+   outdoor weather from SMHI**, off until you tick it. Ticked, this Home
+   Assistant's location is rounded to a tenth of a degree and proposed as your
+   account's place, so Tag Historian can draw the outdoor temperature and
+   precipitation from the Swedish Meteorological and Hydrological Institute's
+   nearest weather stations beside your charts (Sweden only). It is only a
+   proposal: a place already set in Tag Historian's Settings stays, and that is
+   where you change or remove it. Left off, nothing about your location is
+   sent.
+
    A sensor with no device class and no state class is listed but left
    unticked. Home Assistant knows nothing about those either way: most are
    hand-written template sensors reporting a number, and a few report a word

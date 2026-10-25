@@ -26,6 +26,7 @@ from custom_components.tag_historian.const import (
     CONF_ENTITIES,
     CONF_HOST,
     CONF_MIN_INTERVAL,
+    CONF_SHARE_LOCATION,
     DOMAIN,
 )
 
@@ -501,3 +502,50 @@ async def test_changing_the_options_reloads_the_entry(hass: HomeAssistant) -> No
             await hass.async_block_till_done()
 
     assert reloaded.called
+
+
+async def test_the_location_is_proposed_rounded_only_when_the_user_ticked_it(
+    hass: HomeAssistant,
+) -> None:
+    """Tag Historian's outdoor weather needs the account's place; Home Assistant
+    proposes its own, rounded to about 10 km before it leaves, and only when
+    asked to (place.py)."""
+    hass.config.latitude = 59.334591
+    hass.config.longitude = 18.063240
+
+    ticked = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "api.taghistorian.com", CONF_API_KEY: "not-a-real-key"},
+        options={
+            CONF_ENTITIES: ["sensor.house_power"],
+            CONF_MIN_INTERVAL: 10,
+            CONF_SHARE_LOCATION: True,
+        },
+        unique_id="11111111-2222-3333-4444-555555555555",
+    )
+    ticked.add_to_hass(hass)
+    client = make_client()
+    with patch(CLIENT_PATH, return_value=client):
+        assert await hass.config_entries.async_setup(ticked.entry_id)
+        await hass.async_block_till_done()
+
+    client.async_propose_place.assert_awaited_once_with(59.3, 18.1)
+    assert await hass.config_entries.async_unload(ticked.entry_id)
+    await hass.async_block_till_done()
+
+
+async def test_nothing_about_the_location_is_sent_when_the_box_is_not_ticked(
+    hass: HomeAssistant,
+) -> None:
+    hass.config.latitude = 59.334591
+    hass.config.longitude = 18.063240
+    entry = make_entry(hass, ["sensor.house_power"])
+    client = make_client()
+
+    with patch(CLIENT_PATH, return_value=client):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    client.async_propose_place.assert_not_called()
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
