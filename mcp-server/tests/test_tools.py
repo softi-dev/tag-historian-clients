@@ -5,6 +5,7 @@ an exception escaping the server process.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 from taghistorian import (
@@ -308,6 +309,37 @@ async def test_create_tag_happy_path(mock_client):
     assert result.isError is False
     assert "boiler.temperature" in result.content[0].text
     mock_client.create_tag.assert_called_once()
+
+
+async def test_create_tag_accepts_a_meter_and_says_what_one_is(mock_client):
+    # Tag Historian 1.0.55 has meters (TagType.Counter). The Literal is what
+    # the schema offers an LLM, and the description what it reads.
+    mock_client.create_tag.return_value = Tag(
+        tag_name="sensor.energy",
+        description="",
+        units="kWh",
+        tag_type="Counter",
+        enable_compression=True,
+        compression_deadband=0.001,
+        total_measurements=0,
+        compressed_measurements=0,
+        compression_ratio=0.0,
+    )
+    mcp = build_server(mock_client, make_config(enable_write=True))
+    tools = {t.name: t for t in await mcp.list_tools()}
+
+    schema = tools["create_tag"].inputSchema["properties"]["tag_type"]
+    assert "Counter" in json.dumps(schema)
+    assert "meter" in json.dumps(schema)
+
+    result = await call_tool(
+        mcp,
+        "create_tag",
+        {"tag_name": "sensor.energy", "units": "kWh", "tag_type": "Counter"},
+    )
+
+    assert result.isError is False
+    assert mock_client.create_tag.call_args.kwargs["tag_type"] == "Counter"
 
 
 async def test_create_tag_tells_the_llm_the_deadband_is_a_fraction_not_a_width(mock_client):

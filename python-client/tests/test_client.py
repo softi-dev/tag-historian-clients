@@ -253,6 +253,37 @@ def test_400_with_violations_surfaces_them_on_the_exception(make_client):
 
 
 @responses.activate
+def test_create_tag_sends_a_meter_as_counter_and_documents_it(make_client):
+    # Tag Historian 1.0.55 has meters: TagType.Counter. The client sends the
+    # type as given; its documentation is where a caller learns the name.
+    doc = TagHistorianClient.create_tag.__doc__ or ""
+    assert '``"Counter"``' in doc
+    assert "meter" in doc
+
+    responses.add(
+        responses.POST,
+        f"{BASE_URL}/api/tags",
+        json={
+            "tagName": "sensor.energy",
+            "description": "",
+            "units": "kWh",
+            "tagType": "Counter",
+            "enableCompression": True,
+            "compressionDeadband": 0.001,
+            "totalMeasurements": 0,
+            "compressedMeasurements": 0,
+            "compressionRatio": 0.0,
+        },
+        status=201,
+    )
+
+    tag = make_client().create_tag("sensor.energy", units="kWh", tag_type="Counter")
+
+    assert json.loads(responses.calls[0].request.body)["tagType"] == "Counter"
+    assert tag.tag_type == "Counter"
+
+
+@responses.activate
 def test_create_tag_documents_the_deadband_as_the_fraction_the_server_holds_it_to(make_client):
     # Since Tag Historian 1.0.48, POST /api/tags refuses a compressionDeadband
     # outside 0..1: it is a fraction of the last stored value, not a distance

@@ -347,8 +347,20 @@ def _register_write_tools(mcp: FastMCP, client: TagHistorianClient) -> None:
         tag_name: Annotated[str, Field(description="The new tag's name.")],
         description: Annotated[str | None, Field(description="Free-text description.")] = None,
         units: Annotated[str | None, Field(description="Units, e.g. 'C' or 'bar'.")] = None,
+        # Counter is a meter (Tag Historian 1.0.55, step 9 M4): the server
+        # keeps its readings its own way and works out its increase per
+        # hour, day and month. An LLM asked to set up an energy meter has to
+        # be able to say so.
         tag_type: Annotated[
-            Literal["Analog", "Discrete"] | None, Field(description="The tag's value type.")
+            Literal["Analog", "Discrete", "Counter"] | None,
+            Field(
+                description=(
+                    "The tag's type: Analog for a level (a temperature, a pressure), Discrete "
+                    "for a state (on/off, a mode), Counter for a meter whose reading only grows "
+                    "(energy, water, gas) - Tag Historian then works out its use per hour, day "
+                    "and month."
+                )
+            ),
         ] = None,
         enable_compression: Annotated[
             bool | None, Field(description="Whether to enable deadband compression.")

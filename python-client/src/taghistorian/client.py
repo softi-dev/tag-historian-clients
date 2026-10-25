@@ -344,7 +344,12 @@ class TagHistorianClient:
         :meth:`write_batch` create one implicitly on first write and only need
         Write scope.
 
-        :param tag_type: ``"Analog"`` or ``"Discrete"``.
+        :param tag_type: ``"Analog"`` (a level), ``"Discrete"`` (a state) or
+            ``"Counter"`` (a meter: an energy, water or gas reading that only
+            grows, whose increase per hour, day and month Tag Historian works
+            out; servers from 1.0.55). A type other than ``"Analog"`` given
+            here is a person's choice: Home Assistant's state class no longer
+            changes it.
         :param compression_deadband: A fraction of the last stored value,
             from 0 to 1 - not a distance in the tag's unit. ``0.01`` stores
             a reading when it moves more than 1% from the last one stored;
