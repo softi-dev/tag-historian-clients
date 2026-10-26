@@ -11,9 +11,12 @@ deliberate:
 
 * it reads ``Retry-After`` and it tells 422 apart from 429 apart from 503 -
   and apart from the OTHER 429, which is our write buffer being busy rather
-  than the customer's allowance being spent. The built-in integration has a
-  fixed retry schedule and no notion of partial success, so an over-quota Home
-  Assistant simply stops producing data with nothing anywhere to say why.
+  than the customer's allowance being spent. The built-in integration never
+  reads the header and has no notion of partial success: a refused batch is
+  sent again only if its ``max_retries`` is set, 20 seconds apart, and is
+  then dropped - and set up for InfluxDB 2.x it does not wait for the answer
+  at all. So an over-quota Home Assistant simply stops producing data with
+  nothing anywhere to say why.
 
 The buffer SURVIVES A RESTART. When Home Assistant stops, or the entry is
 reloaded, whatever could not be delivered is saved to ``.storage`` (bounded
@@ -1439,11 +1442,15 @@ class StateForwarder:
             return
 
         if result.outcome in (WriteOutcome.BACK_PRESSURE, WriteOutcome.UNAVAILABLE):
-            # Both are Tag Historian's own write buffer refusing to take more
-            # for a few seconds, and neither is anything to do with the
-            # account's allowance. They share this branch because they share
-            # the honest answer: hold the readings, wait the header out, and
-            # say nothing to the user unless it lasts long enough to matter.
+            # Tag Historian unable to take the batch for a while, and nothing
+            # to do with the account's allowance: the 429 is its write buffer
+            # refusing this account's share for a few seconds; a 503 is the
+            # buffer full, or the key not CHECKED just now - trouble on its
+            # side for a moment, which says nothing about the key (a key
+            # checked and refused is a 401, and goes to reauthentication).
+            # They share this branch because they share the honest answer:
+            # hold the readings, wait the header out, and say nothing to the
+            # user unless it lasts long enough to matter.
             self._requeue(batch)
             self.stats.last_error = result.message
             now = dt_util.utcnow()
@@ -1516,10 +1523,12 @@ class StateForwarder:
 
         The endpoint's ``Retry-After`` on a 429 counts down to the UTC midnight
         when the daily reading quota resets; on a 503 it is the write buffer's
-        own estimate. Honouring it is half the reason this component exists -
-        the built-in influxdb integration has a fixed 20/60 second schedule and
-        never reads the header at all, so an over-quota Home Assistant spends
-        the rest of the day re-sending into a closed door.
+        own estimate, or 30 to 45 seconds when the key could not be checked
+        just now. Honouring it is half the reason this component exists -
+        the built-in influxdb integration never reads the header: it sends a
+        refused batch again only if ``max_retries`` is set, 20 seconds apart,
+        then drops it (and set up for InfluxDB 2.x never sees the refusal), so
+        an over-quota Home Assistant loses the rest of the day's readings.
 
         The floor of one second is for a malformed or absent header only. It is
         deliberately NOT a fallback that shortens a long wait: a 429 with a

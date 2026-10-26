@@ -82,6 +82,7 @@ from .api import (
     TagHistorianClient,
     TagHistorianConnectionError,
     TagHistorianPermissionError,
+    TagHistorianUnavailableError,
 )
 from .const import (
     ATTR_DAYS,
@@ -466,6 +467,11 @@ class TagHistorianConfigFlow(SelectionStepsMixin, ConfigFlow, domain=DOMAIN):
         Three distinguishable failures, because they need three different
         fixes. A single "cannot connect" would send someone hunting for a
         firewall rule when what they actually pasted was a read-only key.
+
+        And a fourth that needs none: a 503 is Tag Historian answering that
+        it could not check the key just now (trouble on its side, for a
+        moment). Not an unreachable host - the address is right - and not a
+        rejected key, which is a 401; only waiting a minute fixes it.
         """
         client = TagHistorianClient(
             async_get_clientsession(self.hass), self._host, self._api_key
@@ -479,6 +485,8 @@ class TagHistorianConfigFlow(SelectionStepsMixin, ConfigFlow, domain=DOMAIN):
             # /api/customers/me is reachable by every role, so a 403 here is
             # not a scope problem - it is an account the API is refusing.
             return {"base": "account_blocked"}
+        except TagHistorianUnavailableError:
+            return {"base": "key_not_checked"}
         except TagHistorianConnectionError:
             return {"base": "cannot_connect"}
 
@@ -498,6 +506,8 @@ class TagHistorianConfigFlow(SelectionStepsMixin, ConfigFlow, domain=DOMAIN):
             return {"base": "read_only_key"}
         except TagHistorianAuthError:
             return {"base": "invalid_auth"}
+        except TagHistorianUnavailableError:
+            return {"base": "key_not_checked"}
         except TagHistorianConnectionError:
             return {"base": "cannot_connect"}
 
@@ -576,6 +586,9 @@ class TagHistorianConfigFlow(SelectionStepsMixin, ConfigFlow, domain=DOMAIN):
                 account = await client.async_validate()
             except TagHistorianAuthError:
                 errors["base"] = "invalid_auth"
+            except TagHistorianUnavailableError:
+                # Not this key refused: no key could be checked just now.
+                errors["base"] = "key_not_checked"
             except TagHistorianConnectionError:
                 errors["base"] = "cannot_connect"
             else:
@@ -598,6 +611,16 @@ class TagHistorianConfigFlow(SelectionStepsMixin, ConfigFlow, domain=DOMAIN):
             ),
             errors=errors,
         )
+
+
+def _unavailable_reason(err: TagHistorianUnavailableError) -> str:
+    """An options screen's abort for a 503: a key not checked, said as that.
+
+    Any other 503 here - a moment of trouble behind a key that was checked -
+    keeps the screen's ``cannot_connect``, which also says to try again in a
+    moment.
+    """
+    return "key_not_checked" if err.key_not_checked else "cannot_connect"
 
 
 class TagHistorianOptionsFlow(SelectionStepsMixin, OptionsFlow):
@@ -630,6 +653,8 @@ class TagHistorianOptionsFlow(SelectionStepsMixin, OptionsFlow):
         try:
             self._quota = await client.async_get_quota()
             self._existing_tags = await client.async_get_tag_names()
+        except TagHistorianUnavailableError as err:
+            return self.async_abort(reason=_unavailable_reason(err))
         except (
             TagHistorianAuthError,
             TagHistorianPermissionError,
@@ -731,6 +756,8 @@ class TagHistorianOptionsFlow(SelectionStepsMixin, OptionsFlow):
         )
         try:
             allowance = await client.async_get_import_allowance()
+        except TagHistorianUnavailableError as err:
+            return self.async_abort(reason=_unavailable_reason(err))
         except (
             TagHistorianAuthError,
             TagHistorianPermissionError,

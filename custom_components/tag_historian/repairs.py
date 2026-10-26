@@ -16,10 +16,13 @@ integration makes by having only one failure mode.
                         Home Assistant form. Says which, and links pricing.
     forbidden (403)  -> not fixable here either, and the API's body is already
                         written for a person to read, so it is quoted verbatim.
-    back-pressure    -> our saturation, not the user's problem. Shares the
-      (429) and 503     "unavailable" card and is not raised at all below half
-                        an hour. A blip that clears itself is not something to
-                        wake anyone for.
+    back-pressure    -> Tag Historian unable to take writes for a while, not
+      (429) and 503     the user's problem: its write buffer busy or full, or
+                        - a 503 too - a key it could not CHECK just now, which
+                        says nothing about the key (a key checked and refused
+                        is a 401, above). Shares the "unavailable" card and is
+                        not raised at all below half an hour. A blip that
+                        clears itself is not something to wake anyone for.
 
 Two of those are 429s and they must never be confused. Only the middleware's
 "daily measurement quota exceeded" is about the account's allowance; the
@@ -225,10 +228,13 @@ def async_raise_forbidden_issue(
 def async_maybe_raise_unavailable_issue(
     hass: HomeAssistant, entry: ConfigEntry, failing_for_seconds: float
 ) -> None:
-    """503 and the write-buffer 429: our saturation. Quiet unless it persists.
+    """503 and the write-buffer 429: Tag Historian unable to take writes. Quiet unless it persists.
 
-    Says nothing about plans, allowances or upgrading, because neither of the
-    two answers that land here has anything to do with any of them.
+    A 503 is either the write buffer full or a key Tag Historian could not
+    check just now; the 429 is the buffer refusing this account's share for
+    a few seconds. Says nothing about plans, allowances or upgrading, or
+    about the key, because none of the answers that land here has anything
+    to do with any of them.
     """
     if failing_for_seconds < SERVICE_UNAVAILABLE_ISSUE_AFTER_SECONDS:
         return

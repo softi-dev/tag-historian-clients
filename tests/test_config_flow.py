@@ -18,6 +18,7 @@ from custom_components.tag_historian.api import (
     TagHistorianAuthError,
     TagHistorianConnectionError,
     TagHistorianPermissionError,
+    TagHistorianUnavailableError,
 )
 from custom_components.tag_historian.config_flow import CONF_SHOW_ALL
 from custom_components.tag_historian.const import (
@@ -316,12 +317,21 @@ async def test_over_quota_can_be_accepted_deliberately(
         (TagHistorianAuthError("nope"), "invalid_auth"),
         (TagHistorianConnectionError("dns"), "cannot_connect"),
         (TagHistorianPermissionError("blocked"), "account_blocked"),
+        # Tag Historian answered: the address is right, and the key was not
+        # refused - it could not be checked just now.
+        (
+            TagHistorianUnavailableError(
+                "/api/customers/me", reason="sign_in_unavailable", retry_after=40
+            ),
+            "key_not_checked",
+        ),
+        (TagHistorianUnavailableError("/api/customers/me"), "key_not_checked"),
     ],
 )
 async def test_connect_failures_say_which_one_it_was(
     hass: HomeAssistant, side_effect, expected_error
 ) -> None:
-    """Three different problems need three different fixes."""
+    """Different problems need different fixes - and a 503 needs none but a minute."""
     client = make_client()
     client.async_validate.side_effect = side_effect
 
@@ -344,6 +354,19 @@ async def test_a_read_only_key_is_named_as_such(hass: HomeAssistant) -> None:
     result = await _start(hass, client)
 
     assert result["errors"] == {"base": "read_only_key"}
+
+
+async def test_a_key_not_checked_after_the_first_call_is_still_not_cannot_connect(
+    hass: HomeAssistant,
+) -> None:
+    client = make_client()
+    client.async_get_quota.side_effect = TagHistorianUnavailableError(
+        "/api/usage/limits", reason="sign_in_unavailable", retry_after=35
+    )
+
+    result = await _start(hass, client)
+
+    assert result["errors"] == {"base": "key_not_checked"}
 
 
 async def test_an_inactive_account_is_named_as_such(hass: HomeAssistant) -> None:
@@ -417,6 +440,36 @@ async def test_reauth_replaces_the_key_in_place(hass: HomeAssistant) -> None:
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "reauth_successful"
     assert entry.data[CONF_API_KEY] == "a-different-key"
+
+
+async def test_reauth_says_a_key_not_checked_and_keeps_the_old_one(
+    hass: HomeAssistant,
+) -> None:
+    """Not "did not accept that key": it was not looked at. Asked again, it can be."""
+    entry = MockConfigEntry(
+        domain=DOMAIN, unique_id=STUB_ACCOUNT["customerId"], data=CREDENTIALS
+    )
+    entry.add_to_hass(hass)
+
+    client = make_client()
+    client.async_validate.side_effect = TagHistorianUnavailableError(
+        "/api/customers/me", reason="sign_in_unavailable", retry_after=40
+    )
+
+    with patch(CLIENT_PATH, return_value=client), patch(SETUP_PATH, return_value=True):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": SOURCE_REAUTH, "entry_id": entry.entry_id},
+            data=entry.data,
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_API_KEY: "a-different-key"}
+        )
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "reauth_confirm"
+    assert result["errors"] == {"base": "key_not_checked"}
+    assert entry.data[CONF_API_KEY] == CREDENTIALS[CONF_API_KEY]
 
 
 async def test_reauth_refuses_a_key_for_a_different_account(
@@ -877,6 +930,33 @@ async def test_options_flow_refuses_to_show_a_stale_budget(
     assert result["reason"] == "cannot_connect"
 
 
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [("sign_in_unavailable", "key_not_checked"), ("", "cannot_connect")],
+)
+async def test_options_flow_says_when_the_key_could_not_be_checked(
+    hass: HomeAssistant, house, reason, expected
+) -> None:
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=STUB_ACCOUNT["customerId"],
+        data=CREDENTIALS,
+        options={CONF_ENTITIES: [], CONF_MIN_INTERVAL: 10},
+    )
+    entry.add_to_hass(hass)
+
+    client = make_client()
+    client.async_get_quota.side_effect = TagHistorianUnavailableError(
+        "/api/usage/limits", reason=reason
+    )
+
+    with patch(CLIENT_PATH, return_value=client), patch(SETUP_PATH, return_value=True):
+        result = await _open_choose(hass, entry)
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == expected
+
+
 # --------------------------------------------------------------------------
 # The history import, from Configure
 # --------------------------------------------------------------------------
@@ -985,6 +1065,20 @@ async def test_a_refused_import_says_what_tag_historian_said(
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "import_refused"
     assert result["description_placeholders"] == {"message": "Import allowance used up."}
+
+
+async def test_the_import_screen_says_when_the_key_could_not_be_checked(
+    hass: HomeAssistant, loaded_entry
+) -> None:
+    client = make_client()
+    client.async_get_import_allowance.side_effect = TagHistorianUnavailableError(
+        "/api/import/allowance", reason="sign_in_unavailable", retry_after=40
+    )
+    with patch(CLIENT_PATH, return_value=client):
+        result = await _open_import(hass, loaded_entry)
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "key_not_checked"
 
 
 async def test_an_import_already_running_is_not_started_twice(

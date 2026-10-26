@@ -46,6 +46,7 @@ from .api import (
     TagHistorianClient,
     TagHistorianConnectionError,
     TagHistorianImportRefused,
+    TagHistorianUnavailableError,
 )
 from .const import (
     ATTR_CONFIG_ENTRY_ID,
@@ -222,6 +223,16 @@ async def async_start_import(
         entry.async_start_reauth(hass)
         raise HomeAssistantError(
             translation_domain=DOMAIN, translation_key="key_rejected"
+        ) from err
+    except TagHistorianUnavailableError as err:
+        # A 503: Tag Historian answered. When it could not check the key just
+        # now, that is what is said - not "could not reach", and not the
+        # reauthentication a rejected key gets.
+        raise HomeAssistantError(
+            translation_domain=DOMAIN,
+            translation_key=(
+                "import_key_not_checked" if err.key_not_checked else "import_cannot_connect"
+            ),
         ) from err
     except TagHistorianConnectionError as err:
         raise HomeAssistantError(

@@ -274,8 +274,8 @@ async def test_429_backs_off_for_the_retry_after_duration(
     """The header is honoured, not replaced with a schedule of our own.
 
     Home Assistant's built-in influxdb integration never reads Retry-After, so
-    an over-quota instance re-sends into a closed door until UTC midnight. Here
-    a one-hour Retry-After means one hour of silence, and then a retry.
+    an over-quota instance drops every batch until UTC midnight. Here a
+    one-hour Retry-After means one hour of silence, and then a retry.
     """
     client = StubClient(
         WriteResult(WriteOutcome.DAILY_QUOTA, retry_after=3600, message="daily quota"),

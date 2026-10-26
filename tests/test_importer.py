@@ -33,6 +33,7 @@ from custom_components.tag_historian.api import (
     ImportSession,
     TagHistorianConnectionError,
     TagHistorianImportRefused,
+    TagHistorianUnavailableError,
     WriteOutcome,
     WriteResult,
 )
@@ -544,6 +545,24 @@ async def test_the_action_passes_on_the_apis_refusal(
     assert raised.value.translation_placeholders == {
         "message": "This account has imported all its plan allows."
     }
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [("sign_in_unavailable", "import_key_not_checked"), ("", "import_cannot_connect")],
+)
+async def test_a_key_not_checked_does_not_start_the_import_and_says_so(
+    hass: HomeAssistant, entry, loaded, reason, expected
+) -> None:
+    """A 503 for a key Tag Historian could not check is neither "could not
+    reach" nor a rejected key: no reauthentication is started for it."""
+    loaded.async_start_import.side_effect = TagHistorianUnavailableError(
+        "/api/import", reason=reason, retry_after=40
+    )
+    with pytest.raises(HomeAssistantError) as raised:
+        await hass.services.async_call(DOMAIN, SERVICE_IMPORT_HISTORY, {}, blocking=True)
+    assert raised.value.translation_key == expected
+    assert not hass.config_entries.flow.async_progress_by_handler(DOMAIN)
 
 
 async def test_without_a_recorder_there_is_nothing_to_import(

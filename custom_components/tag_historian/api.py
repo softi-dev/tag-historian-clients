@@ -44,6 +44,35 @@ class TagHistorianServerError(TagHistorianConnectionError):
     """
 
 
+# The ``reason`` of the 503 that Tag Historian answers when it could not CHECK a
+# key at all - a moment of trouble on its side - on every endpoint
+# that needs a sign-in. A key it checked and refused is a 401, never this.
+SIGN_IN_UNAVAILABLE = "sign_in_unavailable"
+
+
+class TagHistorianUnavailableError(TagHistorianConnectionError):
+    """503 - Tag Historian answered, but could not serve this just now.
+
+    A connection error to every caller that only asks "did it go through",
+    because the answer is the same - nothing happened, ask again later - but
+    the screens a person is looking at must not call it an unreachable host
+    or a rejected key. ``reason`` is the body's: ``sign_in_unavailable``
+    (:data:`SIGN_IN_UNAVAILABLE`) when the key could not be checked just now,
+    which says nothing about the key. ``Retry-After`` is 30 to 45 seconds
+    then.
+    """
+
+    def __init__(self, what: str, *, reason: str = "", retry_after: int = 0) -> None:
+        super().__init__(f"{what} answered 503" + (f" ({reason})" if reason else ""))
+        self.reason = reason
+        self.retry_after = retry_after
+
+    @property
+    def key_not_checked(self) -> bool:
+        """The key could not be checked just now - not refused, not checked at all."""
+        return self.reason == SIGN_IN_UNAVAILABLE
+
+
 class TagHistorianAuthError(TagHistorianError):
     """401 - the key is wrong, revoked, or the account is inactive.
 
@@ -385,6 +414,8 @@ class TagHistorianClient:
                     raise TagHistorianAuthError(path)
                 if response.status == 403:
                     raise TagHistorianPermissionError(path)
+                if response.status == 503:
+                    raise await self._unavailable(path, response)
                 if response.status >= 400:
                     raise TagHistorianConnectionError(
                         f"{path} answered {response.status}"
@@ -504,7 +535,8 @@ class TagHistorianClient:
                 if response.status == 404 and code == "not_found":
                     return LineageResult(LineageOutcome.NOT_FOUND, message)
                 if response.status == 429 or response.status >= 500:
-                    # Rate limited, the deploy handover (503), or a gateway
+                    # Rate limited, the deploy handover or a key that could
+                    # not be checked just now (503), or a gateway
                     # that lost the backend for a moment (502/504): all of
                     # them pass. A REFUSED here used to become a permanent
                     # card quoting "answered 502" for a rename that would
@@ -607,6 +639,8 @@ class TagHistorianClient:
                         _classify_import_refusal(response.status, body),
                         str(body.get("message") or body.get("error") or ""),
                     )
+                if response.status == 503:
+                    raise await self._unavailable("/api/import", response)
                 if response.status != 201:
                     raise TagHistorianConnectionError(f"/api/import answered {response.status}")
                 payload = await response.json()
@@ -747,6 +781,18 @@ class TagHistorianClient:
         )
         return WriteResult(WriteOutcome.REJECTED, message=message)
 
+    @classmethod
+    async def _unavailable(
+        cls, what: str, response: aiohttp.ClientResponse
+    ) -> TagHistorianUnavailableError:
+        """The 503 as an error that keeps its reason and its Retry-After."""
+        body = await cls._read_error_body(response)
+        return TagHistorianUnavailableError(
+            what,
+            reason=str(body.get("reason") or ""),
+            retry_after=_parse_retry_after(response),
+        )
+
     @staticmethod
     async def _read_error_body(response: aiohttp.ClientResponse) -> dict[str, Any]:
         try:
@@ -792,12 +838,17 @@ def _parse_retry_after(response: aiohttp.ClientResponse) -> int:
     """Read ``Retry-After`` as RFC 9110 delta-seconds.
 
     The endpoint always sends the integer form - on the daily-quota 429 it is
-    the seconds to the UTC midnight when the quota resets, and on the
-    back-pressure 429 and the 503 it is the write buffer's own estimate.
-    Honouring it is half the reason this component exists: the built-in
-    influxdb integration has a fixed 20/60 second retry schedule and never
-    looks at the header at all, so it spends a whole day re-sending into a
-    quota that will not reset until midnight.
+    the seconds to the UTC midnight when the quota resets, on the
+    back-pressure 429 and the write buffer's 503 it is the buffer's own
+    estimate, and on the 503 for a key that could not be checked just now it
+    is 30 to 45 seconds. Honouring it is half the reason this component
+    exists. Home Assistant's built-in influxdb integration never looks at the
+    header: set up for InfluxDB 1.x it sends a refused batch again only when
+    ``max_retries`` is set (it is 0 unless configured), 20 seconds apart,
+    and then drops it; set up for 2.x it writes without waiting for the
+    answer, so a refused batch is simply gone. Either way a day over quota
+    loses every reading until midnight, and a minute of 503s loses that
+    minute.
     """
     raw = response.headers.get("Retry-After")
     if not raw:

@@ -17,6 +17,7 @@ from custom_components.tag_historian.api import (
     TagHistorianConnectionError,
     TagHistorianImportRefused,
     TagHistorianServerError,
+    TagHistorianUnavailableError,
     WriteOutcome,
     _classify_429,
     _parse_dropped_points,
@@ -192,6 +193,71 @@ async def test_503_is_retryable_and_carries_its_own_retry_after(
     assert result.retryable
 
 
+# The API's 503 when it could not CHECK a key (a moment's trouble on its
+# side), on every endpoint that needs a sign-in. A key it checked and
+# refused is a 401.
+SIGN_IN_UNAVAILABLE = {
+    "error": "Service Unavailable",
+    "message": "Your sign-in could not be checked just now. This is on our side and says "
+    "nothing about your API key or session - send the same request again in a moment.",
+    "traceId": "0HN-test",
+    "reason": "sign_in_unavailable",
+    "retryAfterSeconds": 37,
+}
+
+
+async def test_a_write_whose_key_could_not_be_checked_waits_like_any_503(
+    client, aioclient_mock
+) -> None:
+    """Not a 401: no reauthentication, the batch is held and sent again."""
+    aioclient_mock.post(
+        WRITE_URL, status=503, headers={"Retry-After": "37"}, json=SIGN_IN_UNAVAILABLE
+    )
+
+    result = await client.async_write(BODY)
+
+    assert result.outcome is WriteOutcome.UNAVAILABLE
+    assert result.retry_after == 37
+    assert result.retryable
+
+
+async def test_a_key_that_could_not_be_checked_is_not_a_connection_failure_to_a_screen(
+    client, aioclient_mock
+) -> None:
+    """The 503 keeps what it is: a connection error to whoever only retries,
+    and to a screen a key not checked - neither an unreachable host nor a 401."""
+    aioclient_mock.get(
+        "https://api.taghistorian.com/api/customers/me",
+        status=503,
+        headers={"Retry-After": "37"},
+        json=SIGN_IN_UNAVAILABLE,
+    )
+
+    with pytest.raises(TagHistorianUnavailableError) as raised:
+        await client.async_validate()
+
+    assert isinstance(raised.value, TagHistorianConnectionError)
+    assert raised.value.key_not_checked
+    assert raised.value.reason == "sign_in_unavailable"
+    assert raised.value.retry_after == 37
+
+
+async def test_another_503_is_unavailable_but_not_a_key_not_checked(
+    client, aioclient_mock
+) -> None:
+    aioclient_mock.get(
+        "https://api.taghistorian.com/api/import/allowance",
+        status=503,
+        json={"error": "Service Unavailable", "message": "The operation was cancelled."},
+    )
+
+    with pytest.raises(TagHistorianUnavailableError) as raised:
+        await client.async_get_import_allowance()
+
+    assert not raised.value.key_not_checked
+    assert raised.value.retry_after == 0
+
+
 async def test_403_is_permanent_and_keeps_the_apis_own_wording(
     client, aioclient_mock
 ) -> None:
@@ -356,6 +422,20 @@ async def test_an_import_that_cannot_start_says_why(
 
     assert refused.value.outcome is outcome
     assert refused.value.message == f"{error}."
+
+
+async def test_an_import_whose_key_could_not_be_checked_did_not_start_for_that_reason(
+    client, aioclient_mock
+) -> None:
+    aioclient_mock.post(
+        IMPORT_URL, status=503, headers={"Retry-After": "40"}, json=SIGN_IN_UNAVAILABLE
+    )
+
+    with pytest.raises(TagHistorianUnavailableError) as raised:
+        await client.async_start_import()
+
+    assert raised.value.key_not_checked
+    assert raised.value.retry_after == 40
 
 
 async def test_a_batch_answer_is_read_field_by_field(client, aioclient_mock) -> None:
