@@ -42,6 +42,7 @@ from custom_components.tag_historian.api import (
     ImportSession,
     TagHistorianConnectionError,
     TagHistorianImportRefused,
+    TagHistorianUnavailableError,
     WriteOutcome,
     WriteResult,
 )
@@ -521,6 +522,40 @@ async def test_a_refused_start_from_the_card_says_why_and_leaves_the_card(
         assert result["reason"] == "import_refused"
         assert result["description_placeholders"] == {"message": "Import allowance used up."}
         assert registry.async_get_issue(DOMAIN, card) is not None, "for another try"
+
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [("sign_in_unavailable", "import_key_not_checked"), ("", "import_unavailable")],
+)
+async def test_a_503_from_the_card_says_so_and_leaves_the_card(
+    hass: HomeAssistant, hass_storage, freezer, reason, expected
+) -> None:
+    freezer.move_to(NOW)
+    hass_storage[IMPORT_KEY] = _version_1(IMPORT_KEY, dict(SAVED_IMPORT))
+    entry = make_entry(hass)
+    client = importing_client()
+    client.async_start_import.side_effect = TagHistorianUnavailableError(
+        "/api/import", reason=reason, retry_after=40
+    )
+    registry = ir.async_get(hass)
+    card = issue_id(entry, ISSUE_BRING_YEARS)
+
+    with patch(CLIENT_PATH, return_value=client):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        issue = registry.async_get_issue(DOMAIN, card)
+        flow = await async_create_fix_flow(hass, issue.issue_id, issue.data)
+        flow.hass = hass
+        result = await flow.async_step_confirm({})
+
+        assert result["type"] is FlowResultType.ABORT
+        assert result["reason"] == expected
+        assert registry.async_get_issue(DOMAIN, card) is not None, "for another try"
+        assert not hass.config_entries.flow.async_progress_by_handler(DOMAIN), "no reauthentication"
 
         assert await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()

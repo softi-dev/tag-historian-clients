@@ -26,8 +26,11 @@ driven here too - the real flow, the real placeholders, the real schema.
 
 from __future__ import annotations
 
+import ast
+import inspect
 import json
 import re
+import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -41,10 +44,12 @@ from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.tag_historian import renames, repairs
+from custom_components import tag_historian
+from custom_components.tag_historian import config_flow, renames, repairs
 from custom_components.tag_historian.api import (
     QuotaSnapshot,
     TagHistorianClient,
+    TagHistorianUnavailableError,
     WriteOutcome,
 )
 from custom_components.tag_historian.config_flow import CONF_SHOW_ALL, CONF_TRIM
@@ -285,6 +290,96 @@ async def test_every_issue_string_gets_the_placeholders_it_asks_for(
         )
         # And it renders.
         render_issue(issue)
+
+
+def _strings_in(node: ast.AST) -> set[str]:
+    return {
+        n.value
+        for n in ast.walk(node)
+        if isinstance(n, ast.Constant) and isinstance(n.value, str)
+    }
+
+
+def keys_handed_out(*owners) -> tuple[set[str], set[str], set[str]]:
+    """Every error, abort and exception key these hand a screen, as literals.
+
+    Read from the syntax tree rather than a regex so a key chosen by a
+    conditional - ``"a" if err.x else "b"`` - is two keys, not none.
+    """
+    errors: set[str] = set()
+    reasons: set[str] = set()
+    raised: set[str] = set()
+    for owner in owners:
+        for node in ast.walk(ast.parse(textwrap.dedent(inspect.getsource(owner)))):
+            if isinstance(node, ast.keyword) and node.arg == "reason":
+                reasons |= _strings_in(node.value)
+            elif isinstance(node, ast.keyword) and node.arg == "translation_key":
+                raised |= _strings_in(node.value)
+            elif isinstance(node, ast.Dict):
+                for key, value in zip(node.keys, node.values, strict=True):
+                    if isinstance(key, ast.Constant) and key.value == "base":
+                        errors |= _strings_in(value)
+            elif isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if (
+                        isinstance(target, ast.Subscript)
+                        and isinstance(target.slice, ast.Constant)
+                        and target.slice.value == "base"
+                    ):
+                        errors |= _strings_in(node.value)
+    return errors, reasons, raised
+
+
+def test_every_error_and_abort_a_screen_can_show_has_words() -> None:
+    """A key en.json has no words for is drawn as the bare key, and nothing raises.
+
+    A flow result carries only the key; Home Assistant looks the sentence up
+    when it draws the dialog. So the flow tests, which compare keys, stayed
+    green with "Tag Historian could not check the key just now" deleted, and
+    the dialog would have said ``key_not_checked``.
+    """
+    sign_in = TagHistorianUnavailableError("/x", reason="sign_in_unavailable")
+    other = TagHistorianUnavailableError("/x")
+    # A 503's error on setup and reauthentication, and its abort on the
+    # options screens, is picked by a helper rather than written at the call;
+    # ask it.
+    by_503 = {config_flow._unavailable_reason(sign_in), config_flow._unavailable_reason(other)}
+    assert by_503 == {"key_not_checked", "unavailable"}
+
+    _, _, action = keys_handed_out(tag_historian.async_start_import)
+    assert {"import_key_not_checked", "import_unavailable", "import_cannot_connect"} <= action
+
+    for section, owners, extra_errors, extra_reasons in (
+        (
+            "config",
+            (config_flow.SelectionStepsMixin, config_flow.TagHistorianConfigFlow),
+            by_503,
+            set(),
+        ),
+        (
+            "options",
+            (config_flow.SelectionStepsMixin, config_flow.TagHistorianOptionsFlow),
+            set(),
+            by_503,
+        ),
+    ):
+        errors, reasons, _ = keys_handed_out(*owners)
+        errors |= extra_errors
+        reasons |= extra_reasons
+        assert errors and reasons, "the walk still finds them"
+        missing_errors = errors - set(TRANSLATIONS[section].get("error", {}))
+        missing_reasons = reasons - set(TRANSLATIONS[section].get("abort", {}))
+        assert not missing_errors, f"{section}.error has no words for {missing_errors}"
+        assert not missing_reasons, f"{section}.abort has no words for {missing_reasons}"
+
+    # The import action's refusals: raised by the action, and the same keys
+    # are the options screen's and the repair card's aborts.
+    for where, keys in (
+        ("exceptions", TRANSLATIONS["exceptions"]),
+        ("options.abort", TRANSLATIONS["options"]["abort"]),
+        ("issues.bring_years.fix_flow.abort", TRANSLATIONS["issues"]["bring_years"]["fix_flow"]["abort"]),
+    ):
+        assert action <= set(keys), f"{where} has no words for {action - set(keys)}"
 
 
 # --------------------------------------------------------------------------

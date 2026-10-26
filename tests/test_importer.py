@@ -549,13 +549,14 @@ async def test_the_action_passes_on_the_apis_refusal(
 
 @pytest.mark.parametrize(
     ("reason", "expected"),
-    [("sign_in_unavailable", "import_key_not_checked"), ("", "import_cannot_connect")],
+    [("sign_in_unavailable", "import_key_not_checked"), ("", "import_unavailable")],
 )
 async def test_a_key_not_checked_does_not_start_the_import_and_says_so(
     hass: HomeAssistant, entry, loaded, reason, expected
 ) -> None:
     """A 503 for a key Tag Historian could not check is neither "could not
-    reach" nor a rejected key: no reauthentication is started for it."""
+    reach" nor a rejected key: no reauthentication is started for it. Any
+    other 503 is not "could not reach" either - something answered."""
     loaded.async_start_import.side_effect = TagHistorianUnavailableError(
         "/api/import", reason=reason, retry_after=40
     )

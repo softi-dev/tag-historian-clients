@@ -225,13 +225,14 @@ async def async_start_import(
             translation_domain=DOMAIN, translation_key="key_rejected"
         ) from err
     except TagHistorianUnavailableError as err:
-        # A 503: Tag Historian answered. When it could not check the key just
-        # now, that is what is said - not "could not reach", and not the
-        # reauthentication a rejected key gets.
+        # A 503: something answered, so it is never "could not reach", and
+        # never the reauthentication a rejected key gets. When Tag Historian
+        # could not check the key just now, that is what is said; any other
+        # 503 is that it could not start the import just now.
         raise HomeAssistantError(
             translation_domain=DOMAIN,
             translation_key=(
-                "import_key_not_checked" if err.key_not_checked else "import_cannot_connect"
+                "import_key_not_checked" if err.key_not_checked else "import_unavailable"
             ),
         ) from err
     except TagHistorianConnectionError as err:

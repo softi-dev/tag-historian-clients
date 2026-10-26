@@ -211,7 +211,7 @@ ISSUE_ENTITY_RENAMED: Final = "entity_renamed"
 ISSUE_BRING_YEARS: Final = "bring_years"
 
 # How long to wait before asking Tag Historian again to rename a tag after it
-# could not be reached. A rename that waits costs nothing - the readings go on
+# could not be reached or could not take the request. A rename that waits costs nothing - the readings go on
 # being stored under the old name meanwhile - so this is unhurried.
 RENAME_RETRY_SECONDS: Final = 900
 

@@ -468,10 +468,13 @@ class TagHistorianConfigFlow(SelectionStepsMixin, ConfigFlow, domain=DOMAIN):
         fixes. A single "cannot connect" would send someone hunting for a
         firewall rule when what they actually pasted was a read-only key.
 
-        And a fourth that needs none: a 503 is Tag Historian answering that
-        it could not check the key just now (trouble on its side, for a
-        moment). Not an unreachable host - the address is right - and not a
-        rejected key, which is a 401; only waiting a minute fixes it.
+        And a 503, which is neither an unreachable host nor a rejected key (a
+        401). With reason ``sign_in_unavailable`` it is Tag Historian
+        answering that it could not check the key just now - the address is
+        right, and only waiting a minute fixes it. Any other 503 is not known
+        to be Tag Historian's (a proxy or another service at a mistyped
+        address answers 503 too), so it is said as "answered, but could not
+        do this just now": try again, and check the address if it persists.
         """
         client = TagHistorianClient(
             async_get_clientsession(self.hass), self._host, self._api_key
@@ -485,8 +488,8 @@ class TagHistorianConfigFlow(SelectionStepsMixin, ConfigFlow, domain=DOMAIN):
             # /api/customers/me is reachable by every role, so a 403 here is
             # not a scope problem - it is an account the API is refusing.
             return {"base": "account_blocked"}
-        except TagHistorianUnavailableError:
-            return {"base": "key_not_checked"}
+        except TagHistorianUnavailableError as err:
+            return {"base": _unavailable_reason(err)}
         except TagHistorianConnectionError:
             return {"base": "cannot_connect"}
 
@@ -506,8 +509,8 @@ class TagHistorianConfigFlow(SelectionStepsMixin, ConfigFlow, domain=DOMAIN):
             return {"base": "read_only_key"}
         except TagHistorianAuthError:
             return {"base": "invalid_auth"}
-        except TagHistorianUnavailableError:
-            return {"base": "key_not_checked"}
+        except TagHistorianUnavailableError as err:
+            return {"base": _unavailable_reason(err)}
         except TagHistorianConnectionError:
             return {"base": "cannot_connect"}
 
@@ -586,9 +589,11 @@ class TagHistorianConfigFlow(SelectionStepsMixin, ConfigFlow, domain=DOMAIN):
                 account = await client.async_validate()
             except TagHistorianAuthError:
                 errors["base"] = "invalid_auth"
-            except TagHistorianUnavailableError:
-                # Not this key refused: no key could be checked just now.
-                errors["base"] = "key_not_checked"
+            except TagHistorianUnavailableError as err:
+                # Not this key refused. With reason sign_in_unavailable no key
+                # could be checked just now; any other 503 is a moment's
+                # trouble at that address.
+                errors["base"] = _unavailable_reason(err)
             except TagHistorianConnectionError:
                 errors["base"] = "cannot_connect"
             else:
@@ -614,13 +619,15 @@ class TagHistorianConfigFlow(SelectionStepsMixin, ConfigFlow, domain=DOMAIN):
 
 
 def _unavailable_reason(err: TagHistorianUnavailableError) -> str:
-    """An options screen's abort for a 503: a key not checked, said as that.
+    """The error or abort for a 503, on setup, reauthentication and Configure alike.
 
-    Any other 503 here - a moment of trouble behind a key that was checked -
-    keeps the screen's ``cannot_connect``, which also says to try again in a
-    moment.
+    A key not checked (reason ``sign_in_unavailable``) is said as that. Any
+    other 503 - answered by Tag Historian, or by whatever stands at that
+    address, but not served just now - is ``unavailable``: not "could not
+    reach", because something answered, and not "could not check the key",
+    because nothing says so.
     """
-    return "key_not_checked" if err.key_not_checked else "cannot_connect"
+    return "key_not_checked" if err.key_not_checked else "unavailable"
 
 
 class TagHistorianOptionsFlow(SelectionStepsMixin, OptionsFlow):

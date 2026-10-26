@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import voluptuous as vol
@@ -317,15 +317,18 @@ async def test_over_quota_can_be_accepted_deliberately(
         (TagHistorianAuthError("nope"), "invalid_auth"),
         (TagHistorianConnectionError("dns"), "cannot_connect"),
         (TagHistorianPermissionError("blocked"), "account_blocked"),
-        # Tag Historian answered: the address is right, and the key was not
-        # refused - it could not be checked just now.
+        # Only a 503 with reason sign_in_unavailable proves Tag Historian
+        # answered: the address is right, and the key was not refused - it
+        # could not be checked just now.
         (
             TagHistorianUnavailableError(
                 "/api/customers/me", reason="sign_in_unavailable", retry_after=40
             ),
             "key_not_checked",
         ),
-        (TagHistorianUnavailableError("/api/customers/me"), "key_not_checked"),
+        # A 503 without that reason may not be Tag Historian at all: nothing
+        # is said about the address being right or about the key.
+        (TagHistorianUnavailableError("/api/customers/me"), "unavailable"),
     ],
 )
 async def test_connect_failures_say_which_one_it_was(
@@ -356,17 +359,21 @@ async def test_a_read_only_key_is_named_as_such(hass: HomeAssistant) -> None:
     assert result["errors"] == {"base": "read_only_key"}
 
 
-async def test_a_key_not_checked_after_the_first_call_is_still_not_cannot_connect(
-    hass: HomeAssistant,
+@pytest.mark.parametrize(
+    ("reason", "expected_error"),
+    [("sign_in_unavailable", "key_not_checked"), ("", "unavailable")],
+)
+async def test_a_503_after_the_first_call_is_still_not_cannot_connect(
+    hass: HomeAssistant, reason, expected_error
 ) -> None:
     client = make_client()
     client.async_get_quota.side_effect = TagHistorianUnavailableError(
-        "/api/usage/limits", reason="sign_in_unavailable", retry_after=35
+        "/api/usage/limits", reason=reason, retry_after=35
     )
 
     result = await _start(hass, client)
 
-    assert result["errors"] == {"base": "key_not_checked"}
+    assert result["errors"] == {"base": expected_error}
 
 
 async def test_an_inactive_account_is_named_as_such(hass: HomeAssistant) -> None:
@@ -442,10 +449,18 @@ async def test_reauth_replaces_the_key_in_place(hass: HomeAssistant) -> None:
     assert entry.data[CONF_API_KEY] == "a-different-key"
 
 
+@pytest.mark.parametrize(
+    ("reason", "expected_error"),
+    [("sign_in_unavailable", "key_not_checked"), ("", "unavailable")],
+)
 async def test_reauth_says_a_key_not_checked_and_keeps_the_old_one(
-    hass: HomeAssistant,
+    hass: HomeAssistant, reason, expected_error
 ) -> None:
-    """Not "did not accept that key": it was not looked at. Asked again, it can be."""
+    """Not "did not accept that key": it was not looked at. Asked again, it can be.
+
+    A 503 without the reason is not called a key not checked either - only
+    "could not do this just now".
+    """
     entry = MockConfigEntry(
         domain=DOMAIN, unique_id=STUB_ACCOUNT["customerId"], data=CREDENTIALS
     )
@@ -453,7 +468,7 @@ async def test_reauth_says_a_key_not_checked_and_keeps_the_old_one(
 
     client = make_client()
     client.async_validate.side_effect = TagHistorianUnavailableError(
-        "/api/customers/me", reason="sign_in_unavailable", retry_after=40
+        "/api/customers/me", reason=reason, retry_after=40
     )
 
     with patch(CLIENT_PATH, return_value=client), patch(SETUP_PATH, return_value=True):
@@ -468,7 +483,7 @@ async def test_reauth_says_a_key_not_checked_and_keeps_the_old_one(
 
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "reauth_confirm"
-    assert result["errors"] == {"base": "key_not_checked"}
+    assert result["errors"] == {"base": expected_error}
     assert entry.data[CONF_API_KEY] == CREDENTIALS[CONF_API_KEY]
 
 
@@ -932,7 +947,8 @@ async def test_options_flow_refuses_to_show_a_stale_budget(
 
 @pytest.mark.parametrize(
     ("reason", "expected"),
-    [("sign_in_unavailable", "key_not_checked"), ("", "cannot_connect")],
+    # Something answered either way, so neither is "could not reach".
+    [("sign_in_unavailable", "key_not_checked"), ("", "unavailable")],
 )
 async def test_options_flow_says_when_the_key_could_not_be_checked(
     hass: HomeAssistant, house, reason, expected
@@ -1067,18 +1083,44 @@ async def test_a_refused_import_says_what_tag_historian_said(
     assert result["description_placeholders"] == {"message": "Import allowance used up."}
 
 
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [("sign_in_unavailable", "key_not_checked"), ("", "unavailable")],
+)
 async def test_the_import_screen_says_when_the_key_could_not_be_checked(
-    hass: HomeAssistant, loaded_entry
+    hass: HomeAssistant, loaded_entry, reason, expected
 ) -> None:
     client = make_client()
     client.async_get_import_allowance.side_effect = TagHistorianUnavailableError(
-        "/api/import/allowance", reason="sign_in_unavailable", retry_after=40
+        "/api/import/allowance", reason=reason, retry_after=40
     )
     with patch(CLIENT_PATH, return_value=client):
         result = await _open_import(hass, loaded_entry)
 
     assert result["type"] is FlowResultType.ABORT
-    assert result["reason"] == "key_not_checked"
+    assert result["reason"] == expected
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [("sign_in_unavailable", "import_key_not_checked"), ("", "import_unavailable")],
+)
+async def test_an_import_start_that_got_a_503_says_so_from_configure(
+    hass: HomeAssistant, loaded_entry, reason, expected
+) -> None:
+    """Through the real action, not a patched one: the screen aborts with its key."""
+    loaded_entry.runtime_data.importer.async_start = AsyncMock(
+        side_effect=TagHistorianUnavailableError("/api/import", reason=reason, retry_after=40)
+    )
+    with patch(CLIENT_PATH, return_value=make_client()):
+        result = await _open_import(hass, loaded_entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {CONF_ENTITIES: ["sensor.house_power"], "days": 2}
+        )
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == expected
+    assert not hass.config_entries.flow.async_progress_by_handler(DOMAIN), "no reauthentication"
 
 
 async def test_an_import_already_running_is_not_started_twice(
