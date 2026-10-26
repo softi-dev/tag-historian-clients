@@ -9,10 +9,13 @@ Three loops share one HTTP client:
     poll    - a 15-minute DataUpdateCoordinator over GET /api/usage/limits,
               which is where every quota number the UI shows comes from
               (see coordinator.py)
-    import  - on request only: the recorder's history of the selected
-              entities, sent to POST /api/import (see importer.py), started
-              from the options dialog or the tag_historian.import_history
-              action
+    import  - the history Home Assistant already has of the selected
+              entities: its long-term statistics to POST /api/import/{id}/hours,
+              then the recorder's readings to POST /api/import/{id}/readings
+              (see importer.py). Started by the setup of a new entry when
+              its last screen says so, by the repair card that offers it to
+              an older entry, from the options dialog, or by the
+              tag_historian.import_history action
 
 and one listener, for the whole integration rather than any one entry: the
 entity registry, so an entity renamed in Home Assistant is followed rather than
@@ -23,6 +26,7 @@ history is in.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -46,13 +50,17 @@ from .api import (
 from .const import (
     ATTR_CONFIG_ENTRY_ID,
     ATTR_DAYS,
+    ATTR_STATISTICS,
     CONF_API_KEY,
     CONF_ENTITIES,
     CONF_HOST,
+    CONF_IMPORT_ON_SETUP,
     CONF_MIN_INTERVAL,
     CONF_SHARE_LOCATION,
     DEFAULT_MIN_INTERVAL_SECONDS,
     DOMAIN,
+    LOGGER,
+    MAX_IMPORT_DAYS,
     SERVICE_IMPORT_HISTORY,
     STORAGE_KEY_FORWARDER,
     STORAGE_KEY_IMPORT,
@@ -61,7 +69,7 @@ from .const import (
 from .coordinator import QuotaCoordinator
 from .forwarder import ForwarderStats, StateForwarder
 from .importer import HistoryImporter, ImportAlreadyRunning
-from .place import async_propose_place
+from .place import async_propose_place, async_propose_time_zone
 from .renames import (
     async_clear_renamed_issues,
     async_resume,
@@ -69,7 +77,11 @@ from .renames import (
     own_tag_since,
     send_as,
 )
-from .repairs import async_clear_write_issues
+from .repairs import (
+    async_clear_bring_years_issue,
+    async_clear_write_issues,
+    async_raise_bring_years_issue,
+)
 
 PLATFORMS: list[Platform] = [Platform.SENSOR]
 
@@ -82,7 +94,8 @@ IMPORT_HISTORY_SCHEMA = vol.Schema(
     {
         vol.Optional(ATTR_CONFIG_ENTRY_ID): cv.string,
         vol.Optional(ATTR_ENTITY_ID): cv.entity_ids,
-        vol.Optional(ATTR_DAYS): vol.All(vol.Coerce(int), vol.Range(min=1, max=3650)),
+        vol.Optional(ATTR_DAYS): vol.All(vol.Coerce(int), vol.Range(min=1, max=MAX_IMPORT_DAYS)),
+        vol.Optional(ATTR_STATISTICS, default=True): cv.boolean,
     }
 )
 
@@ -140,7 +153,13 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             raise ServiceValidationError(
                 translation_domain=DOMAIN, translation_key="nothing_selected"
             )
-        await async_start_import(hass, entry, entity_ids, call.data.get(ATTR_DAYS))
+        await async_start_import(
+            hass,
+            entry,
+            entity_ids,
+            call.data.get(ATTR_DAYS),
+            statistics=call.data.get(ATTR_STATISTICS, True),
+        )
 
     hass.services.async_register(
         DOMAIN, SERVICE_IMPORT_HISTORY, _async_import_history, schema=IMPORT_HISTORY_SCHEMA
@@ -175,16 +194,20 @@ async def async_start_import(
     entry: TagHistorianConfigEntry,
     entity_ids: list[str],
     days: int | None,
+    *,
+    statistics: bool = True,
 ) -> None:
     """Start a history import, or say in the user's language why it cannot start.
 
-    Shared by the action and the options dialog, so both refuse for the same
-    reasons in the same words.
+    Shared by the action, the options dialog and the repair card, so all
+    three refuse for the same reasons in the same words. ``statistics``
+    brings Home Assistant's long-term statistics first, as every door does
+    unless told otherwise.
     """
     if not history.recorder_ready(hass):
         raise ServiceValidationError(translation_domain=DOMAIN, translation_key="no_recorder")
     try:
-        await entry.runtime_data.importer.async_start(entity_ids, days)
+        await entry.runtime_data.importer.async_start(entity_ids, days, statistics=statistics)
     except ImportAlreadyRunning as err:
         raise ServiceValidationError(
             translation_domain=DOMAIN, translation_key="import_running"
@@ -204,6 +227,9 @@ async def async_start_import(
         raise HomeAssistantError(
             translation_domain=DOMAIN, translation_key="import_cannot_connect"
         ) from err
+    if statistics:
+        # The card that offers this is answered, whichever door it came by.
+        async_clear_bring_years_issue(hass, entry)
 
 
 async def async_setup_entry(
@@ -303,8 +329,58 @@ async def async_setup_entry(
         entry.async_create_background_task(
             hass, async_propose_place(hass, client), f"{DOMAIN} propose place"
         )
+    # The time zone, always - the setup's last screen says so - and taken by
+    # Tag Historian only while nobody has chosen one (place.py).
+    entry.async_create_background_task(
+        hass, async_propose_time_zone(hass, client), f"{DOMAIN} propose time zone"
+    )
+
+    _async_bring_years(hass, entry, options)
 
     return True
+
+
+def _async_bring_years(
+    hass: HomeAssistant, entry: TagHistorianConfigEntry, options: Mapping[str, Any]
+) -> None:
+    """The history Home Assistant already has: brought now, offered, or neither.
+
+    * A new entry whose last setup screen was left ticked
+      (CONF_IMPORT_ON_SETUP) starts the import - statistics, then readings -
+      for everything it keeps history for, in the background.
+    * An entry set up before that screen existed has no such option, and is
+      offered the same on a repair card instead.
+    * Unticked: nothing; the options dialog and the action are still there.
+
+    Each only until the statistics have been brought once
+    (``statistics_started_at``, kept from one import to the next), and never
+    while an import is running - one carried on after a restart, say.
+    """
+    importer = entry.runtime_data.importer
+    if importer.running or importer.progress.statistics_started_at:
+        return
+    if not history.recorder_ready(hass):
+        return
+    if CONF_IMPORT_ON_SETUP not in options:
+        async_raise_bring_years_issue(hass, entry)
+        return
+    if not options[CONF_IMPORT_ON_SETUP]:
+        return
+
+    selected = list(options.get(CONF_ENTITIES, []))
+
+    async def _start() -> None:
+        try:
+            await async_start_import(hass, entry, selected, None, statistics=True)
+        except HomeAssistantError as err:
+            # Nothing was started, so the next setup asks again.
+            LOGGER.warning(
+                "Tag Historian could not start bringing the history Home Assistant already has "
+                "(%s); it tries again the next time it is set up",
+                err.translation_key or err,
+            )
+
+    entry.async_create_background_task(hass, _start(), f"{DOMAIN} bring the years")
 
 
 def _store(hass: HomeAssistant, key: str, entry: ConfigEntry) -> Store[dict[str, Any]]:
@@ -363,6 +439,7 @@ async def async_remove_entry(
     """
     async_clear_write_issues(hass, entry)
     async_clear_renamed_issues(hass, entry)
+    async_clear_bring_years_issue(hass, entry)
     # The counters survive a reload on purpose; they must not survive the
     # account being removed and re-added, which is a different account's worth
     # of history as far as anybody reading them is concerned.

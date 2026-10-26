@@ -111,7 +111,7 @@ from custom_components.tag_historian.repairs import (
     async_create_fix_flow,
 )
 
-from .conftest import make_client
+from .conftest import make_client, without_statistics
 
 COMPONENT = Path(tag_historian.__file__).parent
 CLIENT_PATHS = (
@@ -193,6 +193,7 @@ def recorder(hass: HomeAssistant, monkeypatch) -> Recorder:
     monkeypatch.setattr("custom_components.tag_historian.history.recorder_ready", lambda hass: True)
     monkeypatch.setattr("custom_components.tag_historian.history.async_recorded_states", fake.read)
     monkeypatch.setattr("custom_components.tag_historian.history.async_last_recorded", fake.last)
+    without_statistics(monkeypatch)
     hass.bus.async_listen(
         er.EVENT_ENTITY_REGISTRY_UPDATED, fake.renamed, event_filter=_is_a_rename
     )

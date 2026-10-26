@@ -12,6 +12,11 @@ import_history:
       selector:
         entity:
           multiple: true
+    statistics:
+      required: false
+      default: true
+      selector:
+        boolean:
     days:
       required: false
       selector:

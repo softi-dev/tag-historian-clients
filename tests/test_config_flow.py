@@ -25,11 +25,13 @@ from custom_components.tag_historian.const import (
     CONF_ENTITIES,
     CONF_FOLLOW_RENAMES,
     CONF_HOST,
+    CONF_IMPORT_ON_SETUP,
     CONF_MIN_INTERVAL,
     CONF_OWN_TAG_SINCE,
     CONF_SEND_AS,
     CONF_SHARE_LOCATION,
     DOMAIN,
+    MAX_IMPORT_DAYS,
 )
 
 from .conftest import STUB_ACCOUNT, STUB_ALLOWANCE, STUB_QUOTA, make_client
@@ -77,6 +79,42 @@ async def _start(hass: HomeAssistant, client):
         )
 
 
+async def _bring_history(hass: HomeAssistant, result, bring: bool = True):
+    """The last screen of a new entry: bring the history Home Assistant already has."""
+    assert result["step_id"] == "history"
+    return await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_IMPORT_ON_SETUP: bring}
+    )
+
+
+async def test_the_last_screen_offers_the_history_ticked_and_says_the_time_zone_goes_too(
+    hass: HomeAssistant, house
+) -> None:
+    """Ticked by default; unticked is kept as unticked; the zone is disclosed, not asked."""
+    await hass.config.async_update(time_zone="Europe/Stockholm")
+    client = make_client()
+
+    with patch(CLIENT_PATH, return_value=client), patch(SETUP_PATH, return_value=True):
+        result = await _start(hass, client)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_ENTITIES: ["sensor.house_power"], CONF_MIN_INTERVAL: 10}
+        )
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+
+        assert result["step_id"] == "history"
+        assert result["data_schema"]({})[CONF_IMPORT_ON_SETUP] is True
+        assert result["description_placeholders"]["time_zone"] == "Europe/Stockholm"
+        assert result["description_placeholders"]["selected"] == "1"
+
+        result = await _bring_history(hass, result, bring=False)
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["options"][CONF_IMPORT_ON_SETUP] is False
+    # Nothing is sent from the flow: the entry's setup proposes and imports.
+    client.async_propose_time_zone.assert_not_called()
+    client.async_start_import.assert_not_called()
+
+
 async def test_happy_path_creates_an_entry(hass: HomeAssistant, house) -> None:
     """Connect, choose, review, done."""
     client = make_client()
@@ -102,6 +140,8 @@ async def test_happy_path_creates_an_entry(hass: HomeAssistant, house) -> None:
         assert result["step_id"] == "review"
 
         result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+        assert result["step_id"] == "history", "and the last screen: the history already there"
+        result = await _bring_history(hass, result)
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["title"] == "Test House"
@@ -114,6 +154,9 @@ async def test_happy_path_creates_an_entry(hass: HomeAssistant, house) -> None:
         CONF_FOLLOW_RENAMES: False,
         # Off unless ticked: the location is the user's to give (place.py).
         CONF_SHARE_LOCATION: False,
+        # On unless unticked: the entry's first setup brings the history
+        # Home Assistant already has (__init__._async_bring_years).
+        CONF_IMPORT_ON_SETUP: True,
     }
     # The stable customer id, not the host - two entries for one account would
     # send every reading twice and bill for it twice.
@@ -224,6 +267,7 @@ async def test_over_quota_selection_is_trimmed_to_the_available_budget(
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], {"trim_to_fit": True}
         )
+        result = await _bring_history(hass, result)
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["options"][CONF_ENTITIES] == ["sensor.house_power"]
@@ -261,6 +305,7 @@ async def test_over_quota_can_be_accepted_deliberately(
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], {"trim_to_fit": False}
         )
+        result = await _bring_history(hass, result)
 
     assert len(result["options"][CONF_ENTITIES]) == 2
 
@@ -706,6 +751,7 @@ async def test_a_full_account_still_works_if_the_tags_already_exist(
         )
         assert result["description_placeholders"]["new_tags"] == "0"
         result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+        result = await _bring_history(hass, result)
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["options"][CONF_ENTITIES] == ["sensor.house_power"]
@@ -764,6 +810,7 @@ async def test_trim_is_measured_in_tags_and_actually_fits(
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], {"trim_to_fit": True}
         )
+        result = await _bring_history(hass, result)
 
     kept = result["options"][CONF_ENTITIES]
     new_tags = [e for e in kept if e != "binary_sensor.heat_pump_running"]
@@ -837,7 +884,10 @@ async def test_the_import_screen_shows_the_allowance_from_the_api(
     assert placeholders["window_days"] == f"{STUB_ALLOWANCE.window_days}"
     defaults = result["data_schema"]({})
     assert defaults[CONF_ENTITIES] == ["sensor.house_power", "sensor.outdoor_temperature"]
-    assert defaults["days"] == STUB_ALLOWANCE.window_days, "as far back as the window reaches"
+    assert defaults["statistics"] is True, "the long-term statistics first, unless unticked"
+    assert defaults["days"] == MAX_IMPORT_DAYS, (
+        "as far back as either part reaches: the readings stop at the window by themselves"
+    )
 
 
 async def test_submitting_the_import_screen_starts_the_import_and_closes(
@@ -933,6 +983,7 @@ async def test_the_location_for_the_weather_is_offered_unticked_and_kept_when_ti
             },
         )
         result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+        result = await _bring_history(hass, result)
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["options"][CONF_SHARE_LOCATION] is True

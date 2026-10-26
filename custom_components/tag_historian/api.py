@@ -134,8 +134,14 @@ class ImportOutcome(Enum):
     RETRY = "retry"  # 429/503 - wait Retry-After, send the same batch again
     ALLOWANCE_SPENT = "allowance_spent"  # 402 - the account's import allowance is used up
     STORAGE_FULL = "storage_full"  # 402 - the plan's storage cap
+    # 402 with code hours_allowance - the hourly history allowance, which is
+    # not the readings' and comes back by itself (resumes_at).
+    HOURS_ALLOWANCE_SPENT = "hours_allowance_spent"
     FORBIDDEN = "forbidden"  # 403 - unconfirmed address, account being erased
     UNKNOWN_IMPORT = "unknown_import"  # 404 - the import is not this account's (any more)
+    # 404 with no body: the route is not there - a Tag Historian older than
+    # the hours import. Only the hours endpoint can answer it.
+    NOT_SUPPORTED = "not_supported"
     REJECTED = "rejected"  # 400/413 - a body this integration should not have built
 
 
@@ -209,6 +215,54 @@ class ImportBatchResult:
             + self.refused_allowance
             + self.refused_storage
         )
+
+
+@dataclass
+class HoursBatchResult:
+    """One batch of hourly statistics (``POST /api/import/{id}/hours``), as the endpoint answered it."""
+
+    outcome: ImportOutcome
+    retry_after: int = 0
+    stored: int = 0
+    duplicates: int = 0
+    outside_retention: int = 0
+    # Meter hours stored with a negative change, as sent: a meter that was
+    # swapped or reset in a way Home Assistant did not see as a reset.
+    negative_change: int = 0
+    refused_not_history: int = 0
+    refused_tag_limit: int = 0
+    refused_unit_mismatch: int = 0
+    refused_invalid: int = 0
+    refused_unsupported: int = 0
+    refused_hours_allowance: int = 0
+    refused_unwritable: int = 0
+    refused_tags: list[str] = field(default_factory=list)
+    # Per tag in the batch: an hour must END by this to be imported - the
+    # import's start, or the tag's first reading or first import, if earlier.
+    # The readings endpoint's name for the same line.
+    importable_before: dict[str, datetime] = field(default_factory=dict)
+    # The first hour Tag Historian keeps; older hours are skipped.
+    oldest_allowed: datetime | None = None
+    # While the hourly history allowance is used up: when more goes in.
+    resumes_at: datetime | None = None
+    message: str = ""
+
+    @property
+    def refused(self) -> int:
+        return (
+            self.refused_not_history
+            + self.refused_tag_limit
+            + self.refused_unit_mismatch
+            + self.refused_invalid
+            + self.refused_unsupported
+            + self.refused_hours_allowance
+            + self.refused_unwritable
+        )
+
+    @property
+    def skipped(self) -> int:
+        """Hours this batch did not store, whatever the reason."""
+        return self.duplicates + self.outside_retention + self.refused
 
 
 class TagHistorianImportRefused(TagHistorianError):
@@ -463,46 +517,74 @@ class TagHistorianClient:
     async def async_propose_place(self, lat: float, lon: float) -> bool | None:
         """Propose the account's coarse place (``POST /api/account/settings/proposal``).
 
-        A proposal only fills what the account has not got: a place an Admin
-        set in Settings, or one proposed before, stays as it is, so sending it
-        again is harmless. True when the API answered, and None when it could
-        not be asked or does not know the endpoint (a Tag Historian older than
-        the weather) - nothing here depends on it, so neither is an error.
+        A proposal is taken only while the account has no place AND has never
+        had one removed: a place an Admin set in Settings, one proposed
+        before, and a place an Admin removed all stand - a removed place stays
+        removed, and no proposal fills it again. Sending it again is therefore
+        harmless. True when the API answered, and None when it could not be
+        asked or does not know the endpoint (a Tag Historian older than the
+        weather) - nothing here depends on it, so neither is an error.
         """
+        return await self._propose({"place": {"lat": lat, "lon": lon}, "source": "ha"}, "place")
+
+    async def async_propose_time_zone(self, time_zone: str) -> bool | None:
+        """Propose the account's time zone (``POST /api/account/settings/proposal``).
+
+        Taken only while nobody has chosen one: neither an Admin in Settings,
+        nor anybody for the owner's email channel under Alarms, nor an earlier
+        proposal. The zone is what Tag Historian's increases per day and
+        month, the Monday summary and alert times are in. True when the API
+        answered, None when it could not be asked or is older than account
+        settings - as for the place, neither is an error.
+        """
+        return await self._propose({"timeZone": time_zone, "source": "ha"}, "time zone")
+
+    async def _propose(self, body: dict[str, Any], what: str) -> bool | None:
         path = "/api/account/settings/proposal"
         try:
             async with self._session.post(
                 self._base.join(URL(path)),
                 headers=self._headers(),
-                json={"place": {"lat": lat, "lon": lon}, "source": "ha"},
+                json=body,
                 timeout=aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SECONDS),
             ) as response:
                 if response.status == 401:
                     raise TagHistorianAuthError(path)
                 if response.status >= 400:
-                    LOGGER.debug("%s answered %s; the place was not proposed", path, response.status)
+                    LOGGER.debug("%s answered %s; the %s was not proposed", path, response.status, what)
                     return None
                 return True
         except (TimeoutError, aiohttp.ClientError) as err:
-            LOGGER.debug("%s could not be reached (%s); the place was not proposed", path, err)
+            LOGGER.debug("%s could not be reached (%s); the %s was not proposed", path, err, what)
             return None
 
     async def async_get_import_allowance(self) -> ImportAllowance:
         """How much history this account may still import, and where the window starts."""
         return ImportAllowance.from_json(await self._get_json("/api/import/allowance"))
 
-    async def async_start_import(self, source: str = "home-assistant") -> ImportSession:
+    async def async_start_import(
+        self, source: str = "home-assistant", *, hours: bool = False
+    ) -> ImportSession:
         """Start an import. Its readings must be older than ``started_at``.
 
         Raises :class:`TagHistorianImportRefused` when the account cannot
         import at all right now - the allowance spent (402), the storage cap
         reached (402), or an account that may not write (403).
+
+        ``hours``: the import brings hourly statistics too. The readings
+        allowance does not come back once it is spent, and the hours have one
+        of their own, so such an import is started even then - its readings
+        are refused instead, batch by batch, and ``allowance.remaining`` says
+        so from the start.
         """
+        body: dict[str, Any] = {"source": source}
+        if hours:
+            body["hours"] = True
         try:
             async with self._session.post(
                 self._base.join(URL("/api/import")),
                 headers=self._headers(),
-                json={"source": source},
+                json=body,
                 timeout=aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SECONDS),
             ) as response:
                 if response.status == 401:
@@ -549,6 +631,33 @@ class TagHistorianClient:
                     raise TagHistorianAuthError("import")
                 body = await self._read_error_body(response)
                 return _classify_import(response, body)
+        except (TimeoutError, aiohttp.ClientError) as err:
+            raise TagHistorianConnectionError(str(err)) from err
+
+    async def async_import_hours(self, import_id: str, gzipped: bytes) -> HoursBatchResult:
+        """Send one batch of hourly statistics, already gzipped, and classify the answer.
+
+        ``POST /api/import/{id}/hours`` takes at most 4 MB once decompressed
+        and 5 000 hours, and gzip is what keeps years of hours off a home
+        connection's upload: the body is mostly the same keys over and over.
+        The body is compressed by the caller, off the event loop
+        (statistics.py). Raises like :meth:`async_import_batch`.
+        """
+        try:
+            async with self._session.post(
+                self._base.join(URL(f"/api/import/{import_id}/hours")),
+                headers={
+                    **self._headers(),
+                    "Content-Type": "application/json",
+                    "Content-Encoding": "gzip",
+                },
+                data=gzipped,
+                timeout=aiohttp.ClientTimeout(total=IMPORT_TIMEOUT_SECONDS),
+            ) as response:
+                if response.status == 401:
+                    raise TagHistorianAuthError("import")
+                body = await self._read_error_body(response)
+                return _classify_hours_import(response, body)
         except (TimeoutError, aiohttp.ClientError) as err:
             raise TagHistorianConnectionError(str(err)) from err
 
@@ -757,6 +866,35 @@ def _classify_import_refusal(status: int, body: dict[str, Any]) -> ImportOutcome
     return ImportOutcome.ALLOWANCE_SPENT
 
 
+def _import_status(
+    response: aiohttp.ClientResponse, body: dict[str, Any], message: str
+) -> tuple[ImportOutcome, int]:
+    """What a refusal from either batch endpoint of an import means: the outcome, and how long to wait.
+
+    One reading of the statuses for readings and hours alike, so the two
+    phases of an import stop, wait and retry for the same answers.
+    """
+    status = response.status
+
+    if status in (402, 403):
+        return _classify_import_refusal(status, body), 0
+
+    if status == 404:
+        return ImportOutcome.UNKNOWN_IMPORT, 0
+
+    if status in (429, 503):
+        return ImportOutcome.RETRY, _parse_retry_after(response)
+
+    if status in (400, 413):
+        LOGGER.error("Tag Historian refused an import batch with %s: %s", status, message)
+        return ImportOutcome.REJECTED, 0
+
+    # A 500 and anything else unexpected: nothing is known to be stored, and
+    # the endpoint skips what it already has, so it is retried like a socket
+    # error rather than ending the import.
+    raise TagHistorianConnectionError(f"import answered {status}")
+
+
 def _classify_import(response: aiohttp.ClientResponse, body: dict[str, Any]) -> ImportBatchResult:
     status = response.status
     message = str(body.get("message") or body.get("error") or "")
@@ -787,22 +925,81 @@ def _classify_import(response: aiohttp.ClientResponse, body: dict[str, Any]) -> 
             message=message,
         )
 
-    if status in (402, 403):
-        return ImportBatchResult(_classify_import_refusal(status, body), message=message)
+    outcome, retry_after = _import_status(response, body, message)
+    return ImportBatchResult(outcome, retry_after=retry_after, message=message)
 
-    if status == 404:
-        return ImportBatchResult(ImportOutcome.UNKNOWN_IMPORT, message=message)
 
-    if status in (429, 503):
-        return ImportBatchResult(
-            ImportOutcome.RETRY, retry_after=_parse_retry_after(response), message=message
+def _count(source: dict[str, Any], key: str) -> int:
+    """A count from an answer, 0 when it is absent or not a number."""
+    try:
+        return int(source.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _classify_hours_import(
+    response: aiohttp.ClientResponse, body: dict[str, Any]
+) -> HoursBatchResult:
+    """The answer to one hours batch: the import endpoint's statuses, and two of its own.
+
+    * 402 with ``code: hours_allowance`` is the hourly history allowance - the
+      plan's tag limit times ten years of hours per rolling 30 days - and not
+      the readings' allowance. It ends the statistics phase only, and comes
+      back by itself at ``resumesAt``.
+    * 404 with no body at all is a route the server does not have: a Tag
+      Historian from before the hours import. That ends the statistics phase
+      and leaves the readings to theirs. "No such import" is a 404 with a body
+      that says so, and ends the session as on the readings endpoint.
+
+    A 503 can carry ``stored``: some months went in and some could not yet
+    (the server's deploy, a file a reader held). Sent again, the batch stores
+    the rest, and what went in now comes back as duplicates; the importer
+    counts it from here.
+    """
+    status = response.status
+    message = str(body.get("message") or body.get("error") or "")
+
+    if status == 200:
+        refused = body.get("refused") or {}
+        importable = {
+            str(tag): parsed
+            for tag, value in (body.get("importableBefore") or {}).items()
+            if (parsed := _parse_time(value)) is not None
+        }
+        return HoursBatchResult(
+            ImportOutcome.TAKEN,
+            stored=_count(body, "stored"),
+            duplicates=_count(body, "duplicates"),
+            outside_retention=_count(body, "outsideRetention"),
+            negative_change=_count(body, "negativeChange"),
+            refused_not_history=_count(refused, "notHistory"),
+            refused_tag_limit=_count(refused, "tagLimit"),
+            refused_unit_mismatch=_count(refused, "unitMismatch"),
+            refused_invalid=_count(refused, "invalid"),
+            refused_unsupported=_count(refused, "unsupported"),
+            refused_hours_allowance=_count(refused, "hoursAllowance"),
+            refused_unwritable=_count(refused, "unwritable"),
+            refused_tags=[str(t) for t in body.get("refusedTags") or []],
+            importable_before=importable,
+            oldest_allowed=_parse_time(body.get("oldestAllowed")),
+            resumes_at=_parse_time((body.get("hoursAllowance") or {}).get("resumesAt")),
+            message=message,
         )
 
-    if status in (400, 413):
-        LOGGER.error("Tag Historian refused an import batch with %s: %s", status, message)
-        return ImportBatchResult(ImportOutcome.REJECTED, message=message)
+    if status == 402 and str(body.get("code") or "") == "hours_allowance":
+        return HoursBatchResult(
+            ImportOutcome.HOURS_ALLOWANCE_SPENT,
+            resumes_at=_parse_time(body.get("resumesAt")),
+            message=message,
+        )
 
-    # A 500 and anything else unexpected: nothing is known to be stored, and
-    # the endpoint skips what it already has, so it is retried like a socket
-    # error rather than ending the import.
-    raise TagHistorianConnectionError(f"import answered {status}")
+    if status == 404 and not body:
+        return HoursBatchResult(ImportOutcome.NOT_SUPPORTED, message=message)
+
+    outcome, retry_after = _import_status(response, body, message)
+    return HoursBatchResult(
+        outcome,
+        retry_after=retry_after,
+        stored=_count(body, "stored") if outcome is ImportOutcome.RETRY else 0,
+        message=message,
+    )

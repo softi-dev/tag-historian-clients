@@ -18,6 +18,7 @@ from homeassistant.core import HomeAssistant, State
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers.service import async_get_all_descriptions
 from homeassistant.helpers.storage import Store
+from homeassistant.helpers.translation import async_get_translations
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
@@ -56,7 +57,7 @@ from custom_components.tag_historian.importer import (
     ImportAlreadyRunning,
 )
 
-from .conftest import make_client
+from .conftest import make_client, without_statistics
 
 POWER = "sensor.house_power"
 TEMP = "sensor.outdoor_temperature"
@@ -88,6 +89,7 @@ def recorder(monkeypatch) -> FakeRecorder:
     monkeypatch.setattr(
         "custom_components.tag_historian.history.async_recorded_states", fake.read
     )
+    without_statistics(monkeypatch)
     return fake
 
 
@@ -495,11 +497,24 @@ async def test_the_action_imports_the_selected_entities_by_default(
     await hass.services.async_call(DOMAIN, SERVICE_IMPORT_HISTORY, {}, blocking=True)
     await hass.async_block_till_done()
 
-    loaded.async_start_import.assert_awaited_once()
+    loaded.async_start_import.assert_awaited_once_with(hours=True)
     assert entry.runtime_data.importer.progress.entities == [POWER, TEMP]
+    assert entry.runtime_data.importer.progress.statistics, "the long-term statistics first"
     sensor = hass.states.get("sensor.tag_historian_history_import")
     assert sensor is not None
     assert sensor.state == STATUS_FINISHED
+    assert sensor.attributes["hours_stored"] == 0
+    assert sensor.attributes["hours_skipped"] == 0
+
+
+async def test_the_action_can_leave_the_statistics_out(hass: HomeAssistant, entry, loaded) -> None:
+    await hass.services.async_call(
+        DOMAIN, SERVICE_IMPORT_HISTORY, {"statistics": False, ATTR_DAYS: 3650}, blocking=True
+    )
+    await hass.async_block_till_done()
+
+    loaded.async_start_import.assert_awaited_once_with(hours=False)
+    assert not entry.runtime_data.importer.progress.statistics
 
 
 async def test_the_action_refuses_an_entity_nobody_chose(
@@ -545,10 +560,17 @@ async def test_without_a_recorder_there_is_nothing_to_import(
 async def test_the_action_is_described_from_services_yaml_and_the_translations(
     hass: HomeAssistant, entry, loaded
 ) -> None:
-    """What the Actions panel shows: a broken services.yaml shows nothing, silently."""
+    """What the Actions panel shows: a broken services.yaml shows nothing, silently.
+
+    The name comes from the translations, which newer Home Assistants no
+    longer copy into the descriptions - the frontend asks for them itself -
+    so it is read where the panel reads it, on every version.
+    """
     descriptions = await async_get_all_descriptions(hass)
     action = descriptions[DOMAIN][SERVICE_IMPORT_HISTORY]
+    strings = await async_get_translations(hass, "en", "services", [DOMAIN])
 
-    assert action["name"] == "Import history"
-    assert set(action["fields"]) == {"config_entry_id", "entity_id", "days"}
+    assert strings[f"component.{DOMAIN}.services.{SERVICE_IMPORT_HISTORY}.name"] == "Import history"
+    assert set(action["fields"]) == {"config_entry_id", "entity_id", "statistics", "days"}
     assert action["fields"]["days"]["selector"]["number"]["min"] == 1
+    assert action["fields"]["days"]["selector"]["number"]["max"] == 3650

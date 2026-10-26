@@ -88,6 +88,21 @@ def auto_enable_custom_integrations(enable_custom_integrations):
     yield
 
 
+def without_statistics(monkeypatch) -> None:
+    """A recorder that holds no long-term statistics, for tests about the readings.
+
+    The tests that stand in for the recorder's states (history.py) start
+    imports the way the action does - statistics first - and their entities
+    then have none: the statistics phase passes over them, and the readings
+    are what the test is about. tests/test_statistics_import.py is the phase.
+    """
+
+    async def _none(hass, statistic_ids) -> dict:
+        return {}
+
+    monkeypatch.setattr("custom_components.tag_historian.statistics.async_metadata", _none)
+
+
 def make_client(
     account: dict | None = None,
     quota: QuotaSnapshot | None = None,

@@ -2,7 +2,8 @@
 
 Configure opens a menu of two things: choosing what to keep history for (the
 select and review screens below, again), and importing the history Home
-Assistant has already recorded (``import_history``, see importer.py).
+Assistant already has - its long-term statistics and its recorded readings
+(``import_history``, see importer.py).
 
 Four screens to add the integration, and the middle two are the reason this
 integration exists at all.
@@ -20,7 +21,14 @@ choosing, that their plan holds N tags and they have just ticked N+14.
                   with nothing to decide and a screen offering to cut the
                   selection are not the same screen and must not share a
                   description
-    4. (done)
+    4. history  - "Bring the history Home Assistant already has", ticked:
+                  its long-term statistics and the recorder's readings go in
+                  in the background once the entry is set up (importer.py).
+                  The same screen says that this Home Assistant's time zone
+                  is proposed to the account (place.py). A new entry only:
+                  the options flow changes a selection, it does not set one
+                  up, and an existing entry is offered the history on a
+                  repair card instead (repairs.py)
 
 Two rules the screens have to keep, because both were broken by code that
 looked reasonable:
@@ -77,10 +85,12 @@ from .api import (
 )
 from .const import (
     ATTR_DAYS,
+    ATTR_STATISTICS,
     CONF_API_KEY,
     CONF_ENTITIES,
     CONF_FOLLOW_RENAMES,
     CONF_HOST,
+    CONF_IMPORT_ON_SETUP,
     CONF_MIN_INTERVAL,
     CONF_OWN_TAG_SINCE,
     CONF_SEND_AS,
@@ -88,6 +98,7 @@ from .const import (
     DEFAULT_HOST,
     DEFAULT_MIN_INTERVAL_SECONDS,
     DOMAIN,
+    MAX_IMPORT_DAYS,
 )
 from .line_protocol import tag_name_for_entity
 from .renames import own_tag_since, send_as
@@ -505,14 +516,41 @@ class TagHistorianConfigFlow(SelectionStepsMixin, ConfigFlow, domain=DOMAIN):
         return {}
 
     async def async_step_finish(self) -> ConfigFlowResult:
-        return self.async_create_entry(
-            title=self._account_name,
-            data={CONF_HOST: self._host, CONF_API_KEY: self._api_key},
-            options={
-                CONF_ENTITIES: self._selected,
-                CONF_MIN_INTERVAL: self._min_interval,
-                CONF_FOLLOW_RENAMES: self._follow_renames,
-                CONF_SHARE_LOCATION: self._share_location,
+        return await self.async_step_history()
+
+    async def async_step_history(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Screen 4 - bring the history Home Assistant already has, ticked.
+
+        Nothing is sent from here: the entry's first setup starts the import
+        when this is left ticked (__init__._async_bring_years), so it runs
+        with the forwarder already listening and knows where its live part
+        begins. The time zone line is a disclosure, not a question - it is
+        proposed whatever is ticked, and taken only while nobody has chosen
+        one (place.py).
+        """
+        if user_input is not None:
+            return self.async_create_entry(
+                title=self._account_name,
+                data={CONF_HOST: self._host, CONF_API_KEY: self._api_key},
+                options={
+                    CONF_ENTITIES: self._selected,
+                    CONF_MIN_INTERVAL: self._min_interval,
+                    CONF_FOLLOW_RENAMES: self._follow_renames,
+                    CONF_SHARE_LOCATION: self._share_location,
+                    CONF_IMPORT_ON_SETUP: bool(user_input.get(CONF_IMPORT_ON_SETUP, True)),
+                },
+            )
+
+        keep_days = history.recorder_keep_days(self.hass)
+        return self.async_show_form(
+            step_id="history",
+            data_schema=vol.Schema({vol.Required(CONF_IMPORT_ON_SETUP, default=True): bool}),
+            description_placeholders={
+                "selected": str(len(self._selected)),
+                "recorder_days": str(keep_days) if keep_days is not None else "some",
+                "time_zone": str(self.hass.config.time_zone),
             },
         )
 
@@ -628,15 +666,17 @@ class TagHistorianOptionsFlow(SelectionStepsMixin, OptionsFlow):
     async def async_step_import_history(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Import what the recorder holds for the selected entities.
+        """Import the history Home Assistant has for the selected entities.
 
-        The allowance and the window on this screen are read from the API as
-        it is drawn (``GET /api/import/allowance``); nothing about a plan is
-        typed here. Submitting starts the import in the background and closes
-        the dialog - an import of a year of readings takes far longer than
-        anybody should watch a dialog for - and the sensor and a notification
-        take it from there. Nothing in the options changes, so the entry is
-        not reloaded.
+        Its long-term statistics first, unless unticked, then what the
+        recorder holds (importer.py). The allowance and the window on this
+        screen are read from the API as it is drawn (``GET
+        /api/import/allowance``); nothing about a plan is typed here.
+        Submitting starts the import in the background and closes the dialog
+        - an import of years of hours and a fortnight of readings takes far
+        longer than anybody should watch a dialog for - and the sensor and a
+        notification take it from there. Nothing in the options changes, so
+        the entry is not reloaded.
         """
         entry = self.config_entry
         selected = list(entry.options.get(CONF_ENTITIES, []))
@@ -659,7 +699,11 @@ class TagHistorianOptionsFlow(SelectionStepsMixin, OptionsFlow):
 
                 try:
                     await async_start_import(
-                        self.hass, entry, entities, int(user_input[ATTR_DAYS])
+                        self.hass,
+                        entry,
+                        entities,
+                        int(user_input[ATTR_DAYS]),
+                        statistics=bool(user_input.get(ATTR_STATISTICS, True)),
                     )
                 except HomeAssistantError as err:
                     # The action's own refusals, under the same keys: one
@@ -687,16 +731,19 @@ class TagHistorianOptionsFlow(SelectionStepsMixin, OptionsFlow):
         ):
             return self.async_abort(reason="cannot_connect")
 
-        window_days = max(1, allowance.window_days)
         keep_days = history.recorder_keep_days(self.hass)
+        # As far back as either phase reaches: the statistics up to ten
+        # years, the readings no further than the plan's window, which the
+        # import holds them to whatever this says.
         schema = vol.Schema(
             {
                 vol.Required(CONF_ENTITIES, default=selected): EntitySelector(
                     EntitySelectorConfig(multiple=True, include_entities=selected)
                 ),
-                vol.Required(ATTR_DAYS, default=window_days): NumberSelector(
+                vol.Required(ATTR_STATISTICS, default=True): bool,
+                vol.Required(ATTR_DAYS, default=MAX_IMPORT_DAYS): NumberSelector(
                     NumberSelectorConfig(
-                        min=1, max=window_days, mode=NumberSelectorMode.BOX,
+                        min=1, max=MAX_IMPORT_DAYS, mode=NumberSelectorMode.BOX,
                         unit_of_measurement="days",
                     )
                 ),

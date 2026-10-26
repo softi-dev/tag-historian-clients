@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import gzip
+import json
+
 import pytest
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -425,6 +428,142 @@ async def test_a_500_from_the_import_endpoint_is_retried_like_a_socket_error(
         await client.async_import_batch("imp-1", [READING])
 
 
+async def test_an_import_that_brings_hours_says_so_when_it_starts(client, aioclient_mock) -> None:
+    """The readings allowance does not come back once spent; an import with hours starts anyway."""
+    aioclient_mock.post(
+        IMPORT_URL,
+        status=201,
+        json={
+            "importId": "imp-1",
+            "startedAt": "2026-10-17T12:00:00Z",
+            "windowStart": "2026-10-03T12:00:00Z",
+            "allowance": {"total": 900, "used": 900, "remaining": 0},
+        },
+    )
+
+    started = await client.async_start_import(hours=True)
+
+    assert aioclient_mock.mock_calls[0][2] == {"source": "home-assistant", "hours": True}
+    assert started.allowance.remaining == 0
+
+
+# --------------------------------------------------------------------------
+# The hours endpoint (the statistics phase)
+# --------------------------------------------------------------------------
+
+HOURS_URL = "https://api.taghistorian.com/api/import/imp-1/hours"
+
+
+async def test_an_hours_batch_goes_gzipped_and_its_answer_is_read_field_by_field(
+    client, aioclient_mock
+) -> None:
+    """What the endpoint says about each hour, under the names ImportController gives them."""
+    aioclient_mock.post(
+        HOURS_URL,
+        status=200,
+        json={
+            "importId": "imp-1",
+            "received": 20,
+            "stored": 9,
+            "duplicates": 2,
+            "outsideRetention": 1,
+            "negativeChange": 1,
+            "refused": {
+                "notHistory": 1,
+                "tagLimit": 0,
+                "unitMismatch": 3,
+                "invalid": 1,
+                "unsupported": 0,
+                "hoursAllowance": 2,
+                "unwritable": 1,
+            },
+            "refusedTags": [],
+            "importableBefore": {"sensor.house_power": "2026-10-16T08:00:00Z"},
+            "oldestAllowed": "2016-11-01T00:00:00Z",
+            "hoursAllowance": {"limit": 100, "usedLast30Days": 100, "remaining": 0, "resumesAt": "2026-11-02T00:00:00Z"},
+        },
+    )
+    body = {"series": [{"tagName": "sensor.house_power", "hours": [{"t": 3600, "mean": 1, "min": 0, "max": 2}]}]}
+
+    result = await client.async_import_hours("imp-1", gzip.compress(json.dumps(body).encode()))
+
+    assert result.outcome is ImportOutcome.TAKEN
+    assert (result.stored, result.duplicates, result.outside_retention, result.negative_change) == (9, 2, 1, 1)
+    assert result.refused_unit_mismatch == 3
+    assert result.refused_hours_allowance == 2
+    assert result.refused == 1 + 3 + 1 + 2 + 1
+    assert result.skipped == 2 + 1 + result.refused
+    assert result.importable_before["sensor.house_power"].hour == 8
+    assert result.oldest_allowed is not None and result.oldest_allowed.year == 2016
+    assert result.resumes_at is not None and result.resumes_at.month == 11
+
+    _, _, sent, headers = aioclient_mock.mock_calls[0]
+    assert headers["Content-Encoding"] == "gzip"
+    assert json.loads(gzip.decompress(sent)) == body, "gzip on the wire, the batch inside"
+
+
+async def test_the_hourly_allowance_is_its_own_402(client, aioclient_mock) -> None:
+    """Not the readings' allowance: it ends the statistics phase only, and says when more goes in."""
+    aioclient_mock.post(
+        HOURS_URL,
+        status=402,
+        json={
+            "error": "Hourly history allowance used up",
+            "code": "hours_allowance",
+            "resumesAt": "2026-11-02T00:00:00Z",
+            "message": "This account has stored 100 hours of hourly history in the last 30 days.",
+        },
+    )
+
+    result = await client.async_import_hours("imp-1", b"")
+
+    assert result.outcome is ImportOutcome.HOURS_ALLOWANCE_SPENT
+    assert result.resumes_at is not None and result.resumes_at.day == 2
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "outcome"),
+    [
+        (402, {"error": "Import allowance used up"}, ImportOutcome.ALLOWANCE_SPENT),
+        (403, {"error": "Account scheduled for deletion"}, ImportOutcome.FORBIDDEN),
+        (404, {"error": "No import with that id on this account"}, ImportOutcome.UNKNOWN_IMPORT),
+        (400, {"error": "series is empty"}, ImportOutcome.REJECTED),
+        (413, {"error": "at most 5000 hours per request"}, ImportOutcome.REJECTED),
+    ],
+)
+async def test_every_hours_refusal_is_read_as_the_readings_endpoints_are(
+    client, aioclient_mock, status, body, outcome
+) -> None:
+    aioclient_mock.post(HOURS_URL, status=status, json=body)
+
+    assert (await client.async_import_hours("imp-1", b"")).outcome is outcome
+
+
+async def test_a_tag_historian_without_the_hours_endpoint_is_not_an_unknown_import(
+    client, aioclient_mock
+) -> None:
+    """A route that is not there answers 404 with no body; "no such import" has one."""
+    aioclient_mock.post(HOURS_URL, status=404)
+
+    assert (await client.async_import_hours("imp-1", b"")).outcome is ImportOutcome.NOT_SUPPORTED
+
+
+async def test_a_503_that_stored_part_of_the_batch_says_how_much(client, aioclient_mock) -> None:
+    """The resend finds those hours as duplicates; the importer counts them as stored, once."""
+    aioclient_mock.post(
+        HOURS_URL,
+        status=503,
+        json={"error": "import_unavailable", "reason": "months_not_ready", "stored": 24},
+        headers={"Retry-After": "60"},
+    )
+
+    result = await client.async_import_hours("imp-1", b"")
+
+    assert result.outcome is ImportOutcome.RETRY
+    assert result.retry_after == 60
+    assert result.stored == 24
+
+
 # --------------------------------------------------------------------------
 # Renaming and merging tags (renames.py)
 # --------------------------------------------------------------------------
@@ -560,3 +699,12 @@ async def test_a_refused_key_on_the_proposal_is_the_auth_error(client, aioclient
 
     with pytest.raises(TagHistorianAuthError):
         await client.async_propose_place(59.3, 18.1)
+
+
+async def test_the_time_zone_is_proposed_as_home_assistants(client, aioclient_mock) -> None:
+    """The same endpoint as the place, and like the place only ever a proposal."""
+    aioclient_mock.post(PROPOSAL_URL, status=200, json={"timeZone": {"id": "Europe/Stockholm"}})
+
+    assert await client.async_propose_time_zone("Europe/Stockholm") is True
+
+    assert aioclient_mock.mock_calls[0][2] == {"timeZone": "Europe/Stockholm", "source": "ha"}

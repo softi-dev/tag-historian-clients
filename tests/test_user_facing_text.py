@@ -60,6 +60,7 @@ from custom_components.tag_historian.const import (
     PRICING_URL,
 )
 from custom_components.tag_historian.forwarder import INFLIGHT_WAIT_SECONDS
+from custom_components.tag_historian.importer import NO_STATISTICS_SENTENCE
 
 from .conftest import STUB_ACCOUNT, make_client
 
@@ -253,6 +254,7 @@ async def test_every_issue_string_gets_the_placeholders_it_asks_for(
     repairs.async_raise_forbidden_issue(hass, entry, "Confirm your email address.")
     repairs.async_maybe_raise_unavailable_issue(hass, entry, 3600)
     renames.async_raise_renamed_issue(hass, entry, "sensor.energy", "sensor.energy_2", merge=False)
+    repairs.async_raise_bring_years_issue(hass, entry)
 
     registry = ir.async_get(hass)
     raised = [
@@ -260,7 +262,7 @@ async def test_every_issue_string_gets_the_placeholders_it_asks_for(
         for issue in registry.issues.values()
         if issue.domain == DOMAIN
     ]
-    assert len(raised) == 5, "every card this integration can show"
+    assert len(raised) == 6, "every card this integration can show"
 
     for issue in raised:
         supplied = set(issue.translation_placeholders or {})
@@ -470,6 +472,12 @@ async def _walk_config_flow(hass: HomeAssistant, client) -> dict[str, dict]:
             },
         )
         seen[result["step_id"]] = result
+
+        # Past a review with nothing to decide, the last screen: the history
+        # Home Assistant already has.
+        if result["step_id"] == "review":
+            result = await hass.config_entries.flow.async_configure(flow_id, {})
+            seen[result["step_id"]] = result
         hass.config_entries.flow.async_abort(flow_id)
     return seen
 
@@ -1153,3 +1161,26 @@ async def test_a_refusal_is_quoted_on_the_card(hass: HomeAssistant, entry) -> No
     flow.hass = hass
 
     assert "former name of 'sensor.meter'" in render_menu(await flow.async_step_init())
+
+
+# --------------------------------------------------------------------------
+# Which entities have no long-term statistics
+# --------------------------------------------------------------------------
+
+
+def test_which_entities_have_no_statistics_is_one_sentence_wherever_it_is_said() -> None:
+    """The import's summary, its screens, the repair card and the README say it alike.
+
+    The sentence is Home Assistant's rule, and selection.py's: binary sensors
+    never get statistics, and the helpers it names can never carry a
+    state_class. Said differently in two places, one of them is wrong.
+    """
+    readme = " ".join(README.split())
+    surfaces = {
+        "config.step.history": TRANSLATIONS["config"]["step"]["history"]["description"],
+        "options.step.import_history": TRANSLATIONS["options"]["step"]["import_history"]["description"],
+        "issues.bring_years": TRANSLATIONS["issues"]["bring_years"]["fix_flow"]["step"]["confirm"]["description"],
+        "README": readme,
+    }
+    for where, text in surfaces.items():
+        assert NO_STATISTICS_SENTENCE in text, f"{where} says it some other way"

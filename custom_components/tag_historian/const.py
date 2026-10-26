@@ -49,6 +49,13 @@ CONF_OWN_TAG_SINCE: Final = "own_tag_since"
 # before it leaves Home Assistant, and again by the API.
 CONF_SHARE_LOCATION: Final = "share_approximate_location"
 
+# Whether the first setup of the entry brings the history Home Assistant
+# already has - its long-term statistics first, then the recorder's readings
+# (importer.py). Asked on the last screen of a new entry, ticked by default.
+# An entry made before that screen existed has no such option at all, and is
+# offered the same through a repair card instead (repairs.py).
+CONF_IMPORT_ON_SETUP: Final = "import_on_setup"
+
 DEFAULT_HOST: Final = "api.taghistorian.com"
 
 # The three write-path limits below are PROTOCOL facts, not plan facts, so they
@@ -103,10 +110,23 @@ IMPORT_TIMEOUT_SECONDS: Final = 30
 IMPORT_RETRY_SECONDS: Final = 30
 IMPORT_MAX_CONNECTION_FAILURES: Final = 10
 
+# Hours per request of the statistics phase. ImportService.MaxHoursPerBatch
+# on the API side; above it the hours endpoint answers 413. A batch is whole
+# UTC months of one entity, so it holds at most six of them.
+MAX_HOURS_PER_REQUEST: Final = 5000
+
 # Services. Stable strings: automations call them by name.
 SERVICE_IMPORT_HISTORY: Final = "import_history"
 ATTR_CONFIG_ENTRY_ID: Final = "config_entry_id"
 ATTR_DAYS: Final = "days"
+# Whether the import brings Home Assistant's long-term statistics too, before
+# the recorder's readings. On unless said otherwise.
+ATTR_STATISTICS: Final = "statistics"
+
+# The furthest back an import may be asked to reach, in days: the ten years
+# Tag Historian keeps hourly history for. The statistics phase goes no
+# further back than the API's own oldestAllowed either way.
+MAX_IMPORT_DAYS: Final = 3650
 
 # .storage keys, one of each per config entry. Version bumps here need a
 # migration; the key names must not change, or a restart forgets what it was
@@ -141,6 +161,7 @@ ISSUE_DAILY_QUOTA: Final = "daily_quota_exceeded"
 ISSUE_WRITE_FORBIDDEN: Final = "write_forbidden"
 ISSUE_SERVICE_UNAVAILABLE: Final = "service_unavailable"
 ISSUE_ENTITY_RENAMED: Final = "entity_renamed"
+ISSUE_BRING_YEARS: Final = "bring_years"
 
 # How long to wait before asking Tag Historian again to rename a tag after it
 # could not be reached. A rename that waits costs nothing - the readings go on

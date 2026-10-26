@@ -35,6 +35,14 @@ an entity that was renamed in Home Assistant, whose tag has not been renamed in
 Tag Historian. It offers to carry the history over to the new name, or to start
 a new tag; until it is answered, the readings go on into the old tag, so
 nothing is lost while it waits (renames.py).
+
+And one is an offer rather than a problem: "Bring the years Home Assistant
+already has", for an entry set up before the setup asked whether to (const.py
+CONF_IMPORT_ON_SETUP). Its fix starts the history import - the long-term
+statistics, then the recorded readings - for every entity the entry keeps
+history for. It is raised once: an entry that has brought them once, by this
+card or any other way, is not asked again, and dismissing it is an answer
+Home Assistant keeps.
 """
 
 from __future__ import annotations
@@ -56,7 +64,9 @@ from .api import LineageOutcome
 from .const import (
     CONF_ENTITIES,
     CONF_SEND_AS,
+    DOCS_URL,
     DOMAIN,
+    ISSUE_BRING_YEARS,
     ISSUE_DAILY_QUOTA,
     ISSUE_ENTITY_RENAMED,
     ISSUE_SERVICE_UNAVAILABLE,
@@ -244,6 +254,33 @@ def async_clear_write_issues(hass: HomeAssistant, entry: ConfigEntry) -> None:
         ir.async_delete_issue(hass, DOMAIN, issue_id(entry, kind))
 
 
+@callback
+def async_raise_bring_years_issue(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Offer an entry set up before the question was asked the history Home Assistant already has.
+
+    Raised again at every load until it is answered, which costs nothing:
+    the registry keeps one issue per id, and keeps a dismissal.
+    """
+    ir.async_create_issue(
+        hass,
+        DOMAIN,
+        issue_id(entry, ISSUE_BRING_YEARS),
+        is_fixable=True,
+        is_persistent=False,
+        severity=ir.IssueSeverity.WARNING,
+        translation_key=ISSUE_BRING_YEARS,
+        translation_placeholders={"account": entry.title},
+        learn_more_url=f"{DOCS_URL}#import-history",
+        data={"entry_id": entry.entry_id},
+    )
+
+
+@callback
+def async_clear_bring_years_issue(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """The years are on their way, by this card or another door."""
+    ir.async_delete_issue(hass, DOMAIN, issue_id(entry, ISSUE_BRING_YEARS))
+
+
 class TagQuotaRepairFlow(RepairsFlow):
     """Reopen the entity picker so the user can deselect down to budget."""
 
@@ -381,6 +418,55 @@ class EntityRenamedRepairFlow(RepairsFlow):
         return self.async_create_entry(data={})
 
 
+class BringYearsRepairFlow(RepairsFlow):
+    """Start bringing the history Home Assistant already has: statistics, then readings."""
+
+    def __init__(self, entry: ConfigEntry) -> None:
+        self._entry = entry
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        return await self.async_step_confirm()
+
+    async def async_step_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        if user_input is None:
+            return self.async_show_form(
+                step_id="confirm",
+                data_schema=vol.Schema({}),
+                description_placeholders={"account": self._entry.title},
+            )
+
+        # Late import: the package's __init__ imports this module.
+        from homeassistant.config_entries import ConfigEntryState
+        from homeassistant.exceptions import HomeAssistantError
+
+        from . import async_start_import
+
+        if self._entry.state is not ConfigEntryState.LOADED:
+            return self.async_abort(reason="not_loaded")
+        if self._entry.runtime_data.importer.running:
+            return self.async_abort(reason="import_running")
+        try:
+            await async_start_import(
+                self.hass,
+                self._entry,
+                list(self._entry.options.get(CONF_ENTITIES, [])),
+                None,
+                statistics=True,
+            )
+        except HomeAssistantError as err:
+            # The same refusals as the action's and the options dialog's,
+            # under the same keys. The card stays, for another try.
+            return self.async_abort(
+                reason=err.translation_key or "import_cannot_connect",
+                description_placeholders=err.translation_placeholders,
+            )
+        return self.async_create_entry(data={})
+
+
 async def async_create_fix_flow(
     hass: HomeAssistant,
     issue_id_: str,
@@ -395,6 +481,8 @@ async def async_create_fix_flow(
         # The entry was removed while the card was on screen. Confirming is
         # then the only honest option - there is nothing left to reconfigure.
         return ConfirmRepairFlow()
+    if issue_id_.startswith(f"{ISSUE_BRING_YEARS}_"):
+        return BringYearsRepairFlow(entry)
     if issue_id_.startswith(f"{ISSUE_ENTITY_RENAMED}_"):
         return EntityRenamedRepairFlow(
             entry,
