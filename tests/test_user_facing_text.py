@@ -744,17 +744,28 @@ def test_the_readme_bounds_the_history_import_carrying_on_as_the_code_does() -> 
     assert f"with a server error {SPELLED[IMPORT_MAX_CONNECTION_FAILURES]} times" in readme
 
 
-def test_the_readme_sends_the_time_zone_to_tag_historians_settings_not_home_assistants() -> None:
-    """The README's bare **Settings** is Home Assistant's, so the account's time zone is said to be in Tag Historian's.
+def _translation_strings(node) -> list[str]:
+    """Every string in en.json, wherever it sits."""
+    if isinstance(node, str):
+        return [node]
+    if isinstance(node, dict):
+        return [s for value in node.values() for s in _translation_strings(value)]
+    return []
+
+
+@pytest.mark.parametrize("surface", ["README", "en.json"])
+def test_the_time_zone_is_sent_to_tag_historians_settings_not_home_assistants(surface: str) -> None:
+    """A bare Settings in Home Assistant is Home Assistant's, so the account's time zone is said to be in Tag Historian's.
 
     The setup screen said "none chosen in Tag Historian's Settings" a round
     before the README's copy of it did; "under Settings" sent the reader to
-    Home Assistant's own.
+    Home Assistant's own. The setup screen and the repair card are held to the
+    same rule as the README.
     """
-    readme = flattened(README)
-    assert "chosen under Settings" not in readme
-    assert "changed under Settings" not in readme
-    assert "none chosen in Tag Historian's Settings" in readme
+    text = flattened(README if surface == "README" else "\n".join(_translation_strings(TRANSLATIONS)))
+    assert "chosen under Settings" not in text
+    assert "changed under Settings" not in text
+    assert "none chosen in Tag Historian's Settings" in text
 
 
 def test_the_repair_card_says_nothing_of_an_update_to_an_entry_that_had_none() -> None:

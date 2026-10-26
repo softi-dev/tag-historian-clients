@@ -1194,7 +1194,9 @@ class _Retries:
     add up to IMPORT_MAX_RETRY_SECONDS (const.py). A turn (_TURN_REASONS) is
     waited for at exactly its Retry-After for the first
     IMPORT_MAX_TURN_RETRIES resends; a batch still refused after that is
-    behind a stalled turn or a long queue, and doubles like any other. The
+    behind a stalled turn or a queue of several accounts, and doubles like
+    any other. A turn's resend leaves a wait the other answers have doubled
+    to as it was. The
     waits are added up rather than read off a clock: the bound is on the
     waits, and the time the sends themselves take comes on top.
     """
@@ -1211,7 +1213,10 @@ class _Retries:
         floor = min(max(1, retry_after), IMPORT_MAX_RETRY_WAIT_SECONDS)
         if turn and self._turns < IMPORT_MAX_TURN_RETRIES:
             self._turns += 1
-            self._wait = wait = floor
+            wait = floor
+            # A wait other answers have already doubled to is kept: a turn
+            # between them does not start their doubling again.
+            self._wait = max(self._wait, floor)
         else:
             self._wait = max(floor, min(self._wait * 2, IMPORT_MAX_RETRY_WAIT_SECONDS))
             wait = self._wait
@@ -1302,11 +1307,10 @@ UNREACHABLE_AGAIN_SENTENCE = (
     "already has is recognised and not stored twice."
 )
 KEY_REFUSED_AGAIN_SENTENCE = (
-    "It stopped because Tag Historian no longer accepts the API key. It had already been "
-    f"carried on by itself at {IMPORT_MAX_RESUMES_ON_LOAD} starts in a row without getting any "
-    "further, so it does not carry on by itself any more, not even with a new key. Enter a new "
-    "one, then run the import again: what Tag Historian already has is recognised and not "
-    "stored twice."
+    "It stopped because Tag Historian no longer accepts the API key. It had already carried on by "
+    f"itself at {IMPORT_MAX_RESUMES_ON_LOAD} starts in a row without getting any further, so it "
+    "will not do so again, even once a new key is entered. Enter a new key, then run the import "
+    "again: what Tag Historian already has is recognised and not stored twice."
 )
 _AGAIN_SENTENCES = {
     STOP_UNREACHABLE: UNREACHABLE_AGAIN_SENTENCE,

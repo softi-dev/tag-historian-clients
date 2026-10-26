@@ -1592,7 +1592,9 @@ async def test_an_hours_batch_that_never_gets_its_turn_backs_off_and_stops_after
     assert no_waiting[IMPORT_MAX_TURN_RETRIES] == 2 * retry_after, "then doubling, as any other 503"
     assert max(no_waiting) == IMPORT_MAX_RETRY_WAIT_SECONDS
     assert sum(no_waiting) >= IMPORT_MAX_RETRY_SECONDS
-    assert len(client.calls) < 25, "not every few seconds for two hours"
+    # The probe and 22 sends ("busy") or 21 ("account_busy"): held at what the
+    # code does, so a larger IMPORT_MAX_TURN_RETRIES has someone look again.
+    assert len(client.calls) <= 23, "not every few seconds for two hours"
 
 
 @pytest.mark.parametrize("reason", ["months_not_ready", "read_failed", "ingest_busy"])
@@ -1609,6 +1611,25 @@ async def test_an_hours_batch_asked_again_for_any_other_reason_waits_longer_each
     await _run(importer)
 
     assert no_waiting == [5, 10, 20]
+
+
+async def test_a_turn_between_other_come_back_laters_does_not_start_their_doubling_again(
+    hass: HomeAssistant, entry, stats, recorder, freezer, no_waiting
+) -> None:
+    """A turn answered between "ingest_busy"s says nothing of the write buffer: it is waited for at its Retry-After, and the doubling goes on from where it was."""
+    freezer.move_to(NOW)
+    stats.add_mean(POWER, NOW - timedelta(days=2), NOW)
+    hass.states.async_set(POWER, "1500", {"unit_of_measurement": "W"})
+    ingest = HoursBatchResult(ImportOutcome.RETRY, retry_after=5, reason="ingest_busy")
+    turn = HoursBatchResult(ImportOutcome.RETRY, retry_after=3, reason="busy")
+
+    client = Client(hours=[None, *[ingest] * 4, turn, ingest])
+    importer = make_importer(hass, entry, client)
+    await importer.async_start([POWER], None, statistics=True)
+    await _run(importer)
+
+    assert importer.progress.status == STATUS_FINISHED
+    assert no_waiting == [5, 10, 20, 40, 3, 80], "the turn at its Retry-After, then on from 40, not from 3"
 
 
 @pytest.mark.parametrize("reason", ["", "busy"])
