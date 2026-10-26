@@ -238,9 +238,9 @@ Four screens:
    or never. The screen also says that this Home Assistant's **time zone** is
    proposed to your account. Your account's days, months and alert times are
    in the account's time zone, and Tag Historian takes Home Assistant's only if
-   the account has none yet - none chosen under Settings, none on the account
-   owner's email channel under Alarms, and none proposed earlier. It is changed
-   under Settings.
+   the account has none yet - none chosen in Tag Historian's Settings, none on
+   the account owner's email channel under Alarms, and none proposed earlier.
+   It is changed in Tag Historian, under Settings.
 
 If your account has no free series at all and everything you picked would need
 one, setup stops and says so rather than finishing with an empty selection.
@@ -248,11 +248,11 @@ one, setup stops and says so rather than finishing with an empty selection.
 **Already set up before version 2026.12.0?** The update keeps your selection,
 your saved buffer and your import's progress as they were. Like a new setup,
 it proposes this Home Assistant's **time zone** to your account from its first
-start - taken only if the account has none yet, as above, and changed under
-Settings. And it puts one card under **Settings → Repairs**: *Bring the years
-Home Assistant already has into Tag Historian*. Submitting it starts the same
-import the fourth screen does; it is asked once, and again if that Tag
-Historian could not take the years yet.
+start - taken only if the account has none yet, as above, and changed in Tag
+Historian, under Settings. And it puts one card under **Settings → Repairs**:
+*Bring the years Home Assistant already has into Tag Historian*. Submitting it
+starts the same import the fourth screen does; it is asked once, and again if
+that Tag Historian could not take the years yet.
 
 Change any of it later: **Settings → Devices & services → Tag Historian →
 Configure → Change what you keep history for.**
@@ -303,9 +303,10 @@ restart carries a running import on where it stopped. One that stopped because
 Tag Historian could not be reached, or was too busy to take it for two hours,
 is carried on by the next start too — for up to three starts in a row that get
 it no further. After that, or after an error that could come back at every
-start (one in this integration, or a server error Tag Historian answers the
-same batch with every time it is sent), it waits for you: the notification
-says so, and running the import again stores nothing twice.
+start (one in this integration or in reading Home Assistant's recorder, or Tag
+Historian answering the same batch with a server error ten times), it waits for
+you: the notification says so, and running the import again stores nothing
+twice.
 
 What Tag Historian holds an import to. The readings' allowance, your plan's
 full-resolution window, the tag limit and the storage cap are your own

@@ -55,6 +55,7 @@ from custom_components.tag_historian.const import (
     CONF_MIN_INTERVAL,
     DOCS_URL,
     DOMAIN,
+    IMPORT_MAX_CONNECTION_FAILURES,
     IMPORT_MAX_RESUMES_ON_LOAD,
     IMPORT_MAX_RETRY_SECONDS,
     ISSUE_DAILY_QUOTA,
@@ -740,6 +741,20 @@ def test_the_readme_bounds_the_history_import_carrying_on_as_the_code_does() -> 
     readme = flattened(README)
     assert f"too busy to take it for {SPELLED[IMPORT_MAX_RETRY_SECONDS // 3600]} hours" in readme
     assert f"up to {SPELLED[IMPORT_MAX_RESUMES_ON_LOAD]} starts in a row" in readme
+    assert f"with a server error {SPELLED[IMPORT_MAX_CONNECTION_FAILURES]} times" in readme
+
+
+def test_the_readme_sends_the_time_zone_to_tag_historians_settings_not_home_assistants() -> None:
+    """The README's bare **Settings** is Home Assistant's, so the account's time zone is said to be in Tag Historian's.
+
+    The setup screen said "none chosen in Tag Historian's Settings" a round
+    before the README's copy of it did; "under Settings" sent the reader to
+    Home Assistant's own.
+    """
+    readme = flattened(README)
+    assert "chosen under Settings" not in readme
+    assert "changed under Settings" not in readme
+    assert "none chosen in Tag Historian's Settings" in readme
 
 
 def test_the_repair_card_says_nothing_of_an_update_to_an_entry_that_had_none() -> None:

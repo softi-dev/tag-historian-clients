@@ -105,8 +105,10 @@ IMPORT_BATCH_SIZE: Final = 2000
 IMPORT_TIMEOUT_SECONDS: Final = 30
 
 # How long the import waits after a socket error before it tries the same
-# batch again, and how many times in a row it does before it stops - stopped,
-# not finished: running the action again carries on where it left off.
+# batch again, and how many failed sends of one batch it allows before it
+# stops - stopped, not finished: running the action again carries on where it
+# left off. A 429/503 between two failures is a wait, not a failure, and does
+# not start the count again.
 IMPORT_RETRY_SECONDS: Final = 30
 IMPORT_MAX_CONNECTION_FAILURES: Final = 10
 
@@ -116,18 +118,33 @@ IMPORT_MAX_CONNECTION_FAILURES: Final = 10
 # ready yet, the deploy's grace at most half an hour - so a batch still not
 # taken after two hours is not "a moment": the import stops as unreachable and
 # carries on at the next start, rather than asking every 15 seconds for good
-# (each ask a warning in Tag Historian's log). Between sends the wait doubles,
-# with the answer's Retry-After as its floor. The hours endpoint's turns
-# ("busy", "account_busy") are the exception: they are sent again at their
-# Retry-After every time, within the same two hours, because the API keeps
-# the turn for a refused batch only until its Retry-After and a second past it.
+# (each ask one more request for Tag Historian to answer). Between sends the
+# wait doubles, with the answer's Retry-After as its floor. The hours
+# endpoint's turns ("busy", "account_busy") are the exception for their first
+# IMPORT_MAX_TURN_RETRIES resends: those are sent at exactly Retry-After, and
+# only then does the wait double, within the same two hours
+# (importer._TURN_REASONS says why each is resent that way).
+# taghistorian.com/docs/home-assistant-hacs quotes the two hours, as the
+# README does; change both with it.
 IMPORT_MAX_RETRY_SECONDS: Final = 2 * 60 * 60
 IMPORT_MAX_RETRY_WAIT_SECONDS: Final = 15 * 60
+
+# How many times one hours batch refused for its turn ("busy", "account_busy")
+# is sent again at exactly its Retry-After before it waits like any other 503.
+# The API keeps the hours turn ("busy") free for a refused batch until its
+# retry is due and renews that at every refusal, so beside one other import
+# the batch gets in at the first or second resend; three cover a batch ahead
+# of it of some fifteen seconds. One still refused after that is behind a
+# stalled turn or a queue of many accounts, where a send every three seconds
+# for two hours of waits would be some 2 400 sends.
+IMPORT_MAX_TURN_RETRIES: Final = 3
 
 # How many loads in a row carry a paused import on by themselves without it
 # getting any further (importer.HistoryImporter.async_load). A Tag Historian
 # that is down comes back; a batch that fails the same way every time does
 # not, and carried on at every start it would be sent for good.
+# taghistorian.com/docs/home-assistant-hacs quotes the three starts, as the
+# README does; change both with it.
 IMPORT_MAX_RESUMES_ON_LOAD: Final = 3
 
 # Hours per request of the statistics phase. ImportService.MaxHoursPerBatch

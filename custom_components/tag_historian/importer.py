@@ -25,7 +25,7 @@ replaced through the reauthentication card, carries on by itself at the next
 start (:meth:`HistoryImporter.async_load`), a few starts in a row at most
 while it gets no further. An error that could come back at every start -
 this integration's own, or a batch Tag Historian answers with a 500 at every
-one of its sends - stops it until it is run again (``STOP_FAILED``); one
+send of it that fails - stops it until it is run again (``STOP_FAILED``); one
 entity whose statistics the recorder cannot give only leaves those
 statistics out.
 
@@ -142,6 +142,7 @@ from .const import (
     IMPORT_MAX_RESUMES_ON_LOAD,
     IMPORT_MAX_RETRY_SECONDS,
     IMPORT_MAX_RETRY_WAIT_SECONDS,
+    IMPORT_MAX_TURN_RETRIES,
     IMPORT_RETRY_SECONDS,
     LOGGER,
     MAX_HOURS_PER_REQUEST,
@@ -177,7 +178,7 @@ STOP_UNKNOWN_IMPORT = "import_unknown"
 STOP_REJECTED = "rejected"
 # An error that is not the network: one of this integration's own, a recorder
 # that answers in a way it does not know, or Tag Historian answering the same
-# batch with a 500 at every one of its sends (_gave_up). Not carried on by
+# batch with a 500 at every send of it that fails (_gave_up). Not carried on by
 # itself - it could meet the same error at every start - so it waits for the
 # import to be run again, as a forbidden stop does.
 STOP_FAILED = "failed"
@@ -1168,13 +1169,20 @@ class HistoryImporter:
         )
 
 
-# The hours endpoint's 503s that are its turns, not trouble: "busy" is the
-# process's hours turn (HoursAdmission), "account_busy" the account's own. The
-# API keeps the turn free for a refused batch until its Retry-After is up and
-# a second past it, and no longer, so the batch is sent again at Retry-After
-# every time: a doubled wait came back after the turn had gone to another
-# account, was refused again, and got in less the longer it waited. The
-# readings endpoint's "busy" is the write buffer, and doubles.
+# The hours endpoint's 503s that are its turns, not trouble: for its first
+# IMPORT_MAX_TURN_RETRIES resends a batch refused with one is sent again at
+# exactly its Retry-After, and only then with the doubling wait (_Retries).
+# "busy" is Tag Historian's turn for hours, handed out in turn across
+# accounts. The API keeps it free for a refused batch until its Retry-After
+# is up and a second past it, and no longer, so a doubled wait came back
+# after the turn had gone to another account. "account_busy" is the
+# account's own turn. It keeps nothing for a refused batch: another batch of
+# the same account holds it, either another import running at the same time
+# or an earlier send of this batch the API is still taking. Each send waits
+# up to 2 s in line for it, and the readings endpoint's batches wait in that
+# line for as long as it takes, so a doubled wait only gives this batch fewer
+# chances to be in line when the turn comes free. The readings endpoint's
+# "busy" is the write buffer, and doubles from the start.
 _TURN_REASONS = frozenset({"busy", "account_busy"})
 
 
@@ -1184,22 +1192,26 @@ class _Retries:
     The wait doubles from one answer to the next, with Retry-After as its
     floor and IMPORT_MAX_RETRY_WAIT_SECONDS as its ceiling, until the waits
     add up to IMPORT_MAX_RETRY_SECONDS (const.py). A turn (_TURN_REASONS) is
-    waited for at exactly its Retry-After and does not double, but counts
-    towards the same two hours. Added up rather than read off a clock, so the
-    bound is the same however long the sends take.
+    waited for at exactly its Retry-After for the first
+    IMPORT_MAX_TURN_RETRIES resends; a batch still refused after that is
+    behind a stalled turn or a long queue, and doubles like any other. The
+    waits are added up rather than read off a clock: the bound is on the
+    waits, and the time the sends themselves take comes on top.
     """
 
     def __init__(self) -> None:
         self._waited = 0
         self._wait = 0
+        self._turns = 0
 
     def next_wait(self, retry_after: int, *, turn: bool = False) -> int | None:
         """Seconds to wait before the next send, or None when this batch has waited long enough."""
         if self._waited >= IMPORT_MAX_RETRY_SECONDS:
             return None
         floor = min(max(1, retry_after), IMPORT_MAX_RETRY_WAIT_SECONDS)
-        if turn:
-            wait = floor
+        if turn and self._turns < IMPORT_MAX_TURN_RETRIES:
+            self._turns += 1
+            self._wait = wait = floor
         else:
             self._wait = max(floor, min(self._wait * 2, IMPORT_MAX_RETRY_WAIT_SECONDS))
             wait = self._wait
@@ -1208,7 +1220,10 @@ class _Retries:
 
 
 def _gave_up(every_one_a_500: bool) -> str:
-    """Why an import stops once a batch has failed IMPORT_MAX_CONNECTION_FAILURES times in a row.
+    """Why an import stops once IMPORT_MAX_CONNECTION_FAILURES sends of one batch have failed.
+
+    A 429/503 between two failures is a wait, not a failure: it neither counts
+    nor starts the count again.
 
     Unreachable is carried on at the next start (_RESUMED_ON_LOAD). Only a
     batch Tag Historian answered with a 500 at every send is taken to be the
@@ -1268,11 +1283,12 @@ _STOP_SENTENCES = {
     STOP_UNKNOWN_IMPORT: "It stopped because Tag Historian no longer knows this import. Start a new one.",
     STOP_REJECTED: "It stopped because Tag Historian refused a batch it could not read.",
     STOP_FAILED: (
-        "It stopped on an error that could come back every time it is tried, so it does not "
-        "carry on by itself: an error in this integration, or Tag Historian answering the same "
-        f"batch with a server error {IMPORT_MAX_CONNECTION_FAILURES} times in a row. Run the "
-        "import again later, or after updating the integration if the error below is its own: "
-        "what Tag Historian already has is recognised and not stored twice."
+        "It stopped on an error that may come back every time it is tried, so it does not carry "
+        "on by itself: an error in this integration or in reading Home Assistant's recorder, or "
+        "Tag Historian answering the same batch with a server error "
+        f"{IMPORT_MAX_CONNECTION_FAILURES} times. Run the import again later; if it stops the "
+        "same way, look for an update of the integration in HACS. What Tag Historian already has "
+        "is recognised and not stored twice."
     ),
 }
 
@@ -1286,9 +1302,11 @@ UNREACHABLE_AGAIN_SENTENCE = (
     "already has is recognised and not stored twice."
 )
 KEY_REFUSED_AGAIN_SENTENCE = (
-    "It stopped because Tag Historian no longer accepts the API key, after carrying on by "
-    "itself, and it does not carry on by itself any more. Enter a new one, then run the import "
-    "again: what Tag Historian already has is recognised and not stored twice."
+    "It stopped because Tag Historian no longer accepts the API key. It had already been "
+    f"carried on by itself at {IMPORT_MAX_RESUMES_ON_LOAD} starts in a row without getting any "
+    "further, so it does not carry on by itself any more, not even with a new key. Enter a new "
+    "one, then run the import again: what Tag Historian already has is recognised and not "
+    "stored twice."
 )
 _AGAIN_SENTENCES = {
     STOP_UNREACHABLE: UNREACHABLE_AGAIN_SENTENCE,
