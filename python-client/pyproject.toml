@@ -13,7 +13,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "taghistorian"
-version = "0.1.0"
+version = "0.2.0"
 description = "Synchronous Python client for the Tag Historian time-series API"
 readme = "README.md"
 requires-python = ">=3.9"

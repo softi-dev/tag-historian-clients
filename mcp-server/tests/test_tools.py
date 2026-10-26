@@ -17,6 +17,7 @@ from taghistorian import (
     TagHistorianAPIError,
     TagHistorianConnectionError,
     TagHistorianRateLimitError,
+    TagHistorianUnavailableError,
     TagListResult,
     WriteResult,
 )
@@ -211,6 +212,28 @@ async def test_rate_limit_error_surfaces_retry_after_in_the_message(mock_client)
     text = result.content[0].text
     assert "7" in text
     assert "4 attempt" in text
+
+
+async def test_unavailable_503_is_not_called_a_rate_limit_or_a_bad_key(mock_client):
+    mock_client.read.side_effect = TagHistorianUnavailableError(
+        "Tag Historian is temporarily unavailable",
+        503,
+        retry_after=40.0,
+        attempts=8,
+        reason="sign_in_unavailable",
+        waited=280.0,
+    )
+    mcp = build_server(mock_client, make_config())
+
+    result = await call_tool(mcp, "read_measurements", {"tag_name": "t"})
+
+    assert result.isError is True
+    text = result.content[0].text
+    assert "temporarily unavailable" in text
+    assert "not a rate limit" in text
+    assert "says nothing about the key" in text
+    assert "rate-limiting" not in text
+    assert "8 attempt" in text
 
 
 async def test_connection_error_surfaces_as_clean_tool_error_not_a_crash(mock_client):

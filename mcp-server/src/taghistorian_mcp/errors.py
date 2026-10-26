@@ -15,7 +15,7 @@ crash the process" into "a tool call failed with a message actually worth
 showing someone" - the two are not the same bar, and this server deliberately
 holds itself to the second one.
 
-``@handle_client_errors`` wraps a tool function and re-raises the three
+``@handle_client_errors`` wraps a tool function and re-raises the
 ``taghistorian`` exception types (plus ``ValueError``, for
 ``write_batch_measurements``' over-5000-item check) as
 ``mcp.server.fastmcp.exceptions.ToolError`` with a purpose-written message.
@@ -35,6 +35,7 @@ from taghistorian import (
     TagHistorianAPIError,
     TagHistorianConnectionError,
     TagHistorianRateLimitError,
+    TagHistorianUnavailableError,
 )
 
 _F = TypeVar("_F", bound=Callable)
@@ -49,11 +50,28 @@ def _describe(exc: Exception) -> str:
         # request was wrong".
         retry_hint = (
             f"; the server asked to wait {exc.retry_after:g}s and was still "
-            f"busy after {exc.attempts} attempt(s)"
+            f"limiting after {exc.attempts} attempt(s)"
             if exc.retry_after is not None
-            else f"; still busy after {exc.attempts} attempt(s)"
+            else f"; still limited after {exc.attempts} attempt(s)"
         )
-        return f"Tag Historian is rate-limited or temporarily overloaded (HTTP {exc.status_code}){retry_hint}. Try again shortly."
+        return f"Tag Historian is rate-limiting this account (HTTP {exc.status_code}){retry_hint}. Try again shortly."
+
+    if isinstance(exc, TagHistorianUnavailableError):
+        # A 503, also a subclass of TagHistorianAPIError, and not a rate
+        # limit: Tag Historian could not serve the request for a while -
+        # a full write buffer, or a key it could not check just now. Said
+        # so plainly, so the LLM does not tell its user to slow down, or to
+        # replace a key nothing is known to be wrong with.
+        cause = (
+            " - it could not check the API key just now, which says nothing about the key itself"
+            if exc.reason == "sign_in_unavailable"
+            else ""
+        )
+        return (
+            f"Tag Historian is temporarily unavailable (HTTP {exc.status_code}){cause}; "
+            f"still unavailable after {exc.attempts} attempt(s) and {exc.waited:g}s of waiting. "
+            "This is not a rate limit. Try again in a few minutes."
+        )
 
     if isinstance(exc, TagHistorianAPIError):
         detail = f" Details: {'; '.join(exc.violations)}" if exc.violations else ""

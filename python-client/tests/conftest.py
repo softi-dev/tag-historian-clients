@@ -22,11 +22,16 @@ def make_client(sleeps):
     forgotten-mock bug fails fast instead of hanging.
     """
 
-    def _make(max_retries: int = 3, backoff_base: float = 1.0) -> TagHistorianClient:
+    def _make(
+        max_retries: int = 3,
+        backoff_base: float = 1.0,
+        unavailable_budget: float = 300.0,
+    ) -> TagHistorianClient:
         retry = RetryConfig(
             max_retries=max_retries,
             backoff_base=backoff_base,
             sleep=sleeps.append,
+            unavailable_budget=unavailable_budget,
         )
         return TagHistorianClient(api_key="test-key", base_url=BASE_URL, retry=retry)
 

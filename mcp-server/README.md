@@ -150,10 +150,12 @@ refuses a bigger batch whole with a `400`, which comes back to the LLM as a tool
 ## Error handling
 
 This process is meant to stay running for the life of an MCP host session - potentially hours -
-against a real account. A single failed call (a typo'd tag name, a network blip, a rate limit)
-never crashes the whole server or ends your session: it comes back to the LLM as a clear,
-specific tool-level error message (what went wrong, and the relevant HTTP status/retry
-information where applicable), not a stack trace and not a dropped connection.
+against a real account. A single failed call (a typo'd tag name, a network blip, a rate limit,
+Tag Historian briefly unavailable) never crashes the whole server or ends your session: it comes
+back to the LLM as a clear, specific tool-level error message (what went wrong, and the relevant
+HTTP status/retry information where applicable), not a stack trace and not a dropped connection.
+A `503` is told apart from a rate limit: it says Tag Historian is temporarily unavailable - and,
+when the API could not check the key just now, that this says nothing about the key.
 
 ## Development
 
