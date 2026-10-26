@@ -68,6 +68,7 @@
       "key_not_checked": "Tag Historian could not check the key just now. It answered, so the address is right, and this says nothing about the key itself. Try again in a minute.",
       "unavailable": "That address answered, but said it cannot serve this just now. Try again in a minute; if it keeps saying so, check the address.",
       "unavailable_known_host": "Tag Historian answered, but could not do this just now. Try again in a minute.",
+      "cannot_connect_known_host": "Could not get through to Tag Historian just now. Check that Home Assistant can get out to the internet, and try again in a minute.",
       "invalid_auth": "Tag Historian did not accept that key. Check you copied all of it, and that it has not been revoked.",
       "read_only_key": "That key's scope is Read. It can look at your data but not add to it - create a key with Scope set to Write instead.",
       "account_inactive": "That key belongs to an account that is not active. Sign in to the Tag Historian dashboard to see why.",

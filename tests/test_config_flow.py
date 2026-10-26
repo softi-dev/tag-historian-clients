@@ -379,6 +379,22 @@ async def test_a_503_after_the_first_call_is_still_not_cannot_connect(
     assert result["errors"] == {"base": expected_error}
 
 
+@pytest.mark.parametrize("call", ["async_get_quota", "async_get_tag_names"])
+async def test_a_failed_call_after_the_first_does_not_send_to_the_address(
+    hass: HomeAssistant, call
+) -> None:
+    """/api/customers/me answered with this account, so a later failure - a
+    dropped connection, a timeout, a 502 - is not the address either."""
+    client = make_client()
+    getattr(client, call).side_effect = TagHistorianConnectionError(
+        "/api/usage/limits answered 502"
+    )
+
+    result = await _start(hass, client)
+
+    assert result["errors"] == {"base": "cannot_connect_known_host"}
+
+
 async def test_an_inactive_account_is_named_as_such(hass: HomeAssistant) -> None:
     client = make_client(account={**STUB_ACCOUNT, "isActive": False})
     result = await _start(hass, client)
@@ -453,17 +469,29 @@ async def test_reauth_replaces_the_key_in_place(hass: HomeAssistant) -> None:
 
 
 @pytest.mark.parametrize(
-    ("reason", "expected_error"),
-    [("sign_in_unavailable", "key_not_checked"), ("", "unavailable_known_host")],
+    ("side_effect", "expected_error"),
+    [
+        (
+            TagHistorianUnavailableError(
+                "/api/customers/me", reason="sign_in_unavailable", retry_after=40
+            ),
+            "key_not_checked",
+        ),
+        (
+            TagHistorianUnavailableError("/api/customers/me", retry_after=40),
+            "unavailable_known_host",
+        ),
+        (TagHistorianConnectionError("dns"), "cannot_connect_known_host"),
+    ],
 )
 async def test_reauth_says_a_key_not_checked_and_keeps_the_old_one(
-    hass: HomeAssistant, reason, expected_error
+    hass: HomeAssistant, side_effect, expected_error
 ) -> None:
     """Not "did not accept that key": it was not looked at. Asked again, it can be.
 
     A 503 without the reason is not called a key not checked either - only
     "could not do this just now", with nothing about an address this form
-    does not show.
+    does not show. Nor is a connection that failed sent to that address.
     """
     entry = MockConfigEntry(
         domain=DOMAIN, unique_id=STUB_ACCOUNT["customerId"], data=CREDENTIALS
@@ -471,9 +499,7 @@ async def test_reauth_says_a_key_not_checked_and_keeps_the_old_one(
     entry.add_to_hass(hass)
 
     client = make_client()
-    client.async_validate.side_effect = TagHistorianUnavailableError(
-        "/api/customers/me", reason=reason, retry_after=40
-    )
+    client.async_validate.side_effect = side_effect
 
     with patch(CLIENT_PATH, return_value=client), patch(SETUP_PATH, return_value=True):
         result = await hass.config_entries.flow.async_init(
@@ -514,6 +540,13 @@ async def test_setup_and_reauth_wait_long_enough_for_a_key_not_checked(
         domain=DOMAIN, unique_id=STUB_ACCOUNT["customerId"], data=CREDENTIALS
     )
     entry.add_to_hass(hass)
+    # The reauthentication succeeds and reloads the entry with its setup
+    # patched out; what async_unload_entry stops at teardown, so it unloads
+    # cleanly rather than with a traceback.
+    entry.runtime_data = SimpleNamespace(
+        importer=SimpleNamespace(running=False, async_stop=AsyncMock()),
+        forwarder=SimpleNamespace(async_shutdown=AsyncMock()),
+    )
     built: list[dict] = []
 
     with patch(CLIENT_PATH, side_effect=_recording(built)), patch(

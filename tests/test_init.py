@@ -80,6 +80,29 @@ async def test_setup_creates_sensors_whose_values_come_from_the_api(
     assert entry.state is ConfigEntryState.NOT_LOADED
 
 
+async def test_the_entrys_own_client_keeps_ten_seconds_in_all(
+    hass: HomeAssistant,
+) -> None:
+    """Only the screens wait DIALOG_TIMEOUT_SECONDS for an answer. The client
+    the forwarder writes with is built without answer_within and keeps
+    HTTP_TIMEOUT_SECONDS: its bounds are built on it (test_api)."""
+    entry = make_entry(hass, ["sensor.house_power"])
+    built: list[dict] = []
+
+    def _build(*args, **kwargs):
+        built.append(kwargs)
+        return make_client()
+
+    with patch(CLIENT_PATH, side_effect=_build):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert built == [{}]
+
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+
+
 async def test_a_dead_api_defers_setup_rather_than_loading_a_silent_entry(
     hass: HomeAssistant,
 ) -> None:

@@ -117,8 +117,23 @@ from .line_protocol import (
 from .renames import registry_ids, removed_since, renamed_since
 
 # How long to wait after a connection error before trying again. Shorter than
-# any Retry-After the API sends, because a socket error is usually a blip.
+# any Retry-After the API sends, because a socket error is usually a blip. The
+# same wait is used for a 429 or 503 that names no wait (_answered_wait).
 CONNECTION_RETRY_SECONDS = 30
+
+
+def _answered_wait(retry_after: int) -> float:
+    """How long to wait after a 429 or a 503, whether it said how long or not.
+
+    Tag Historian always asks for a second or more, and that is honoured
+    exactly. No header, a 0, or one that does not parse is in practice
+    something in front of it answering in its place - a gateway with nothing
+    behind it - which says no more than a host that did not answer: it is
+    waited for as long as one, not asked again every second for as long as
+    the outage lasts, by every Home Assistant at once. (The daily quota's
+    countdown reaching 0 at midnight costs half a minute at most.)
+    """
+    return retry_after if retry_after >= 1 else CONNECTION_RETRY_SECONDS
 
 # How many requests the shutdown flush is allowed to make. Home Assistant is
 # waiting on this, so the buffer gets a few batches and not a drain loop; the
@@ -1438,7 +1453,7 @@ class StateForwarder:
                 self.hass, self.entry, result.retry_after
             )
             self._writes_failing()
-            self._pause(result.retry_after)
+            self._pause(_answered_wait(result.retry_after))
             return
 
         if result.outcome in (WriteOutcome.BACK_PRESSURE, WriteOutcome.UNAVAILABLE):
@@ -1462,7 +1477,7 @@ class StateForwarder:
                 (now - self._unavailable_since).total_seconds(),
             )
             self._writes_failing()
-            self._pause(result.retry_after)
+            self._pause(_answered_wait(result.retry_after))
             return
 
         # Answered for good either way below: the watermark moves over the
@@ -1490,7 +1505,8 @@ class StateForwarder:
         """Put an unsent batch back at the FRONT of where it came from, preserving order.
 
         Only ever called where the API gave a definite answer that the batch
-        was NOT taken - a 401, a socket error, a 429, a 503. That is the whole
+        was NOT taken - a 401, a socket error or a gateway's 502 or 504, a
+        429, a 503. That is the whole
         difference from :meth:`_abandon_inflight`, which handles the case where
         there is no answer at all.
         """
@@ -1530,9 +1546,10 @@ class StateForwarder:
         then drops it (and set up for InfluxDB 2.x never sees the refusal), so
         an over-quota Home Assistant loses the rest of the day's readings.
 
-        The floor of one second is for a malformed or absent header only. It is
-        deliberately NOT a fallback that shortens a long wait: a 429 with a
-        header we failed to parse still gets a real pause.
+        The floor of one second only keeps a zero from becoming a busy loop.
+        A 429 or a 503 that names no usable wait has already been given
+        CONNECTION_RETRY_SECONDS by :func:`_answered_wait`, so a missing or
+        unparsable header never means a request a second.
         """
         self._paused = True
         self._cancel_timer()

@@ -341,6 +341,11 @@ class HistoryImporter:
         )
         self.progress = ImportProgress()
         self._task: asyncio.Task[None] | None = None
+        # Set while async_start awaits, before there is a task: the start may
+        # wait up to DIALOG_TIMEOUT_SECONDS for Tag Historian's answer, and a
+        # second door (the action, Configure, the card) must not start another
+        # import meanwhile.
+        self._starting = False
 
     @property
     def running(self) -> bool:
@@ -503,64 +508,68 @@ class HistoryImporter:
         when the import cannot be started (TagHistorianImportRefused with the
         API's own sentence, an auth or connection error).
         """
-        if self.running:
+        if self.running or self._starting:
             raise ImportAlreadyRunning
 
-        session = await self._client.async_start_import(hours=statistics)
+        self._starting = True
+        try:
+            session = await self._client.async_start_import(hours=statistics)
 
-        now = dt_util.utcnow()
-        since = session.window_start
-        if days is not None:
-            since = max(since, now - timedelta(days=days))
-        # The oldest hour the statistics phase reads: ``days`` back, at most
-        # ten years. The readings stop at the plan's window by themselves.
-        statistics_since = now - timedelta(days=min(days or MAX_IMPORT_DAYS, MAX_IMPORT_DAYS))
+            now = dt_util.utcnow()
+            since = session.window_start
+            if days is not None:
+                since = max(since, now - timedelta(days=days))
+            # The oldest hour the statistics phase reads: ``days`` back, at most
+            # ten years. The readings stop at the plan's window by themselves.
+            statistics_since = now - timedelta(days=min(days or MAX_IMPORT_DAYS, MAX_IMPORT_DAYS))
 
-        self.progress = ImportProgress(
-            status=STATUS_RUNNING,
-            import_id=session.import_id,
-            started_at=_iso(session.started_at),
-            window_start=_iso(session.window_start),
-            since=_iso(since),
-            entities=list(entity_ids),
-            ends=self._live_lines(entity_ids),
-            allowance_remaining=session.allowance.remaining,
-            registry_ids=registry_ids(self.hass, entity_ids),
-            statistics=statistics,
-            phase=PHASE_STATISTICS if statistics else PHASE_READINGS,
-            statistics_since=_iso(statistics_since),
-            # The import's own start when it is this import that sets it, so
-            # a stop can tell its own stamp from one an earlier import left.
-            statistics_started_at=self.progress.statistics_started_at
-            or (_iso(session.started_at) if statistics else None),
-        )
-        await self._async_save()
-        if statistics:
-            # Only an import left unbounded - no days, or the dialog's full
-            # ten years - reaches as far back as the statistics go.
-            reach = (
-                "as far back as they go, up to ten years"
-                if days is None or days >= MAX_IMPORT_DAYS
-                else f"back to {statistics_since:%Y-%m-%d}"
+            self.progress = ImportProgress(
+                status=STATUS_RUNNING,
+                import_id=session.import_id,
+                started_at=_iso(session.started_at),
+                window_start=_iso(session.window_start),
+                since=_iso(since),
+                entities=list(entity_ids),
+                ends=self._live_lines(entity_ids),
+                allowance_remaining=session.allowance.remaining,
+                registry_ids=registry_ids(self.hass, entity_ids),
+                statistics=statistics,
+                phase=PHASE_STATISTICS if statistics else PHASE_READINGS,
+                statistics_since=_iso(statistics_since),
+                # The import's own start when it is this import that sets it, so
+                # a stop can tell its own stamp from one an earlier import left.
+                statistics_started_at=self.progress.statistics_started_at
+                or (_iso(session.started_at) if statistics else None),
             )
-            started = (
-                f"Bringing the history Home Assistant already has for {len(entity_ids)} entities "
-                f"into Tag Historian: first its hourly long-term statistics, {reach}, then the "
-                f"recorded readings from {since:%Y-%m-%d %H:%M} UTC."
+            await self._async_save()
+            if statistics:
+                # Only an import left unbounded - no days, or the dialog's full
+                # ten years - reaches as far back as the statistics go.
+                reach = (
+                    "as far back as they go, up to ten years"
+                    if days is None or days >= MAX_IMPORT_DAYS
+                    else f"back to {statistics_since:%Y-%m-%d}"
+                )
+                started = (
+                    f"Bringing the history Home Assistant already has for {len(entity_ids)} entities "
+                    f"into Tag Historian: first its hourly long-term statistics, {reach}, then the "
+                    f"recorded readings from {since:%Y-%m-%d %H:%M} UTC."
+                )
+            else:
+                started = (
+                    f"Importing the recorded history of {len(entity_ids)} entities into Tag Historian, "
+                    f"from {since:%Y-%m-%d %H:%M} UTC."
+                )
+            persistent_notification.async_create(
+                self.hass,
+                f"{started} Progress is on the \"Tag Historian history import\" sensor, and this "
+                "notification says when it is done.",
+                title="Tag Historian history import",
+                notification_id=NOTIFICATION_ID.format(entry_id=self.entry.entry_id),
             )
-        else:
-            started = (
-                f"Importing the recorded history of {len(entity_ids)} entities into Tag Historian, "
-                f"from {since:%Y-%m-%d %H:%M} UTC."
-            )
-        persistent_notification.async_create(
-            self.hass,
-            f"{started} Progress is on the \"Tag Historian history import\" sensor, and this "
-            "notification says when it is done.",
-            title="Tag Historian history import",
-            notification_id=NOTIFICATION_ID.format(entry_id=self.entry.entry_id),
-        )
-        self._spawn()
+            self._spawn()
+        finally:
+            self._starting = False
         return self.progress
 
     def _live_lines(self, entity_ids: list[str]) -> dict[str, float]:

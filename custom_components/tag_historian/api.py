@@ -24,7 +24,12 @@ from typing import Any
 import aiohttp
 from yarl import URL
 
-from .const import HTTP_TIMEOUT_SECONDS, IMPORT_TIMEOUT_SECONDS, LOGGER
+from .const import (
+    DIALOG_TIMEOUT_SECONDS,
+    HTTP_TIMEOUT_SECONDS,
+    IMPORT_TIMEOUT_SECONDS,
+    LOGGER,
+)
 
 
 class TagHistorianError(Exception):
@@ -108,6 +113,19 @@ class TagHistorianPermissionError(TagHistorianError):
     """
 
 
+def _no_answer(err: Exception, within: float) -> str:
+    """Why a request got nothing usable back, in words - never an empty string.
+
+    aiohttp's own total timeout is a bare ``TimeoutError`` that prints as
+    nothing: a host that does not answer, or an answer slower than
+    ``within``. This text becomes the ``last_error`` the readings dropped
+    sensor shows, where an empty one is what a clean write leaves behind, so
+    the commonest silent failure must not be the one that says nothing.
+    aiohttp's connect and read timeouts carry text of their own, which is kept.
+    """
+    return str(err) or f"no answer within {within:g} seconds"
+
+
 class WriteOutcome(Enum):
     """What the write endpoint said, in the vocabulary of what to do next.
 
@@ -124,7 +142,10 @@ class WriteOutcome(Enum):
     BACK_PRESSURE = "back_pressure"  # 429 (controller) - our saturation
     UNAVAILABLE = "unavailable"  # 503 - wait for Retry-After
     FORBIDDEN = "forbidden"  # 403/402 - permanent until a human acts
-    REJECTED = "rejected"  # 400/413 - our bug; the batch is unsendable
+    # 400/413, and an unexplained answer of Tag Historian's own (a 500): the
+    # batch is not sent again. A gateway's 502/504 is not this - it raises
+    # TagHistorianConnectionError and the batch is held.
+    REJECTED = "rejected"
 
 
 @dataclass
@@ -384,8 +405,11 @@ class TagHistorianClient:
         The screens pass DIALOG_TIMEOUT_SECONDS, so a 503 the API takes a
         while to send is read as its answer rather than as a host that could
         not be reached; connecting is always bounded by HTTP_TIMEOUT_SECONDS.
-        Writes, imports and proposals keep HTTP_TIMEOUT_SECONDS whatever this
-        says: the forwarder's bounds are built on it.
+        Writes, renames, merges and proposals keep HTTP_TIMEOUT_SECONDS, and
+        import batches IMPORT_TIMEOUT_SECONDS, whatever this says: the
+        forwarder's bounds are built on them. Starting an import always waits
+        DIALOG_TIMEOUT_SECONDS for its answer, whichever client starts it
+        (:meth:`async_start_import`).
         """
         self._session = session
         self._base = self._normalise_host(host)
@@ -438,7 +462,7 @@ class TagHistorianClient:
                     )
                 return await response.json()
         except (TimeoutError, aiohttp.ClientError) as err:
-            raise TagHistorianConnectionError(str(err)) from err
+            raise TagHistorianConnectionError(_no_answer(err, self._answer_within)) from err
 
     async def async_validate(self) -> dict[str, Any]:
         """Prove the key works and return the account it belongs to.
@@ -572,7 +596,9 @@ class TagHistorianClient:
                     )
                 return LineageResult(LineageOutcome.REFUSED, message)
         except (TimeoutError, aiohttp.ClientError) as err:
-            return LineageResult(LineageOutcome.UNAVAILABLE, str(err))
+            return LineageResult(
+                LineageOutcome.UNAVAILABLE, _no_answer(err, HTTP_TIMEOUT_SECONDS)
+            )
 
     async def async_propose_place(self, lat: float, lon: float) -> bool | None:
         """Propose the account's coarse place (``POST /api/account/settings/proposal``).
@@ -636,6 +662,14 @@ class TagHistorianClient:
         of their own, so such an import is started even then - its readings
         are refused instead, batch by batch, and ``allowance.remaining`` says
         so from the start.
+
+        A person always starts an import - the action, Configure, the
+        bring-years card, or the setup's last screen through the entry's
+        background start - and never the forwarder, so it waits
+        DIALOG_TIMEOUT_SECONDS for the answer once connected, whichever client
+        starts it. A 503 for a key that could not be checked, which the API may
+        take up to about half a minute to send, is then read as that answer and
+        not as a host that could not be reached.
         """
         body: dict[str, Any] = {"source": source}
         if hours:
@@ -645,7 +679,12 @@ class TagHistorianClient:
                 self._base.join(URL("/api/import")),
                 headers=self._headers(),
                 json=body,
-                timeout=aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SECONDS),
+                # Like a screen: a slow answer is waited for, connecting stays
+                # bounded by HTTP_TIMEOUT_SECONDS. Nothing on the forwarder's
+                # path waits on this request.
+                timeout=aiohttp.ClientTimeout(
+                    total=DIALOG_TIMEOUT_SECONDS, connect=HTTP_TIMEOUT_SECONDS
+                ),
             ) as response:
                 if response.status == 401:
                     raise TagHistorianAuthError("import")
@@ -661,7 +700,7 @@ class TagHistorianClient:
                     raise TagHistorianConnectionError(f"/api/import answered {response.status}")
                 payload = await response.json()
         except (TimeoutError, aiohttp.ClientError) as err:
-            raise TagHistorianConnectionError(str(err)) from err
+            raise TagHistorianConnectionError(_no_answer(err, DIALOG_TIMEOUT_SECONDS)) from err
 
         return ImportSession(
             import_id=str(payload["importId"]),
@@ -694,7 +733,7 @@ class TagHistorianClient:
                 body = await self._read_error_body(response)
                 return _classify_import(response, body)
         except (TimeoutError, aiohttp.ClientError) as err:
-            raise TagHistorianConnectionError(str(err)) from err
+            raise TagHistorianConnectionError(_no_answer(err, IMPORT_TIMEOUT_SECONDS)) from err
 
     async def async_import_hours(self, import_id: str, gzipped: bytes) -> HoursBatchResult:
         """Send one batch of hourly statistics, already gzipped, and classify the answer.
@@ -725,7 +764,7 @@ class TagHistorianClient:
                 body = await self._read_error_body(response)
                 return _classify_hours_import(response, body, empty=empty)
         except (TimeoutError, aiohttp.ClientError) as err:
-            raise TagHistorianConnectionError(str(err)) from err
+            raise TagHistorianConnectionError(_no_answer(err, IMPORT_TIMEOUT_SECONDS)) from err
 
     async def async_write(self, body: str) -> WriteResult:
         """POST line protocol and classify the answer.
@@ -745,7 +784,7 @@ class TagHistorianClient:
             ) as response:
                 return await self._classify(response)
         except (TimeoutError, aiohttp.ClientError) as err:
-            raise TagHistorianConnectionError(str(err)) from err
+            raise TagHistorianConnectionError(_no_answer(err, HTTP_TIMEOUT_SECONDS)) from err
 
     async def _classify(self, response: aiohttp.ClientResponse) -> WriteResult:
         if response.status == 204:
@@ -753,6 +792,17 @@ class TagHistorianClient:
 
         if response.status == 401:
             raise TagHistorianAuthError("write")
+
+        if response.status in (502, 504):
+            # A gateway in front of Tag Historian that could not reach it
+            # (502) or gave up waiting for it (504) - the hosted ingress with
+            # nothing behind it for a moment, or a proxy in front of a stopped
+            # API. Tag Historian itself did not answer, so this is a host that
+            # cannot be reached: held and tried again like a socket error,
+            # never dropped as a body it could not take. A 504 may have reached
+            # the API, as a write that timed out here may have, and that one
+            # is tried again too.
+            raise TagHistorianConnectionError(f"write answered {response.status}")
 
         body = await self._read_error_body(response)
         message = str(body.get("message") or body.get("error") or "")
@@ -791,7 +841,11 @@ class TagHistorianClient:
 
         # 400 and 413 mean this integration built a body the endpoint cannot
         # take. That is a bug here, not a user problem, so it is logged loudly
-        # and the batch is dropped rather than retried into a loop.
+        # and the batch is dropped rather than retried into a loop. A 500 -
+        # Tag Historian's own error, unexplained - stays here too: the batch
+        # goes back to the FRONT of the queue when it is held, so a body that
+        # causes one every time would stop every reading behind it for good.
+        # (502 and 504 are a gateway's, raised as unreachable above.)
         LOGGER.error(
             "Tag Historian refused a write with %s: %s", response.status, message
         )

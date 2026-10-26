@@ -7,6 +7,7 @@ from datetime import timedelta
 import pytest
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
@@ -15,6 +16,7 @@ from pytest_homeassistant_custom_component.common import (
 
 from custom_components.tag_historian.api import (
     TagHistorianAuthError,
+    TagHistorianClient,
     TagHistorianConnectionError,
     WriteOutcome,
     WriteResult,
@@ -36,6 +38,7 @@ from custom_components.tag_historian.forwarder import (
 from custom_components.tag_historian.repairs import issue_id
 
 WATCHED = ["sensor.house_power", "sensor.outdoor_temperature"]
+WRITE_URL = "https://api.taghistorian.com/api/v2/write?precision=s"
 
 
 class StubClient:
@@ -383,6 +386,85 @@ async def test_a_connection_error_keeps_the_batch_and_retries(
     assert forwarder.stats.queued == 1
 
     await _tick(hass, 60)
+    assert forwarder.stats.sent == 1
+    assert forwarder.stats.queued == 0
+
+
+async def test_a_host_that_does_not_answer_raises_no_card_and_says_why(
+    hass: HomeAssistant, entry, make_forwarder, freezer
+) -> None:
+    """Nothing answered, so there is no wait to honour and nothing for a card.
+
+    The README's promise: tried again half a minute after each failed attempt
+    however long it lasts, no card, and the readings dropped sensor's
+    last_error says why (test_api: a timeout says so in words too).
+    """
+    client = StubClient(*[TagHistorianConnectionError("no answer within 10 seconds")] * 50)
+    forwarder = make_forwarder(hass, entry, client)
+
+    hass.states.async_set("sensor.house_power", "1500")
+    await hass.async_block_till_done()
+    await _advance(hass, freezer, 2)
+    for _ in range(4):
+        await _advance(hass, freezer, 600)
+
+    assert len(client.bodies) == 5
+    assert not ir.async_get(hass).issues
+    assert forwarder.stats.last_error == "no answer within 10 seconds"
+    assert forwarder.stats.queued == 1
+
+
+@pytest.mark.parametrize(
+    "outcome", [WriteOutcome.UNAVAILABLE, WriteOutcome.BACK_PRESSURE]
+)
+async def test_an_answer_that_names_no_wait_is_not_asked_again_every_second(
+    hass: HomeAssistant, entry, make_forwarder, outcome
+) -> None:
+    """Tag Historian always names a wait. A 503 or 429 with no Retry-After, or
+    a 0, is a gateway's in its place, and is waited out like no answer at all
+    rather than asked again every second for as long as the outage lasts."""
+    client = StubClient(WriteResult(outcome, retry_after=0), WriteResult(WriteOutcome.OK))
+    forwarder = make_forwarder(hass, entry, client)
+
+    hass.states.async_set("sensor.house_power", "1500")
+    await hass.async_block_till_done()
+    await _tick(hass, 2)
+    assert len(client.bodies) == 1
+
+    await _tick(hass, CONNECTION_RETRY_SECONDS - 5)
+    assert len(client.bodies) == 1, "not asked again a second later"
+
+    await _tick(hass, CONNECTION_RETRY_SECONDS + 5)
+    assert len(client.bodies) == 2
+    assert forwarder.stats.sent == 1
+    assert forwarder.stats.queued == 0
+
+
+@pytest.mark.parametrize("status", [502, 504])
+async def test_a_gateway_answering_in_tag_historians_place_holds_the_batch(
+    hass: HomeAssistant, entry, make_forwarder, aioclient_mock, status
+) -> None:
+    """With the real client: a 502 or 504 is a host that cannot be reached, so
+    the readings are held and sent once it answers - never dropped as refused."""
+    client = TagHistorianClient(
+        async_get_clientsession(hass), "api.taghistorian.com", "not-a-real-key"
+    )
+    aioclient_mock.post(WRITE_URL, status=status, text="<html>Bad Gateway</html>")
+    forwarder = make_forwarder(hass, entry, client)
+
+    hass.states.async_set("sensor.house_power", "1500")
+    await hass.async_block_till_done()
+    await _tick(hass, 2)
+
+    assert forwarder.stats.queued == 1
+    assert forwarder.stats.dropped_quota == 0
+    assert forwarder.stats.last_error == f"write answered {status}"
+    assert not ir.async_get(hass).issues
+
+    aioclient_mock.clear_requests()
+    aioclient_mock.post(WRITE_URL, status=204)
+    await _tick(hass, CONNECTION_RETRY_SECONDS + 1)
+
     assert forwarder.stats.sent == 1
     assert forwarder.stats.queued == 0
 

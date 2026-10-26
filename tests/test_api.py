@@ -5,6 +5,7 @@ from __future__ import annotations
 import gzip
 import json
 
+import aiohttp
 import pytest
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -26,6 +27,7 @@ from custom_components.tag_historian.api import (
 from custom_components.tag_historian.const import (
     DIALOG_TIMEOUT_SECONDS,
     HTTP_TIMEOUT_SECONDS,
+    IMPORT_TIMEOUT_SECONDS,
 )
 
 WRITE_URL = "https://api.taghistorian.com/api/v2/write?precision=s"
@@ -247,18 +249,22 @@ async def test_a_key_that_could_not_be_checked_is_not_a_connection_failure_to_a_
 
 
 class _TimeoutRecorder:
-    """A session that only records the timeout each GET was given."""
+    """A session that only records the timeout each request was given."""
 
-    def __init__(self) -> None:
+    def __init__(self, status: int = 200) -> None:
         self.timeouts: list = []
+        self.status = status
 
     def get(self, url, **kwargs):
         self.timeouts.append(kwargs["timeout"])
-        return _Answered()
+        return _Answered(self.status)
+
+    post = get
 
 
 class _Answered:
-    status = 200
+    def __init__(self, status: int) -> None:
+        self.status = status
 
     async def __aenter__(self):
         return self
@@ -266,8 +272,15 @@ class _Answered:
     async def __aexit__(self, *exc) -> bool:
         return False
 
-    async def json(self) -> dict:
-        return {"customerId": "00000000-0000-0000-0000-000000000001"}
+    async def json(self, **kwargs) -> dict:
+        return {
+            "customerId": "00000000-0000-0000-0000-000000000001",
+            "importId": "imp-1",
+            "startedAt": "2026-10-17T12:00:00Z",
+            "windowStart": "2026-10-03T12:00:00Z",
+            "maxReadingsPerBatch": 5000,
+            "allowance": {},
+        }
 
 
 @pytest.mark.parametrize(
@@ -280,7 +293,8 @@ async def test_a_screen_waits_longer_for_the_answer_but_not_to_connect(
     """The API may take up to about half a minute to answer a 503 for a key it
     could not check. A screen's client waits that out; connecting stays bounded
     by HTTP_TIMEOUT_SECONDS, so an address that does not answer is still said
-    as one. The runtime clients pass nothing and keep ten seconds in all."""
+    as one. The runtime clients pass nothing and keep ten seconds in all
+    (test_init and test_renames pin that they pass nothing)."""
     session = _TimeoutRecorder()
     kwargs = {} if answer_within is None else {"answer_within": answer_within}
     client = TagHistorianClient(session, "api.taghistorian.com", "k", **kwargs)
@@ -289,6 +303,64 @@ async def test_a_screen_waits_longer_for_the_answer_but_not_to_connect(
 
     (timeout,) = session.timeouts
     assert timeout.total == total
+    assert timeout.connect == HTTP_TIMEOUT_SECONDS
+
+
+@pytest.mark.parametrize(
+    ("status", "send"),
+    [
+        (204, lambda client: client.async_write(BODY)),
+        (200, lambda client: client.async_rename_tag("old", "new")),
+        (200, lambda client: client.async_merge_tags("old", "new")),
+        (200, lambda client: client.async_propose_time_zone("Europe/Stockholm")),
+    ],
+    ids=["write", "rename", "merge", "proposal"],
+)
+async def test_what_is_sent_keeps_ten_seconds_whatever_a_screen_waits(
+    status, send
+) -> None:
+    """The forwarder's bounds are built on HTTP_TIMEOUT_SECONDS for a write. A
+    client built to wait DIALOG_TIMEOUT_SECONDS for a screen's answer still
+    gives a write, a rename or merge and a proposal ten seconds in all."""
+    session = _TimeoutRecorder(status)
+    client = TagHistorianClient(
+        session, "api.taghistorian.com", "k", answer_within=DIALOG_TIMEOUT_SECONDS
+    )
+
+    await send(client)
+
+    (timeout,) = session.timeouts
+    assert timeout.total == HTTP_TIMEOUT_SECONDS
+
+
+async def test_an_import_batch_keeps_its_own_bound_whatever_a_screen_waits() -> None:
+    session = _TimeoutRecorder(200)
+    client = TagHistorianClient(
+        session, "api.taghistorian.com", "k", answer_within=DIALOG_TIMEOUT_SECONDS
+    )
+
+    await client.async_import_batch("imp-1", [])
+
+    (timeout,) = session.timeouts
+    assert timeout.total == IMPORT_TIMEOUT_SECONDS
+
+
+@pytest.mark.parametrize("answer_within", [None, DIALOG_TIMEOUT_SECONDS])
+async def test_starting_an_import_waits_for_a_slow_answer_but_not_to_connect(
+    answer_within,
+) -> None:
+    """A person always starts an import, never the forwarder. Whichever client
+    starts it - the entry's own, too - waits for a slow 503 for a key that
+    could not be checked, so it is said as that and not as "could not reach";
+    connecting stays bounded by ten seconds."""
+    session = _TimeoutRecorder(201)
+    kwargs = {} if answer_within is None else {"answer_within": answer_within}
+    client = TagHistorianClient(session, "api.taghistorian.com", "k", **kwargs)
+
+    await client.async_start_import()
+
+    (timeout,) = session.timeouts
+    assert timeout.total == DIALOG_TIMEOUT_SECONDS
     assert timeout.connect == HTTP_TIMEOUT_SECONDS
 
 
@@ -334,6 +406,67 @@ async def test_401_raises_rather_than_returning(client, aioclient_mock) -> None:
 
     with pytest.raises(TagHistorianAuthError):
         await client.async_write(BODY)
+
+
+async def test_a_write_that_gets_no_answer_says_so(client, aioclient_mock) -> None:
+    """aiohttp's total timeout is a TimeoutError that prints as nothing, and
+    this text is the readings dropped sensor's last_error - where an empty one
+    is what a clean write leaves behind."""
+    aioclient_mock.post(WRITE_URL, exc=TimeoutError())
+
+    with pytest.raises(TagHistorianConnectionError) as raised:
+        await client.async_write(BODY)
+
+    assert str(raised.value) == f"no answer within {HTTP_TIMEOUT_SECONDS} seconds"
+
+
+async def test_a_read_or_an_import_start_that_gets_no_answer_says_so_too(
+    client, aioclient_mock
+) -> None:
+    aioclient_mock.get("https://api.taghistorian.com/api/customers/me", exc=TimeoutError())
+    aioclient_mock.post("https://api.taghistorian.com/api/import", exc=TimeoutError())
+
+    with pytest.raises(TagHistorianConnectionError, match="no answer within 10 seconds"):
+        await client.async_validate()
+    with pytest.raises(TagHistorianConnectionError, match="no answer within 45 seconds"):
+        await client.async_start_import()
+
+
+async def test_a_failure_with_words_of_its_own_keeps_them(client, aioclient_mock) -> None:
+    aioclient_mock.post(WRITE_URL, exc=aiohttp.ClientConnectionError("Connection refused"))
+
+    with pytest.raises(TagHistorianConnectionError, match="^Connection refused$"):
+        await client.async_write(BODY)
+
+
+@pytest.mark.parametrize("status", [502, 504])
+async def test_a_gateway_that_lost_the_api_is_unreachable_for_a_write_too(
+    client, aioclient_mock, status
+) -> None:
+    """Not REJECTED: that drops the batch for good and counts it as refused.
+    Tag Historian itself did not answer, so the batch is held like a socket
+    error's."""
+    aioclient_mock.post(WRITE_URL, status=status, text="<html>Bad Gateway</html>")
+
+    with pytest.raises(TagHistorianConnectionError) as raised:
+        await client.async_write(BODY)
+
+    assert not isinstance(raised.value, TagHistorianServerError)
+    assert str(raised.value) == f"write answered {status}"
+
+
+@pytest.mark.parametrize("status", [400, 413, 500])
+async def test_a_body_tag_historian_cannot_take_is_still_dropped(
+    client, aioclient_mock, status
+) -> None:
+    """A batch that gets the same answer every time must not be held at the
+    front of the queue: it would stop every reading behind it."""
+    aioclient_mock.post(WRITE_URL, status=status, json={"message": "no"})
+
+    result = await client.async_write(BODY)
+
+    assert result.outcome is WriteOutcome.REJECTED
+    assert not result.retryable
 
 
 async def test_quota_comes_from_the_api_and_nowhere_else(

@@ -457,6 +457,60 @@ async def test_one_import_at_a_time(hass: HomeAssistant, entry, recorder, freeze
     importer._task.cancel()
 
 
+async def test_a_second_start_while_the_first_waits_for_its_answer_is_refused(
+    hass: HomeAssistant, entry, recorder, freezer
+) -> None:
+    """Starting waits up to DIALOG_TIMEOUT_SECONDS for Tag Historian's answer,
+    and there is no task yet to call it running. A second door - the action,
+    Configure, the card - must not start a second import meanwhile."""
+    freezer.move_to(NOW)
+    client = ImportClient()
+    asked = asyncio.Event()
+    answer = asyncio.Event()
+
+    async def _slow_start(**kwargs):
+        # Only the first start waits: a second one let through answers at
+        # once, so a missing guard fails below rather than hanging.
+        if not asked.is_set():
+            asked.set()
+            await answer.wait()
+        return session()
+
+    client.async_start_import = AsyncMock(side_effect=_slow_start)
+    importer = make_importer(hass, entry, client)
+
+    first = asyncio.get_running_loop().create_task(importer.async_start([POWER], None))
+    await asked.wait()
+
+    with pytest.raises(ImportAlreadyRunning):
+        await importer.async_start([POWER], None)
+
+    answer.set()
+    await first
+    await _run(importer)
+    assert client.async_start_import.await_count == 1
+    assert importer.progress.status == STATUS_FINISHED
+
+
+async def test_a_start_that_fails_can_be_tried_again(
+    hass: HomeAssistant, entry, recorder, freezer
+) -> None:
+    """The guard is let go however the start ends."""
+    freezer.move_to(NOW)
+    client = ImportClient()
+    client.async_start_import = AsyncMock(
+        side_effect=[TagHistorianConnectionError("no answer within 45 seconds"), session()]
+    )
+    importer = make_importer(hass, entry, client)
+
+    with pytest.raises(TagHistorianConnectionError):
+        await importer.async_start([POWER], None)
+    await importer.async_start([POWER], None)
+    await _run(importer)
+
+    assert importer.progress.status == STATUS_FINISHED
+
+
 async def test_how_far_back_is_never_before_the_window(
     hass: HomeAssistant, entry, recorder, freezer
 ) -> None:

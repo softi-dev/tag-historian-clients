@@ -206,8 +206,9 @@ HTTP_TIMEOUT_SECONDS: Final = 10
 # it may take up to about half a minute to say so (a 503 with reason
 # sign_in_unavailable), and a screen that gave up sooner would wrongly say to
 # check the address. Connecting still gets HTTP_TIMEOUT_SECONDS, so an address
-# that does not answer is still said as one within that. Only the screens: the
-# forwarder's bounds are built on HTTP_TIMEOUT_SECONDS for a write.
+# that does not answer is still said as one within that. Only the screens, and
+# starting an import, which a person always asks for (api.async_start_import):
+# the forwarder's bounds are built on HTTP_TIMEOUT_SECONDS for a write.
 DIALOG_TIMEOUT_SECONDS: Final = 45
 
 # Repair issue ids. Stable strings - changing one orphans an issue that is

@@ -47,7 +47,11 @@ from custom_components.tag_historian.const import (
     ISSUE_ENTITY_RENAMED,
     RENAME_RETRY_SECONDS,
 )
-from custom_components.tag_historian.renames import async_carry_history, renamed_issue_id
+from custom_components.tag_historian.renames import (
+    _client,
+    async_carry_history,
+    renamed_issue_id,
+)
 from custom_components.tag_historian.repairs import async_create_fix_flow
 
 from .conftest import make_client
@@ -71,6 +75,25 @@ def make_entry(hass: HomeAssistant, entities: list[str], follow: bool = False) -
     )
     entry.add_to_hass(hass)
     return entry
+
+
+async def test_a_client_for_an_entry_not_loaded_keeps_ten_seconds_in_all(
+    hass: HomeAssistant,
+) -> None:
+    """A rename asked about while its entry is not loaded gets a fresh client.
+    Like the entry's own, it is built without answer_within and keeps
+    HTTP_TIMEOUT_SECONDS: only the screens wait DIALOG_TIMEOUT_SECONDS."""
+    entry = make_entry(hass, [])
+    built: list[dict] = []
+
+    def _build(*args, **kwargs):
+        built.append(kwargs)
+        return make_client()
+
+    with patch(CLIENT_PATHS[1], side_effect=_build):
+        _client(hass, entry)
+
+    assert built == [{}]
 
 
 def register(hass: HomeAssistant, object_id: str) -> str:

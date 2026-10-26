@@ -477,8 +477,8 @@ class TagHistorianConfigFlow(SelectionStepsMixin, ConfigFlow, domain=DOMAIN):
         address answers 503 too), so it is said as "answered, but could not
         do this just now": try again, and check the address if it persists.
         Only on the first call: once /api/customers/me has answered with this
-        account the address is right, and a 503 after it says only to try
-        again.
+        account the address is right, and a 503 or a failed connection after
+        it says only to try again.
 
         The screen waits DIALOG_TIMEOUT_SECONDS for an answer, because the
         API may take up to about half a minute to answer that 503; connecting
@@ -523,7 +523,10 @@ class TagHistorianConfigFlow(SelectionStepsMixin, ConfigFlow, domain=DOMAIN):
         except TagHistorianUnavailableError as err:
             return {"base": _unavailable_reason(err, address_known=True)}
         except TagHistorianConnectionError:
-            return {"base": "cannot_connect"}
+            # /api/customers/me has just answered at this address with this
+            # account, so it is not the address: a dropped connection, a
+            # timeout or a server error. Nothing to check but the way out.
+            return {"base": "cannot_connect_known_host"}
 
         customer_id = account.get("customerId")
         if customer_id:
@@ -610,7 +613,9 @@ class TagHistorianConfigFlow(SelectionStepsMixin, ConfigFlow, domain=DOMAIN):
                 # cannot change.
                 errors["base"] = _unavailable_reason(err, address_known=True)
             except TagHistorianConnectionError:
-                errors["base"] = "cannot_connect"
+                # The entry's own address, which this form does not show and
+                # cannot change: say nothing about checking it.
+                errors["base"] = "cannot_connect_known_host"
             else:
                 # A key for a DIFFERENT account would silently start writing
                 # this house's history into somebody else's tenant.
