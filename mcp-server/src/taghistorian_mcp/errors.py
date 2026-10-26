@@ -30,6 +30,7 @@ import functools
 from collections.abc import Callable
 from typing import TypeVar
 
+import requests
 from mcp.server.fastmcp.exceptions import ToolError
 from taghistorian import (
     TagHistorianAPIError,
@@ -77,6 +78,19 @@ def _describe(exc: Exception) -> str:
         detail = f" Details: {'; '.join(exc.violations)}" if exc.violations else ""
         return (
             f"Tag Historian rejected the request (HTTP {exc.status_code}): {exc.message}.{detail}"
+        )
+
+    if isinstance(exc, TagHistorianConnectionError) and isinstance(
+        exc.__cause__, requests.exceptions.ReadTimeout
+    ):
+        # Connected, then no answer in time: Tag Historian WAS reached. The
+        # API may take up to about half a minute to say it could not check a
+        # key, longer than this server lets a request wait, so "could not
+        # reach" would send the user off to check a network that works.
+        return (
+            f"Tag Historian did not answer in time after {exc.attempts} attempt(s); "
+            "it may be briefly unavailable. This is not a rate limit. "
+            "Try again in a few minutes."
         )
 
     if isinstance(exc, TagHistorianConnectionError):

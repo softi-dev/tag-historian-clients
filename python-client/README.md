@@ -248,7 +248,11 @@ See the docstring on `RetryConfig` for the full set of knobs (backoff base/ceili
 catches `TagHistorianUnavailableError` now (`TagHistorianAPIError` still catches both). It also
 made the default `timeout` `(10.0, 45.0)`: ten seconds to connect, 45 to answer, because the API
 may take up to about half a minute to answer that `503` when it cannot check a key - waited out as
-a `503` rather than failing as a network error.
+a `503` rather than failing as a network error. The cost: a server that accepts the connection and
+then sends nothing now takes 45 seconds per attempt to fail instead of ten, so with the default
+retries `TagHistorianConnectionError` comes after about three minutes instead of under one. A
+caller with its own deadline can pass `timeout=10.0` for the old bound (a `503` slower than ten
+seconds then fails as a network error, as before) or lower `max_retries`.
 
 ## Self-hosted / staging
 

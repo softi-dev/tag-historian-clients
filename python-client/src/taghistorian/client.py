@@ -114,7 +114,11 @@ class TagHistorianClient:
         a ``503`` with reason ``sign_in_unavailable`` when it cannot check a
         key, so that answer is waited out under ``unavailable_budget``
         instead of failing as a network error. An address that does not
-        answer at all still fails within the connect part.
+        answer at all still fails within the connect part. A server that
+        accepts the connection and then sends nothing takes the read part to
+        fail, on every attempt: a timeout is retried ``max_retries`` times
+        like any network error, about three minutes in all by default.
+        ``timeout=10.0`` gives the 0.1.0 bound back.
     :param retry: Retry/backoff policy; see :class:`taghistorian.retry.RetryConfig`.
         Defaults to a fresh ``RetryConfig()`` when omitted.
     :param session: An existing ``requests.Session`` to use instead of

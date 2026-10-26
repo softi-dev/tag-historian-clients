@@ -53,16 +53,18 @@ logger = logging.getLogger("taghistorian_mcp")
 # API could not check the key (Retry-After 30-45 s) that is one wait and two
 # requests, so the "temporarily unavailable" message, which the LLM then gets
 # to see, usually comes back well inside 60 s - not if the requests are slow
-# too. A write the API could not take just now asks for a few seconds, so a
-# few shorter waits fit in the same 45 s.
+# too. A write the API could not take just now asks for anything from a
+# second (a full buffer) or five (a restart) to about half a minute, so
+# shorter waits can repeat within the same 45 s.
 _UNAVAILABLE_BUDGET_SECONDS = 45.0
 
 # Each request gets ten seconds to connect and ten to answer - not the
 # library's 45 to answer, which with a 45 s wait could pass the hosts' 60 s.
 # A request that times out is a network error, retried on its own terms
 # outside the budget above; so a sign-in answer slower than ten seconds comes
-# back to the LLM as a connection error rather than as "temporarily
-# unavailable".
+# back to the LLM after about 47 s (four tries of ten seconds, and 1 + 2 + 4 s
+# between them) as an answer that did not come in time (errors.py), not as
+# "temporarily unavailable" with its 503's reason.
 _REQUEST_TIMEOUT_SECONDS = (10.0, 10.0)
 
 

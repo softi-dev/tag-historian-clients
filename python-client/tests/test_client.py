@@ -465,6 +465,44 @@ def test_503_with_retry_after_zero_and_no_backoff_still_ends_at_the_budget(make_
     assert excinfo.value.waited == 5.0
 
 
+@pytest.mark.parametrize("attempt", [1, 63, 1025, 5000])
+def test_the_backoff_never_overflows_however_many_retries_a_budget_allows(attempt):
+    """A 2000 s budget at the one-second floor reaches retry number 1025, where
+    2 ** 1024 no longer converts to a float: it must still be a wait."""
+    assert RetryConfig(backoff_base=0.0).backoff_delay(attempt) == 0.0
+    expected = 1.0 if attempt == 1 else 30.0
+    assert RetryConfig().backoff_delay(attempt) == expected
+
+
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [
+        # Tag Historian's own shortest ask, a second, is honoured exactly.
+        ("1", [1.0, 1.0, 1.0, 1.0, 1.0]),
+        # Under a second is a proxy's, read as no header: the backoff applies.
+        ("0.5", [1.0, 2.0]),
+    ],
+)
+@responses.activate
+def test_a_retry_after_of_one_second_is_honoured_and_under_one_backs_off(
+    make_client, sleeps, header, expected
+):
+    responses.add(
+        responses.GET,
+        ACTIVE_ALERTS_URL,
+        json={"error": "Service Unavailable"},
+        status=503,
+        headers={"Retry-After": header},
+    )
+
+    client = make_client(unavailable_budget=5)
+
+    with pytest.raises(TagHistorianUnavailableError):
+        client.list_active_alerts()
+
+    assert sleeps == expected
+
+
 @responses.activate
 def test_503_with_no_backoff_and_no_retry_after_still_ends_at_the_budget(make_client, sleeps):
     responses.add(

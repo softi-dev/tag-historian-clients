@@ -74,5 +74,9 @@ class RetryConfig:
     def backoff_delay(self, attempt: int) -> float:
         """Delay before retry number ``attempt`` (1-indexed) when no
         ``Retry-After`` header was available to honour instead."""
-        delay = self.backoff_base * (2 ** (attempt - 1))
+        # The exponent is capped: a long unavailable_budget at the one-second
+        # floor (backoff_base 0, or a proxy's Retry-After 0) can reach retry
+        # number 1025, where 2 ** 1024 no longer converts to a float and the
+        # multiplication would raise OverflowError instead of waiting.
+        delay = self.backoff_base * (2 ** min(attempt - 1, 62))
         return min(delay, self.backoff_max)
