@@ -117,7 +117,10 @@ IMPORT_MAX_CONNECTION_FAILURES: Final = 10
 # taken after two hours is not "a moment": the import stops as unreachable and
 # carries on at the next start, rather than asking every 15 seconds for good
 # (each ask a warning in Tag Historian's log). Between sends the wait doubles,
-# with the answer's Retry-After as its floor.
+# with the answer's Retry-After as its floor. The hours endpoint's turns
+# ("busy", "account_busy") are the exception: they are sent again at their
+# Retry-After every time, within the same two hours, because the API keeps
+# the turn for a refused batch only until its Retry-After and a second past it.
 IMPORT_MAX_RETRY_SECONDS: Final = 2 * 60 * 60
 IMPORT_MAX_RETRY_WAIT_SECONDS: Final = 15 * 60
 

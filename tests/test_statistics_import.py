@@ -44,6 +44,7 @@ from custom_components.tag_historian.const import (
     CONF_MIN_INTERVAL,
     CONF_SEND_AS,
     DOMAIN,
+    IMPORT_BATCH_SIZE,
     IMPORT_MAX_CONNECTION_FAILURES,
     IMPORT_MAX_RESUMES_ON_LOAD,
     IMPORT_MAX_RETRY_SECONDS,
@@ -54,6 +55,7 @@ from custom_components.tag_historian.const import (
 )
 from custom_components.tag_historian.importer import (
     HOURS_UNAFFECTED_SENTENCE,
+    KEY_REFUSED_AGAIN_SENTENCE,
     NO_STATISTICS_SENTENCE,
     OFFERED_AGAIN_SENTENCE,
     PHASE_READINGS,
@@ -490,6 +492,27 @@ async def test_a_full_storage_stops_the_readings_and_says_the_hours_stand(
     assert HOURS_UNAFFECTED_SENTENCE in notifications[-1]
 
 
+@pytest.mark.parametrize(
+    ("outcome", "reason"),
+    [(ImportOutcome.ALLOWANCE_SPENT, STOP_ALLOWANCE), (ImportOutcome.STORAGE_FULL, STOP_STORAGE)],
+)
+@pytest.mark.parametrize("statistics", [False, True])
+async def test_a_readings_stop_says_nothing_of_hours_that_were_not_brought(
+    hass: HomeAssistant, entry, stats, recorder, freezer, notifications, outcome, reason, statistics
+) -> None:
+    """A readings-only import, or one whose entity had no statistics: there is no hourly history above it."""
+    freezer.move_to(NOW)
+    hass.states.async_set(POWER, "1500", {"unit_of_measurement": "W"})
+    recorder.record(POWER, "1500", NOW - timedelta(hours=5))
+
+    importer = make_importer(hass, entry, Client(readings=[ImportBatchResult(outcome, message="no")]))
+    await importer.async_start([POWER], None, statistics=statistics)
+    await _run(importer)
+
+    assert importer.progress.stop_reason == reason
+    assert HOURS_UNAFFECTED_SENTENCE not in notifications[-1], "there are no hours above it"
+
+
 async def test_a_tag_historian_without_the_hours_endpoint_goes_on_with_the_readings(
     hass: HomeAssistant, entry, stats, recorder, freezer, notifications
 ) -> None:
@@ -499,6 +522,8 @@ async def test_a_tag_historian_without_the_hours_endpoint_goes_on_with_the_readi
     recorder.record(POWER, "1500", NOW - timedelta(hours=5))
 
     client = Client(hours=[HoursBatchResult(ImportOutcome.NOT_SUPPORTED)])
+    # A server's start is its own clock's, never this integration's: the stamp must be the session's.
+    client.async_start_import.return_value = replace(session(), started_at=NOW - timedelta(seconds=7))
     importer = make_importer(hass, entry, client)
     await importer.async_start([POWER], None, statistics=True)
     await _run(importer)
@@ -803,8 +828,60 @@ async def test_an_import_stopped_between_two_hours_batches_sends_every_month_onc
     assert sent == expected, "every hour of every month, once, across the two runs"
 
 
-async def test_a_resumed_entity_whose_tag_has_another_unit_now_stops_at_its_first_batch(
-    hass: HomeAssistant, entry, stats, recorder, freezer, hass_storage
+# The three answers that leave the rest of an entity's statistics out, each
+# refusing every hour it was sent, and what the import then says of the
+# entity: a reason of its own, or - for a tag the plan has no room for - its
+# name among the refused tags.
+LEFT_OUT_ANSWERS = [
+    pytest.param(lambda hours: {"refused_unit_mismatch": hours}, "another unit", id="another-unit"),
+    pytest.param(
+        lambda hours: {"refused_unsupported": hours},
+        "does not take this kind of statistic",
+        id="unsupported",
+    ),
+    pytest.param(
+        lambda hours: {"refused_tag_limit": hours, "refused_tags": [POWER]}, None, id="no-room-for-its-tag"
+    ),
+]
+
+
+def _refusing(refusal) -> Any:
+    return lambda series: HoursBatchResult(ImportOutcome.TAKEN, **refusal(len(series[0]["hours"])))
+
+
+def _assert_said_why(importer: HistoryImporter, summary: str, reason: str | None) -> None:
+    progress = importer.progress
+    assert progress.status == STATUS_FINISHED
+    if reason is None:
+        assert progress.refused_tags == [POWER]
+        assert POWER not in progress.statistics_left_out, "the refused tags name it already"
+        assert f"No tag could be created for: {POWER}" in summary
+    else:
+        assert reason in progress.statistics_left_out[POWER]
+        assert f"The statistics of {POWER} were left out: " in summary
+
+
+@pytest.mark.parametrize(("refusal", "reason"), LEFT_OUT_ANSWERS)
+async def test_an_entity_whose_probe_is_refused_for_good_sends_no_batch_after_it(
+    hass: HomeAssistant, entry, stats, recorder, freezer, notifications, refusal, reason
+) -> None:
+    """Every month after the probe would be refused the same way, and not one is sent."""
+    freezer.move_to(NOW)
+    stats.add_mean(POWER, datetime(2024, 1, 1, tzinfo=UTC), NOW)
+    hass.states.async_set(POWER, "1500", {"unit_of_measurement": "W"})
+
+    client = Client(hours=[_refusing(refusal)])
+    importer = make_importer(hass, entry, client)
+    await importer.async_start([POWER], None, statistics=True)
+    await _run(importer)
+
+    assert len(client.hours_batches(POWER)) == 1, "the probe alone"
+    _assert_said_why(importer, notifications[-1], reason)
+
+
+@pytest.mark.parametrize(("refusal", "reason"), LEFT_OUT_ANSWERS)
+async def test_a_resumed_entity_refused_for_good_stops_at_its_first_batch(
+    hass: HomeAssistant, entry, stats, recorder, freezer, hass_storage, notifications, refusal, reason
 ) -> None:
     """A carried-on entity sends no probe: its first batch's answer is asked what the probe's would be."""
     freezer.move_to(NOW)
@@ -812,20 +889,13 @@ async def test_a_resumed_entity_whose_tag_has_another_unit_now_stops_at_its_firs
     hass.states.async_set(POWER, "1500", {"unit_of_measurement": "W"})
     _store(hass_storage, hours_cursor={POWER: datetime(2026, 8, 1, tzinfo=UTC).timestamp()})
 
-    client = Client(
-        hours=[
-            lambda series: HoursBatchResult(
-                ImportOutcome.TAKEN, refused_unit_mismatch=len(series[0]["hours"])
-            )
-        ]
-    )
+    client = Client(hours=[_refusing(refusal)])
     importer = make_importer(hass, entry, client)
     await importer.async_load()
     await _run(importer)
 
     assert len(client.hours_batches(POWER)) == 1, "nothing more after the refusal"
-    assert "another unit" in importer.progress.statistics_left_out[POWER]
-    assert importer.progress.status == STATUS_FINISHED
+    _assert_said_why(importer, notifications[-1], reason)
 
 
 async def test_a_start_that_carries_an_import_on_reads_no_statistics_until_home_assistant_has_started(
@@ -892,7 +962,7 @@ async def test_an_import_left_unbounded_says_the_statistics_go_as_far_back_as_th
     await importer.async_start([POWER], days, statistics=True)
     await _run(importer)
 
-    assert "first its hourly long-term statistics, as far back as they go," in notifications[0]
+    assert "first its hourly long-term statistics, as far back as they go, up to ten years," in notifications[0]
 
 
 async def test_nothing_older_than_tag_historian_keeps_is_read_or_sent(
@@ -1074,9 +1144,62 @@ async def test_an_error_of_its_own_stops_the_import_as_failed_and_the_next_start
     assert back.calls == []
 
 
+@pytest.mark.parametrize("where", ["building the batch", "reading the answer"])
+async def test_an_error_of_its_own_in_the_statistics_phase_stops_the_import_as_failed(
+    hass: HomeAssistant, entry, stats, recorder, freezer, notifications, monkeypatch, where
+) -> None:
+    """Only the recorder's side leaves an entity's statistics out; an error in sending them is the integration's own."""
+    freezer.move_to(NOW)
+    stats.add_mean(POWER, NOW - timedelta(days=2), NOW)
+    hass.states.async_set(POWER, "1500", {"unit_of_measurement": "W"})
+    recorder.record(POWER, "1500", NOW - timedelta(hours=5))
+    client = Client()
+    if where == "building the batch":
+
+        def broken(*args: Any, **kwargs: Any) -> bytes:
+            raise RuntimeError("a batch this integration could not build")
+
+        monkeypatch.setattr("custom_components.tag_historian.statistics.compress", broken)
+    else:
+        client = Client(hours=[ValueError("an answer this integration could not read")])
+    importer = make_importer(hass, entry, client)
+    await importer.async_start([POWER], None, statistics=True)
+    await _run(importer)
+
+    progress = importer.progress
+    assert progress.stop_reason == STOP_FAILED
+    assert progress.phase == PHASE_STATISTICS
+    assert "readings" not in [kind for kind, _ in client.calls]
+    assert POWER not in progress.statistics_done
+    assert POWER not in progress.statistics_left_out
+    assert "does not carry on by itself" in notifications[-1]
+    assert "could not be read" not in notifications[-1]
+
+    back = Client()
+    restarted = make_importer(hass, entry, back)
+    await restarted.async_load()
+    assert restarted._task is None
+    assert back.calls == []
+
+
+async def test_an_error_that_prints_as_nothing_is_still_named(
+    hass: HomeAssistant, entry, stats, recorder, freezer, notifications
+) -> None:
+    freezer.move_to(NOW)
+    stats.add_mean(POWER, NOW - timedelta(days=2), NOW)
+    hass.states.async_set(POWER, "1500", {"unit_of_measurement": "W"})
+
+    importer = make_importer(hass, entry, Client(hours=[TimeoutError()]))
+    await importer.async_start([POWER], None, statistics=True)
+    await _run(importer)
+
+    assert importer.progress.stop_reason == STOP_FAILED
+    assert "The error was: TimeoutError()" in notifications[-1]
+
+
 @pytest.mark.parametrize("phase", [PHASE_STATISTICS, PHASE_READINGS])
 async def test_a_batch_tag_historian_answers_with_a_500_every_time_is_not_carried_on_by_itself(
-    hass: HomeAssistant, entry, stats, recorder, freezer, phase
+    hass: HomeAssistant, entry, stats, recorder, freezer, notifications, phase
 ) -> None:
     freezer.move_to(NOW)
     stats.add_mean(POWER, NOW - timedelta(days=2), NOW)
@@ -1091,12 +1214,58 @@ async def test_a_batch_tag_historian_answers_with_a_500_every_time_is_not_carrie
 
     assert importer.progress.stop_reason == STOP_FAILED
     assert importer.progress.phase == phase
+    assert f"server error {IMPORT_MAX_CONNECTION_FAILURES} times in a row" in notifications[-1]
+    assert "The error was: import answered 500" in notifications[-1]
 
     back = Client()
     restarted = make_importer(hass, entry, back)
     await restarted.async_load()
     assert restarted._task is None, "it would be sent the same batch, and answer it the same way"
     assert back.calls == []
+
+
+@pytest.mark.parametrize("phase", [PHASE_STATISTICS, PHASE_READINGS])
+@pytest.mark.parametrize(
+    "failing",
+    [
+        pytest.param(
+            [
+                *[TagHistorianConnectionError("timed out")] * (IMPORT_MAX_CONNECTION_FAILURES - 1),
+                TagHistorianServerError("import answered 500"),
+            ],
+            id="ending-in-a-500",
+        ),
+        pytest.param(
+            [
+                *[TagHistorianServerError("import answered 500")] * (IMPORT_MAX_CONNECTION_FAILURES - 1),
+                TagHistorianConnectionError("timed out"),
+            ],
+            id="ending-in-a-timeout",
+        ),
+    ],
+)
+async def test_a_run_of_failures_with_one_that_was_not_a_500_is_unreachable_and_carried_on(
+    hass: HomeAssistant, entry, stats, recorder, freezer, notifications, phase, failing
+) -> None:
+    """"Failed" says Tag Historian answered the batch the same way every time; here at least once it did not answer."""
+    freezer.move_to(NOW)
+    stats.add_mean(POWER, NOW - timedelta(days=2), NOW)
+    hass.states.async_set(POWER, "1500", {"unit_of_measurement": "W"})
+    recorder.record(POWER, "1500", NOW - timedelta(hours=5))
+
+    client = Client(hours=failing) if phase == PHASE_STATISTICS else Client(readings=failing)
+    importer = make_importer(hass, entry, client)
+    await importer.async_start([POWER], None, statistics=phase == PHASE_STATISTICS)
+    await _run(importer)
+
+    assert importer.progress.stop_reason == STOP_UNREACHABLE
+    assert "does not carry on by itself" not in notifications[-1]
+
+    restarted = make_importer(hass, entry, Client())
+    await restarted.async_load()
+    assert restarted._task is not None, "an outage is carried on"
+    await _run(restarted)
+    assert restarted.progress.status == STATUS_FINISHED
 
 
 async def test_an_import_saved_unreachable_before_phases_is_not_carried_on(
@@ -1142,14 +1311,18 @@ async def test_an_import_that_gets_no_further_is_carried_on_a_few_starts_and_the
     await importer.async_start([POWER], None, statistics=True)
     await _run(importer)
 
-    for _ in range(IMPORT_MAX_RESUMES_ON_LOAD):
+    for load in range(1, IMPORT_MAX_RESUMES_ON_LOAD + 1):
         again = make_importer(hass, entry, down())
         await again.async_load()
         assert again._task is not None, "carried on by itself"
         await _run(again)
         assert again.progress.stop_reason == STOP_UNREACHABLE
+        if load < IMPORT_MAX_RESUMES_ON_LOAD:
+            assert UNREACHABLE_AGAIN_SENTENCE not in notifications[-1], "the next start carries it on"
+            assert "carries on where it stopped the next time Home Assistant starts" in notifications[-1]
 
     assert UNREACHABLE_AGAIN_SENTENCE in notifications[-1], "it says it will not carry on again"
+    assert f"at {IMPORT_MAX_RESUMES_ON_LOAD} starts in a row" in notifications[-1]
     last = Client()
     left = make_importer(hass, entry, last)
     await left.async_load()
@@ -1179,6 +1352,120 @@ async def test_an_import_that_gets_further_at_every_start_keeps_being_carried_on
         assert importer.progress.resumed_on_load == 0, "counted afresh once it got further"
 
 
+async def test_an_import_that_gets_further_in_its_readings_at_every_start_keeps_being_carried_on(
+    hass: HomeAssistant, entry, recorder, freezer
+) -> None:
+    """The readings' twin of the test above: each start one batch of readings is taken, then the network goes."""
+    freezer.move_to(NOW)
+    first = NOW - timedelta(days=3)
+    for i in range(1 + (IMPORT_MAX_RESUMES_ON_LOAD + 2) * IMPORT_BATCH_SIZE):
+        recorder.record(POWER, "1500", first + timedelta(seconds=20 * i))
+    failures = [TagHistorianConnectionError("down")] * IMPORT_MAX_CONNECTION_FAILURES
+
+    importer = make_importer(hass, entry, Client(readings=[None, *failures]))
+    await importer.async_start([POWER], None)
+    await _run(importer)
+    assert importer.progress.stop_reason == STOP_UNREACHABLE
+
+    for _ in range(IMPORT_MAX_RESUMES_ON_LOAD + 1):
+        cursor = importer.progress.cursor[POWER]
+        importer = make_importer(hass, entry, Client(readings=[None, *failures]))
+        await importer.async_load()
+        assert importer._task is not None
+        await _run(importer)
+        assert importer.progress.stop_reason == STOP_UNREACHABLE
+        assert importer.progress.cursor[POWER] > cursor, "one more batch answered for"
+        assert importer.progress.resumed_on_load == 0, "counted afresh once it got further"
+
+
+@pytest.mark.parametrize("phase", [PHASE_STATISTICS, PHASE_READINGS])
+async def test_an_entity_done_with_nothing_to_send_counts_as_getting_further(
+    hass: HomeAssistant, entry, stats, recorder, freezer, hass_storage, notifications, phase
+) -> None:
+    """Carried on for the last time allowed: the door, with nothing to bring, is done, so the next start carries on again."""
+    freezer.move_to(NOW)
+    stats.add_mean(POWER, NOW - timedelta(days=2), NOW)
+    hass.states.async_set(POWER, "1500", {"unit_of_measurement": "W"})
+    recorder.record(POWER, "1500", NOW - timedelta(hours=5))
+    _store(
+        hass_storage,
+        status=STATUS_STOPPED,
+        stop_reason=STOP_UNREACHABLE,
+        import_id="imp-1",
+        entities=[DOOR, POWER],
+        statistics=phase == PHASE_STATISTICS,
+        phase=phase,
+        resumed_on_load=IMPORT_MAX_RESUMES_ON_LOAD - 1,
+    )
+    failures = [TagHistorianConnectionError("down")] * IMPORT_MAX_CONNECTION_FAILURES
+
+    def down() -> Client:
+        return Client(hours=failures) if phase == PHASE_STATISTICS else Client(readings=failures)
+
+    importer = make_importer(hass, entry, down())
+    await importer.async_load()
+    assert importer._task is not None, "carried on, the last time it would be without getting further"
+    await _run(importer)
+
+    done = importer.progress.statistics_done if phase == PHASE_STATISTICS else importer.progress.done
+    assert done == [DOOR]
+    assert importer.progress.stop_reason == STOP_UNREACHABLE
+    assert importer.progress.resumed_on_load == 0, "the door being done is getting further"
+    assert UNREACHABLE_AGAIN_SENTENCE not in notifications[-1]
+
+    again = make_importer(hass, entry, down())
+    await again.async_load()
+    assert again._task is not None, "carried on again"
+    await _run(again)
+
+
+async def test_a_refused_key_after_the_last_carry_on_says_it_waits_to_be_run_again(
+    hass: HomeAssistant, entry, stats, recorder, freezer, hass_storage, notifications, monkeypatch
+) -> None:
+    """A new key is entered, but the next start does not carry the import on any more: it says so."""
+    freezer.move_to(NOW)
+    stats.add_mean(POWER, NOW - timedelta(days=2), NOW)
+    hass.states.async_set(POWER, "1500", {"unit_of_measurement": "W"})
+    monkeypatch.setattr(entry, "async_start_reauth", MagicMock())
+    _store(
+        hass_storage,
+        status=STATUS_STOPPED,
+        stop_reason=STOP_UNREACHABLE,
+        import_id="imp-1",
+        resumed_on_load=IMPORT_MAX_RESUMES_ON_LOAD - 1,
+    )
+
+    importer = make_importer(hass, entry, Client(hours=[TagHistorianAuthError("revoked")]))
+    await importer.async_load()
+    await _run(importer)
+
+    assert importer.progress.stop_reason == STOP_AUTH
+    assert importer.progress.resumed_on_load == IMPORT_MAX_RESUMES_ON_LOAD
+    assert KEY_REFUSED_AGAIN_SENTENCE in notifications[-1]
+    assert "carries on where it stopped once it is accepted" not in notifications[-1]
+
+    left = make_importer(hass, entry, Client())
+    await left.async_load()
+    assert left._task is None, "as it said"
+
+
+async def test_a_refused_key_before_the_last_carry_on_says_it_carries_on(
+    hass: HomeAssistant, entry, stats, recorder, freezer, notifications, monkeypatch
+) -> None:
+    freezer.move_to(NOW)
+    stats.add_mean(POWER, NOW - timedelta(days=2), NOW)
+    hass.states.async_set(POWER, "1500", {"unit_of_measurement": "W"})
+    monkeypatch.setattr(entry, "async_start_reauth", MagicMock())
+
+    importer = make_importer(hass, entry, Client(hours=[TagHistorianAuthError("revoked")]))
+    await importer.async_start([POWER], None, statistics=True)
+    await _run(importer)
+
+    assert importer.progress.stop_reason == STOP_AUTH
+    assert "carries on where it stopped once it is accepted" in notifications[-1]
+    assert KEY_REFUSED_AGAIN_SENTENCE not in notifications[-1]
+
+
 @pytest.mark.parametrize("phase", [PHASE_STATISTICS, PHASE_READINGS])
 async def test_a_batch_tag_historian_keeps_asking_to_send_later_stops_the_import_rather_than_spinning(
     hass: HomeAssistant, entry, stats, recorder, freezer, no_waiting, phase
@@ -1199,10 +1486,78 @@ async def test_a_batch_tag_historian_keeps_asking_to_send_later_stops_the_import
 
     assert importer.progress.status == STATUS_STOPPED
     assert importer.progress.stop_reason == STOP_UNREACHABLE
-    assert no_waiting[0] == 15, "Tag Historian's own wait first"
+    assert no_waiting[:4] == [15, 30, 60, 120], "Tag Historian's own wait first, then doubling"
     assert max(no_waiting) == IMPORT_MAX_RETRY_WAIT_SECONDS
     assert sum(no_waiting) >= IMPORT_MAX_RETRY_SECONDS
     assert len(client.calls) < 20, "not every 15 seconds for two hours"
+
+
+@pytest.mark.parametrize(("reason", "retry_after"), [("busy", 3), ("account_busy", 5)])
+async def test_an_hours_batch_waiting_for_its_turn_comes_back_when_its_turn_is_kept(
+    hass: HomeAssistant, entry, stats, recorder, freezer, no_waiting, reason, retry_after
+) -> None:
+    """The API keeps a refused batch's turn until its Retry-After and a second; a doubled wait came back after it was gone."""
+    freezer.move_to(NOW)
+    stats.add_mean(POWER, NOW - timedelta(days=2), NOW)
+    hass.states.async_set(POWER, "1500", {"unit_of_measurement": "W"})
+    turns = [HoursBatchResult(ImportOutcome.RETRY, retry_after=retry_after, reason=reason)] * 6
+
+    client = Client(hours=[None, *turns])
+    importer = make_importer(hass, entry, client)
+    await importer.async_start([POWER], None, statistics=True)
+    await _run(importer)
+
+    assert importer.progress.status == STATUS_FINISHED
+    assert no_waiting == [retry_after] * 6, "at its Retry-After every time, never doubled"
+
+
+async def test_an_hours_batch_that_never_gets_its_turn_still_stops_after_two_hours(
+    hass: HomeAssistant, entry, stats, recorder, freezer, no_waiting
+) -> None:
+    freezer.move_to(NOW)
+    stats.add_mean(POWER, NOW - timedelta(days=2), NOW)
+    hass.states.async_set(POWER, "1500", {"unit_of_measurement": "W"})
+    turns = IMPORT_MAX_RETRY_SECONDS // 3 + 1
+
+    client = Client(hours=[None, *[HoursBatchResult(ImportOutcome.RETRY, retry_after=3, reason="busy")] * turns])
+    importer = make_importer(hass, entry, client)
+    await importer.async_start([POWER], None, statistics=True)
+    await _run(importer)
+
+    assert importer.progress.stop_reason == STOP_UNREACHABLE
+    assert max(no_waiting) == 3
+    assert sum(no_waiting) >= IMPORT_MAX_RETRY_SECONDS
+
+
+@pytest.mark.parametrize("reason", ["months_not_ready", "read_failed", "ingest_busy"])
+async def test_an_hours_batch_asked_again_for_any_other_reason_waits_longer_each_time(
+    hass: HomeAssistant, entry, stats, recorder, freezer, no_waiting, reason
+) -> None:
+    freezer.move_to(NOW)
+    stats.add_mean(POWER, NOW - timedelta(days=2), NOW)
+    hass.states.async_set(POWER, "1500", {"unit_of_measurement": "W"})
+
+    client = Client(hours=[None, *[HoursBatchResult(ImportOutcome.RETRY, retry_after=5, reason=reason)] * 3])
+    importer = make_importer(hass, entry, client)
+    await importer.async_start([POWER], None, statistics=True)
+    await _run(importer)
+
+    assert no_waiting == [5, 10, 20]
+
+
+async def test_a_retry_after_longer_than_the_longest_wait_is_held_to_it(
+    hass: HomeAssistant, entry, stats, recorder, freezer, no_waiting
+) -> None:
+    freezer.move_to(NOW)
+    stats.add_mean(POWER, NOW - timedelta(days=2), NOW)
+    hass.states.async_set(POWER, "1500", {"unit_of_measurement": "W"})
+
+    client = Client(hours=[None, HoursBatchResult(ImportOutcome.RETRY, retry_after=24 * 3600)])
+    importer = make_importer(hass, entry, client)
+    await importer.async_start([POWER], None, statistics=True)
+    await _run(importer)
+
+    assert no_waiting == [IMPORT_MAX_RETRY_WAIT_SECONDS]
 
 
 # --------------------------------------------------------------------------

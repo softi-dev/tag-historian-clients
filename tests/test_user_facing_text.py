@@ -55,6 +55,8 @@ from custom_components.tag_historian.const import (
     CONF_MIN_INTERVAL,
     DOCS_URL,
     DOMAIN,
+    IMPORT_MAX_RESUMES_ON_LOAD,
+    IMPORT_MAX_RETRY_SECONDS,
     ISSUE_DAILY_QUOTA,
     ISSUE_SERVICE_UNAVAILABLE,
     PRICING_URL,
@@ -726,6 +728,24 @@ def test_the_readme_names_the_wait_the_code_actually_gives_a_write() -> None:
     failure waiting to happen more quietly.
     """
     assert f"up to {SPELLED[INFLIGHT_WAIT_SECONDS]} seconds" in README
+
+
+def test_the_readme_bounds_the_history_import_carrying_on_as_the_code_does() -> None:
+    """A paused import is carried on for a few starts that get no further, not for good.
+
+    The README promised the carry-on without a bound for a round after the
+    code got one (importer.HistoryImporter.async_load); the counts are prose
+    here, so they are checked against the constants.
+    """
+    readme = flattened(README)
+    assert f"too busy to take it for {SPELLED[IMPORT_MAX_RETRY_SECONDS // 3600]} hours" in readme
+    assert f"up to {SPELLED[IMPORT_MAX_RESUMES_ON_LOAD]} starts in a row" in readme
+
+
+def test_the_repair_card_says_nothing_of_an_update_to_an_entry_that_had_none() -> None:
+    """The card is raised for a new entry too, once its import met a Tag Historian without the hours import."""
+    card = TRANSLATIONS["issues"]["bring_years"]["fix_flow"]["step"]["confirm"]["description"]
+    assert "after the update" not in card
 
 
 def test_the_readme_promises_that_wait_on_both_ways_out() -> None:

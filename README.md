@@ -299,8 +299,13 @@ how far it is (`idle`, `running`, `finished` or `stopped`, with the counts as
 attributes — `hours_stored` and `hours_skipped` for the statistics), and a
 notification says when it is done: which entities brought hourly history and
 since when, which had none and why, and what happened to the readings. A
-restart carries it on where it stopped - also one that stopped because Tag
-Historian could not be reached.
+restart carries a running import on where it stopped. One that stopped because
+Tag Historian could not be reached, or was too busy to take it for two hours,
+is carried on by the next start too — for up to three starts in a row that get
+it no further. After that, or after an error that could come back at every
+start (one in this integration, or a server error Tag Historian answers the
+same batch with every time it is sent), it waits for you: the notification
+says so, and running the import again stores nothing twice.
 
 What Tag Historian holds an import to. The readings' allowance, your plan's
 full-resolution window, the tag limit and the storage cap are your own

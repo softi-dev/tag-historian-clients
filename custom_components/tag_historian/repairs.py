@@ -256,9 +256,11 @@ def async_clear_write_issues(hass: HomeAssistant, entry: ConfigEntry) -> None:
 
 @callback
 def async_raise_bring_years_issue(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Offer an entry set up before the question was asked the history Home Assistant already has.
+    """Offer the history Home Assistant already has.
 
-    Raised again at every load until it is answered, which costs nothing:
+    To an entry set up before the question was asked, or to any entry whose
+    import met a Tag Historian that could not take the statistics yet
+    (__init__._async_bring_years). Raised again at every load until it is answered, which costs nothing:
     the registry keeps one issue per id, and keeps a dismissal.
     """
     ir.async_create_issue(

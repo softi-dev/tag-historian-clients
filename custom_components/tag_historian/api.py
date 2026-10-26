@@ -255,6 +255,9 @@ class HoursBatchResult:
     # While the hourly history allowance is used up: when more goes in.
     resumes_at: datetime | None = None
     message: str = ""
+    # Why a 503 asked for the batch again; "busy" and "account_busy" are
+    # turns, not trouble (importer._TURN_REASONS).
+    reason: str = ""
 
     @property
     def refused(self) -> int:
@@ -893,6 +896,12 @@ def _import_status(
         return _classify_import_refusal(status, body), 0
 
     if status == 404:
+        if not body:
+            # "No such import" is a 404 with the API's JSON that says so. One
+            # without it - an HTML page from a proxy or the ingress in front
+            # of a stopped API - is not Tag Historian's answer at all, and is
+            # retried as an unreachable one is rather than ending the import.
+            raise TagHistorianConnectionError("import answered 404 without Tag Historian's answer")
         return ImportOutcome.UNKNOWN_IMPORT, 0
 
     if status in (429, 503):
@@ -967,14 +976,17 @@ def _classify_hours_import(
       does not have: a Tag Historian from before the hours import. That ends
       the statistics phase and leaves the readings to theirs. "No such import"
       is a 404 with the API's JSON that says so, and ends the session as on
-      the readings endpoint. Any other 404 - an HTML page from a proxy or the
-      ingress in front of a stopped API - is not Tag Historian's answer at
-      all, and is retried as an unreachable one is.
+      the readings endpoint. Any other 404 without the API's JSON is read as
+      on the readings endpoint (_import_status): not Tag Historian's answer,
+      and retried as an unreachable one is. Only the one that is empty on the
+      wire is the hours endpoint's own.
 
     A 503 can carry ``stored``: some months went in and some could not yet
     (the server's deploy, a file a reader held). Sent again, the batch stores
     the rest, and what went in now comes back as duplicates; the importer
-    counts it from here.
+    counts it from here. It also carries ``reason``, which tells the hours
+    endpoint's turns (``busy``, ``account_busy``) from trouble: the importer
+    waits for a turn differently (importer._TURN_REASONS).
     """
     status = response.status
     message = str(body.get("message") or body.get("error") or "")
@@ -1015,13 +1027,13 @@ def _classify_hours_import(
 
     if status == 404 and empty:
         return HoursBatchResult(ImportOutcome.NOT_SUPPORTED, message=message)
-    if status == 404 and not body:
-        raise TagHistorianConnectionError("import answered 404 without Tag Historian's answer")
 
     outcome, retry_after = _import_status(response, body, message)
+    retry = outcome is ImportOutcome.RETRY
     return HoursBatchResult(
         outcome,
         retry_after=retry_after,
-        stored=_count(body, "stored") if outcome is ImportOutcome.RETRY else 0,
+        stored=_count(body, "stored") if retry else 0,
         message=message,
+        reason=str(body.get("reason") or "") if retry else "",
     )

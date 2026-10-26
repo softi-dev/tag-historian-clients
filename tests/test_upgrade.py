@@ -170,7 +170,9 @@ def importing_client() -> Any:
     client.async_write.return_value = WriteResult(WriteOutcome.OK)
     client.async_start_import.return_value = ImportSession(
         import_id="imp-years",
-        started_at=NOW,
+        # The server's clock, a few seconds off the integration's own: the
+        # stamp an import leaves is its session's start, never the local now.
+        started_at=NOW - timedelta(seconds=7),
         window_start=NOW - timedelta(days=14),
         max_readings_per_batch=5000,
         allowance=ImportAllowance(total=1000, used=0, remaining=1000, readings_per_day=10, window_days=14),
@@ -482,6 +484,7 @@ async def test_a_ticked_entry_that_met_a_tag_historian_without_the_hours_import_
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done(wait_background_tasks=True)
         client.async_start_import.assert_awaited_once_with(hours=True)
+        assert entry.runtime_data.importer.progress.statistics_started_at is None
 
         assert await hass.config_entries.async_reload(entry.entry_id)
         await hass.async_block_till_done(wait_background_tasks=True)

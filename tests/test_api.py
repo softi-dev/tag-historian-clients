@@ -549,19 +549,47 @@ async def test_a_tag_historian_without_the_hours_endpoint_is_not_an_unknown_impo
     assert (await client.async_import_hours("imp-1", b"")).outcome is ImportOutcome.NOT_SUPPORTED
 
 
+@pytest.mark.parametrize(
+    ("url", "send"),
+    [
+        pytest.param(BATCH_URL, lambda c: c.async_import_batch("imp-1", [READING]), id="readings"),
+        pytest.param(HOURS_URL, lambda c: c.async_import_hours("imp-1", b""), id="hours"),
+    ],
+)
 async def test_a_404_page_from_something_in_front_of_tag_historian_is_not_its_answer(
-    client, aioclient_mock
+    client, aioclient_mock, url, send
 ) -> None:
-    """An ingress's HTML 404 for a stopped API is retried as unreachable; it does not end the phase for good."""
+    """An ingress's HTML 404 for a stopped API is retried as unreachable; it does not end the import for good."""
     aioclient_mock.post(
-        HOURS_URL,
+        url,
         status=404,
         text="<html><body>404 - this container app is stopped</body></html>",
         headers={"Content-Type": "text/html"},
     )
 
-    with pytest.raises(TagHistorianConnectionError):
-        await client.async_import_hours("imp-1", b"")
+    with pytest.raises(TagHistorianConnectionError) as raised:
+        await send(client)
+    assert not isinstance(raised.value, TagHistorianServerError), "carried on as unreachable"
+
+
+@pytest.mark.parametrize(
+    ("reason", "retry_after"), [("busy", 3), ("account_busy", 5), ("months_not_ready", 60)]
+)
+async def test_an_hours_503_says_why_it_asked_for_the_batch_again(
+    client, aioclient_mock, reason, retry_after
+) -> None:
+    """The hours endpoint's turns are told from trouble by the reason (importer._TURN_REASONS)."""
+    aioclient_mock.post(
+        HOURS_URL,
+        status=503,
+        json={"error": "import_unavailable", "reason": reason, "retryAfterSeconds": retry_after},
+        headers={"Retry-After": str(retry_after)},
+    )
+
+    result = await client.async_import_hours("imp-1", b"")
+
+    assert result.outcome is ImportOutcome.RETRY
+    assert (result.reason, result.retry_after) == (reason, retry_after)
 
 
 @pytest.mark.parametrize("status", [502, 504])

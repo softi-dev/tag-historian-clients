@@ -332,7 +332,8 @@ async def async_setup_entry(
     # The time zone, at every setup, and taken by Tag Historian only if the
     # account has no zone yet (place.py). A new entry's last screen says so;
     # an entry set up before that screen proposes it from its first load after
-    # the update, which the README's upgrade paragraph and its repair card say.
+    # the update, which the README's upgrade paragraph says, and the repair
+    # card says it is proposed at every start.
     entry.async_create_background_task(
         hass, async_propose_time_zone(hass, client), f"{DOMAIN} propose time zone"
     )

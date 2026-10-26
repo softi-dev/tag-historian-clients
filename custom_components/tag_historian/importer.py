@@ -23,10 +23,11 @@ key that is refused, an account that may not write, or a Tag Historian that
 cannot be reached stops the whole import - and an unreachable one, or a key
 replaced through the reauthentication card, carries on by itself at the next
 start (:meth:`HistoryImporter.async_load`), a few starts in a row at most
-while it gets no further. An error that is not the network - this
-integration's own, or a batch Tag Historian answers with a 500 every time -
-stops it until it is run again (``STOP_FAILED``); one entity whose statistics
-cannot be read only leaves those statistics out.
+while it gets no further. An error that could come back at every start -
+this integration's own, or a batch Tag Historian answers with a 500 at every
+one of its sends - stops it until it is run again (``STOP_FAILED``); one
+entity whose statistics the recorder cannot give only leaves those
+statistics out.
 
 THE STATISTICS PHASE, per entity: one hour first - the newest - to learn the
 line its history ends at (``importableBefore``, as for readings: the import's
@@ -111,7 +112,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -176,9 +177,9 @@ STOP_UNKNOWN_IMPORT = "import_unknown"
 STOP_REJECTED = "rejected"
 # An error that is not the network: one of this integration's own, a recorder
 # that answers in a way it does not know, or Tag Historian answering the same
-# batch with a 500 every time it is sent. Not carried on by itself - it would
-# meet the same error at every start - so it waits for the import to be run
-# again, as a forbidden stop does.
+# batch with a 500 at every one of its sends (_gave_up). Not carried on by
+# itself - it could meet the same error at every start - so it waits for the
+# import to be run again, as a forbidden stop does.
 STOP_FAILED = "failed"
 # The statistics phase's own: the hourly history allowance, and a Tag
 # Historian older than the hours import.
@@ -537,7 +538,7 @@ class HistoryImporter:
             # Only an import left unbounded - no days, or the dialog's full
             # ten years - reaches as far back as the statistics go.
             reach = (
-                "as far back as they go"
+                "as far back as they go, up to ten years"
                 if days is None or days >= MAX_IMPORT_DAYS
                 else f"back to {statistics_since:%Y-%m-%d}"
             )
@@ -638,7 +639,9 @@ class HistoryImporter:
             # the sends; what gets here is an error of this integration's own,
             # which would come back at every start (STOP_FAILED).
             LOGGER.exception("Tag Historian's history import failed")
-            await self._async_finish(STATUS_STOPPED, STOP_FAILED, str(err))
+            # Some errors print as nothing (TimeoutError()); the notification
+            # names the error all the same.
+            await self._async_finish(STATUS_STOPPED, STOP_FAILED, str(err) or repr(err))
 
     # ------------------------------------------------------------------
     # The statistics phase
@@ -659,12 +662,11 @@ class HistoryImporter:
             self._changed()
             try:
                 outcome = await self._async_statistics_entity(entity_id)
-            except Exception:  # left out and said so; the log has the details
-                # The recorder's statistics query is Home Assistant's own, not
-                # a published API (statistics.py). Should it change, or fail
-                # on one entity's rows, that entity's statistics are left out
-                # with why, and the import goes on - the readings still come.
-                # Done, so a restart does not meet it again.
+            except _StatisticsUnreadable:  # left out and said so; the log has the details
+                # Only the recorder's side (_reading_statistics): an error in
+                # building, sending or recording a batch is this
+                # integration's own and stops the import as failed
+                # (_async_run). Done, so a restart does not meet it again.
                 LOGGER.exception(
                     "Tag Historian could not bring the long-term statistics of %s", entity_id
                 )
@@ -745,8 +747,9 @@ class HistoryImporter:
         # history - both as in the readings phase.
         former = self._send_as.get(entity_id)
         tag = tag_name_for_entity(former or entity_id)
-        source = await history.async_source(self.hass, entity_id, former)
-        plan = await statistics.async_plan(self.hass, source)
+        with _reading_statistics():
+            source = await history.async_source(self.hass, entity_id, former)
+            plan = await statistics.async_plan(self.hass, source)
         if plan.missing:
             if entity_id not in progress.no_statistics:
                 progress.no_statistics.append(entity_id)
@@ -769,9 +772,10 @@ class HistoryImporter:
         pending_from = month
         while statistics.next_month(month) > floor:
             limit = line or started_at
-            hours = await statistics.async_rows(
-                self.hass, plan, max(month, floor), min(statistics.next_month(month), limit)
-            )
+            with _reading_statistics():
+                hours = await statistics.async_rows(
+                    self.hass, plan, max(month, floor), min(statistics.next_month(month), limit)
+                )
             hours = [hour for hour in hours if hour["t"] + HOUR.total_seconds() <= limit.timestamp()]
 
             if line is None:
@@ -873,6 +877,9 @@ class HistoryImporter:
             statistics.compress, {"series": [statistics.series(plan, tag, hours)]}
         )
         failures = 0
+        # Whether Tag Historian answered every failed send of this batch with
+        # a 500: only then is it the batch rather than the network (_gave_up).
+        every_one_a_500 = True
         # Hours a 503 said went in before it asked for the batch again: the
         # answer to the resend has them as duplicates, and they are counted
         # as stored, once.
@@ -889,16 +896,18 @@ class HistoryImporter:
                 return _SESSION_STOPPED, None
             except TagHistorianConnectionError as err:
                 failures += 1
+                every_one_a_500 = every_one_a_500 and isinstance(err, TagHistorianServerError)
                 if failures >= IMPORT_MAX_CONNECTION_FAILURES:
                     progress.hours_stored += stored_before
-                    await self._async_finish(STATUS_STOPPED, _gave_up(err), str(err))
+                    await self._async_finish(STATUS_STOPPED, _gave_up(every_one_a_500), str(err))
                     return _SESSION_STOPPED, None
                 await asyncio.sleep(IMPORT_RETRY_SECONDS)
                 continue
 
             if result.outcome is ImportOutcome.RETRY:
                 stored_before += result.stored
-                if (wait := retries.next_wait(result.retry_after)) is None:
+                turn = result.reason in _TURN_REASONS
+                if (wait := retries.next_wait(result.retry_after, turn=turn)) is None:
                     progress.hours_stored += stored_before
                     await self._async_finish(STATUS_STOPPED, STOP_UNREACHABLE, result.message)
                     return _SESSION_STOPPED, None
@@ -1079,6 +1088,8 @@ class HistoryImporter:
         progress = self.progress
         readings = [reading for _, reading in pending]
         failures = 0
+        # As for an hours batch (_gave_up).
+        every_one_a_500 = True
         retries = _Retries()
 
         while True:
@@ -1090,8 +1101,9 @@ class HistoryImporter:
                 return None
             except TagHistorianConnectionError as err:
                 failures += 1
+                every_one_a_500 = every_one_a_500 and isinstance(err, TagHistorianServerError)
                 if failures >= IMPORT_MAX_CONNECTION_FAILURES:
-                    await self._async_finish(STATUS_STOPPED, _gave_up(err), str(err))
+                    await self._async_finish(STATUS_STOPPED, _gave_up(every_one_a_500), str(err))
                     return None
                 await asyncio.sleep(IMPORT_RETRY_SECONDS)
                 continue
@@ -1156,36 +1168,77 @@ class HistoryImporter:
         )
 
 
+# The hours endpoint's 503s that are its turns, not trouble: "busy" is the
+# process's hours turn (HoursAdmission), "account_busy" the account's own. The
+# API keeps the turn free for a refused batch until its Retry-After is up and
+# a second past it, and no longer, so the batch is sent again at Retry-After
+# every time: a doubled wait came back after the turn had gone to another
+# account, was refused again, and got in less the longer it waited. The
+# readings endpoint's "busy" is the write buffer, and doubles.
+_TURN_REASONS = frozenset({"busy", "account_busy"})
+
+
 class _Retries:
     """How long one batch waits between "come back later" answers, and when it stops asking.
 
     The wait doubles from one answer to the next, with Retry-After as its
     floor and IMPORT_MAX_RETRY_WAIT_SECONDS as its ceiling, until the waits
-    add up to IMPORT_MAX_RETRY_SECONDS (const.py). Added up rather than read
-    off a clock, so the bound is the same however long the sends take.
+    add up to IMPORT_MAX_RETRY_SECONDS (const.py). A turn (_TURN_REASONS) is
+    waited for at exactly its Retry-After and does not double, but counts
+    towards the same two hours. Added up rather than read off a clock, so the
+    bound is the same however long the sends take.
     """
 
     def __init__(self) -> None:
         self._waited = 0
         self._wait = 0
 
-    def next_wait(self, retry_after: int) -> int | None:
+    def next_wait(self, retry_after: int, *, turn: bool = False) -> int | None:
         """Seconds to wait before the next send, or None when this batch has waited long enough."""
         if self._waited >= IMPORT_MAX_RETRY_SECONDS:
             return None
-        self._wait = max(1, retry_after, min(self._wait * 2, IMPORT_MAX_RETRY_WAIT_SECONDS))
-        self._waited += self._wait
-        return self._wait
+        floor = min(max(1, retry_after), IMPORT_MAX_RETRY_WAIT_SECONDS)
+        if turn:
+            wait = floor
+        else:
+            self._wait = max(floor, min(self._wait * 2, IMPORT_MAX_RETRY_WAIT_SECONDS))
+            wait = self._wait
+        self._waited += wait
+        return wait
 
 
-def _gave_up(err: TagHistorianConnectionError) -> str:
+def _gave_up(every_one_a_500: bool) -> str:
     """Why an import stops once a batch has failed IMPORT_MAX_CONNECTION_FAILURES times in a row.
 
-    Unreachable is carried on at the next start (_RESUMED_ON_LOAD). A 500
-    every time is Tag Historian answering, and the same batch would get the
-    same answer at every start: that waits for the import to be run again.
+    Unreachable is carried on at the next start (_RESUMED_ON_LOAD). Only a
+    batch Tag Historian answered with a 500 at every send is taken to be the
+    batch: the same batch would likely get the same answer at every start, so
+    it waits for the import to be run again. Any socket error or 502/504
+    among the failures makes it an outage, whatever the last answer was, and
+    an outage is carried on.
     """
-    return STOP_FAILED if isinstance(err, TagHistorianServerError) else STOP_UNREACHABLE
+    return STOP_FAILED if every_one_a_500 else STOP_UNREACHABLE
+
+
+class _StatisticsUnreadable(Exception):
+    """The recorder could not give one entity's long-term statistics: they are left out."""
+
+
+@contextlib.contextmanager
+def _reading_statistics() -> Iterator[None]:
+    """Any error from the recorder's side of one entity's statistics, as the one that leaves them out.
+
+    The recorder's statistics query is Home Assistant's own, not a published
+    API (statistics.py). Should it change, or fail on one entity's rows, that
+    entity's statistics are left out with why, and the import goes on - the
+    readings still come. Nothing else is: an error in building, sending or
+    recording a batch would meet every entity the same way, and is not the
+    recorder's to be blamed for.
+    """
+    try:
+        yield
+    except Exception as err:
+        raise _StatisticsUnreadable(str(err)) from err
 
 
 # Why the import stopped, said once it has. The readings' own limits say they
@@ -1207,28 +1260,40 @@ _STOP_SENTENCES = {
         "import carries on where it stopped once it is accepted."
     ),
     STOP_UNREACHABLE: (
-        "It stopped because Tag Historian could not be reached, or did not take the history "
-        f"for {IMPORT_MAX_RETRY_SECONDS // 3600} hours. It carries on where it stopped the next "
+        "It stopped because Tag Historian could not be reached, or was too busy to take it for "
+        f"{IMPORT_MAX_RETRY_SECONDS // 3600} hours. It carries on where it stopped the next "
         "time Home Assistant starts, or run the import again: what Tag Historian already has is "
         "recognised and not stored twice."
     ),
     STOP_UNKNOWN_IMPORT: "It stopped because Tag Historian no longer knows this import. Start a new one.",
     STOP_REJECTED: "It stopped because Tag Historian refused a batch it could not read.",
     STOP_FAILED: (
-        "It stopped because of an error - in this integration, or one Tag Historian answered "
-        "the same batch with every time it was sent - and it does not carry on by itself: it "
-        "would meet the same error at every start. Run the import again once it is fixed: what "
-        "Tag Historian already has is recognised and not stored twice."
+        "It stopped on an error that could come back every time it is tried, so it does not "
+        "carry on by itself: an error in this integration, or Tag Historian answering the same "
+        f"batch with a server error {IMPORT_MAX_CONNECTION_FAILURES} times in a row. Run the "
+        "import again later, or after updating the integration if the error below is its own: "
+        "what Tag Historian already has is recognised and not stored twice."
     ),
 }
 
-# Unreachable, once it has been carried on IMPORT_MAX_RESUMES_ON_LOAD times
-# without getting any further: the next start leaves it, so it says so.
+# Once a stop the next start would carry on has been carried on
+# IMPORT_MAX_RESUMES_ON_LOAD times without getting any further, the next start
+# leaves it (async_load), so it says so.
 UNREACHABLE_AGAIN_SENTENCE = (
-    "It stopped because Tag Historian could not be reached, again after carrying on by itself, "
-    "and it does not carry on by itself any more. Run the import again: what Tag Historian "
+    "It stopped because Tag Historian could not be reached, or was too busy, at "
+    f"{IMPORT_MAX_RESUMES_ON_LOAD} starts in a row without getting any further, so it does not "
+    "carry on by itself any more. Run the import again once Tag Historian answers: what it "
     "already has is recognised and not stored twice."
 )
+KEY_REFUSED_AGAIN_SENTENCE = (
+    "It stopped because Tag Historian no longer accepts the API key, after carrying on by "
+    "itself, and it does not carry on by itself any more. Enter a new one, then run the import "
+    "again: what Tag Historian already has is recognised and not stored twice."
+)
+_AGAIN_SENTENCES = {
+    STOP_UNREACHABLE: UNREACHABLE_AGAIN_SENTENCE,
+    STOP_AUTH: KEY_REFUSED_AGAIN_SENTENCE,
+}
 
 # Said after a readings stop when the import brought the hourly history first.
 HOURS_UNAFFECTED_SENTENCE = (
@@ -1355,10 +1420,10 @@ def _summary(progress: ImportProgress) -> str:
         )
     if progress.status == STATUS_STOPPED:
         if (
-            progress.stop_reason == STOP_UNREACHABLE
+            progress.stop_reason in _AGAIN_SENTENCES
             and progress.resumed_on_load >= IMPORT_MAX_RESUMES_ON_LOAD
         ):
-            lines.append(UNREACHABLE_AGAIN_SENTENCE)
+            lines.append(_AGAIN_SENTENCES[progress.stop_reason])
         else:
             lines.append(_STOP_SENTENCES.get(progress.stop_reason, progress.message))
         if progress.message and progress.stop_reason in (STOP_FORBIDDEN, STOP_REJECTED):
@@ -1366,7 +1431,11 @@ def _summary(progress: ImportProgress) -> str:
         elif progress.message and progress.stop_reason == STOP_FAILED:
             # Not "Tag Historian said": the error may be this integration's own.
             lines.append(f"The error was: {progress.message}")
-        if progress.statistics and progress.stop_reason in (STOP_ALLOWANCE, STOP_STORAGE):
+        if (
+            progress.stop_reason in (STOP_ALLOWANCE, STOP_STORAGE)
+            and (progress.hours_stored or progress.hours_from)
+        ):
+            # Only where there is hourly history above it to speak of.
             lines.append(HOURS_UNAFFECTED_SENTENCE)
     return "\n\n".join(lines)
 
