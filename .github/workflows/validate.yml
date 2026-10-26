@@ -78,6 +78,9 @@ jobs:
     # a user's log does.
     name: Home Assistant tests (newest)
     runs-on: ubuntu-latest
+    # Unpinned, so a release that hangs the suite is possible; the nightly
+    # should fail, not hold a runner for the default six hours.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

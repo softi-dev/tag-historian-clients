@@ -521,6 +521,41 @@ async def test_options_flow_keeps_a_new_tag_chosen_on_the_rename_card(
     assert entry.options[CONF_OWN_TAG_SINCE] == own
 
 
+@pytest.mark.parametrize("answer", [False, True])
+async def test_options_flow_keeps_the_answer_to_bring_the_years(
+    hass: HomeAssistant, house, answer
+) -> None:
+    """The setup's last screen is answered once; changing the selection does not forget it.
+
+    Forgotten, the entry read as one set up before that screen existed, and
+    was offered the years on a repair card (__init__._async_bring_years) -
+    the one that unticked them, too.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=STUB_ACCOUNT["customerId"],
+        data=CREDENTIALS,
+        options={
+            CONF_ENTITIES: ["sensor.house_power"],
+            CONF_MIN_INTERVAL: 10,
+            CONF_IMPORT_ON_SETUP: answer,
+        },
+    )
+    entry.add_to_hass(hass)
+
+    with patch(CLIENT_PATH, return_value=make_client()), patch(SETUP_PATH, return_value=True):
+        result = await _open_choose(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {CONF_ENTITIES: ["sensor.outdoor_temperature"], CONF_MIN_INTERVAL: 10},
+        )
+        result = await hass.config_entries.options.async_configure(result["flow_id"], {})
+        await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options[CONF_IMPORT_ON_SETUP] is answer
+
+
 # --------------------------------------------------------------------------
 # D1 - a momentary state must not decide what can be selected
 # --------------------------------------------------------------------------
@@ -905,10 +940,30 @@ async def test_submitting_the_import_screen_starts_the_import_and_closes(
     assert result["reason"] == "import_started"
     start.assert_awaited_once()
     assert start.await_args.args[2:] == (["sensor.house_power"], 2)
+    assert start.await_args.kwargs == {"statistics": True}, (
+        "the box is ticked unless unticked, so the long-term statistics go first"
+    )
     assert loaded_entry.options[CONF_ENTITIES] == [
         "sensor.house_power",
         "sensor.outdoor_temperature",
     ], "starting an import changes nothing in the options, so nothing reloads"
+
+
+async def test_an_unticked_statistics_box_imports_only_the_readings(
+    hass: HomeAssistant, loaded_entry
+) -> None:
+    with patch(CLIENT_PATH, return_value=make_client()), patch(
+        "custom_components.tag_historian.async_start_import"
+    ) as start:
+        result = await _open_import(hass, loaded_entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {CONF_ENTITIES: ["sensor.house_power"], "statistics": False, "days": 2},
+        )
+
+    assert result["reason"] == "import_started"
+    start.assert_awaited_once()
+    assert start.await_args.kwargs == {"statistics": False}, "unticked: the recorder's readings only"
 
 
 async def test_a_refused_import_says_what_tag_historian_said(

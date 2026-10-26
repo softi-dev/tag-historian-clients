@@ -527,8 +527,8 @@ class TagHistorianConfigFlow(SelectionStepsMixin, ConfigFlow, domain=DOMAIN):
         when this is left ticked (__init__._async_bring_years), so it runs
         with the forwarder already listening and knows where its live part
         begins. The time zone line is a disclosure, not a question - it is
-        proposed whatever is ticked, and taken only while nobody has chosen
-        one (place.py).
+        proposed whatever is ticked, and taken only if the account has no
+        zone yet (place.py).
         """
         if user_input is not None:
             return self.async_create_entry(
@@ -661,6 +661,13 @@ class TagHistorianOptionsFlow(SelectionStepsMixin, OptionsFlow):
         # Kept whatever is selected (const.py), as the entry has it now.
         if own := own_tag_since(self.config_entry.options):
             options[CONF_OWN_TAG_SINCE] = own
+        # The answer on the setup's last screen, as the entry has it. Written
+        # anew without it, the next load took this entry for one set up before
+        # that screen existed (__init__._async_bring_years): one that unticked
+        # it was offered the years on a repair card after all, and one whose
+        # import had not started yet got the card instead of the next try.
+        if CONF_IMPORT_ON_SETUP in self.config_entry.options:
+            options[CONF_IMPORT_ON_SETUP] = self.config_entry.options[CONF_IMPORT_ON_SETUP]
         return self.async_create_entry(data=options)
 
     async def async_step_import_history(

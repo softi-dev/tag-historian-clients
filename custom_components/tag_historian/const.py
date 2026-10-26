@@ -110,6 +110,23 @@ IMPORT_TIMEOUT_SECONDS: Final = 30
 IMPORT_RETRY_SECONDS: Final = 30
 IMPORT_MAX_CONNECTION_FAILURES: Final = 10
 
+# How long, in waits added up, one batch is sent again while Tag Historian
+# answers 429 or 503, and the longest wait between two sends. Its own waits
+# are short - 15 seconds for a file that did not read, minutes for a month not
+# ready yet, the deploy's grace at most half an hour - so a batch still not
+# taken after two hours is not "a moment": the import stops as unreachable and
+# carries on at the next start, rather than asking every 15 seconds for good
+# (each ask a warning in Tag Historian's log). Between sends the wait doubles,
+# with the answer's Retry-After as its floor.
+IMPORT_MAX_RETRY_SECONDS: Final = 2 * 60 * 60
+IMPORT_MAX_RETRY_WAIT_SECONDS: Final = 15 * 60
+
+# How many loads in a row carry a paused import on by themselves without it
+# getting any further (importer.HistoryImporter.async_load). A Tag Historian
+# that is down comes back; a batch that fails the same way every time does
+# not, and carried on at every start it would be sent for good.
+IMPORT_MAX_RESUMES_ON_LOAD: Final = 3
+
 # Hours per request of the statistics phase. ImportService.MaxHoursPerBatch
 # on the API side; above it the hours endpoint answers 413. A batch is whole
 # UTC months of one entity, so it holds at most six of them.

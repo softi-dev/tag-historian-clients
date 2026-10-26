@@ -27,11 +27,13 @@ remove a place the account already has - that is done in Settings, which
 says where the place came from.
 
 THE TIME ZONE. Home Assistant's own (``hass.config.time_zone``) is proposed
-at every setup, as the setup's last screen says. It is what Tag Historian's
-increases per day and month, Fair winter, the Monday summary and alert times
-are in, and Tag Historian takes it only while nobody has chosen one -
-not an Admin in Settings, not the owner's email channel under Alarms, not an
-earlier proposal. Until then the account is on Swedish time.
+at every setup: a new entry's last screen says so, and an entry set up
+before that screen proposes it from its first load after the update, as the
+README and its repair card say. It is what Tag Historian's increases per day
+and month, Fair winter, the Monday summary and alert times are in, and Tag
+Historian takes it only if the account has no zone yet - none chosen by an
+Admin in Settings, none on the owner's email channel under Alarms, none from
+an earlier proposal. Until then the account is on Swedish time.
 """
 
 from __future__ import annotations

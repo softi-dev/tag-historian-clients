@@ -22,12 +22,17 @@ the storage cap ends the readings phase and the statistics are already in. A
 key that is refused, an account that may not write, or a Tag Historian that
 cannot be reached stops the whole import - and an unreachable one, or a key
 replaced through the reauthentication card, carries on by itself at the next
-start (:meth:`HistoryImporter.async_load`).
+start (:meth:`HistoryImporter.async_load`), a few starts in a row at most
+while it gets no further. An error that is not the network - this
+integration's own, or a batch Tag Historian answers with a 500 every time -
+stops it until it is run again (``STOP_FAILED``); one entity whose statistics
+cannot be read only leaves those statistics out.
 
 THE STATISTICS PHASE, per entity: one hour first - the newest - to learn the
 line its history ends at (``importableBefore``, as for readings: the import's
 start, or its first reading in Tag Historian), then whole UTC months back from
-that line, newest first, at most 5 000 hours in a request, gzipped, down to
+that line - or from the probe's own hour, which has its answer already -
+newest first, at most 5 000 hours in a request, gzipped, down to
 the oldest hour Tag Historian keeps or ``days`` back. A request never splits
 a month, so where an entity has got to is the start of the oldest month Tag
 Historian has answered for (``hours_cursor``), and a restart carries on from
@@ -43,7 +48,7 @@ What Tag Historian holds the READINGS phase to, and what it therefore stops at:
   (the API says where that line is in every answer, and the import of that
   entity ends there);
 * the account's import allowance, which imported readings are counted against
-  INSTEAD of the daily one; when it is used up the import stops and says so;
+  INSTEAD of the daily one; when it is used up the readings stop and say so;
 * the tag limit and the storage cap, as for live data.
 
 And one line of its own: where the live forwarder's part of an entity begins
@@ -113,8 +118,9 @@ from typing import Any
 
 from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CoreState, HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
@@ -126,11 +132,15 @@ from .api import (
     TagHistorianAuthError,
     TagHistorianClient,
     TagHistorianConnectionError,
+    TagHistorianServerError,
 )
 from .const import (
     CONF_ENTITIES,
     IMPORT_BATCH_SIZE,
     IMPORT_MAX_CONNECTION_FAILURES,
+    IMPORT_MAX_RESUMES_ON_LOAD,
+    IMPORT_MAX_RETRY_SECONDS,
+    IMPORT_MAX_RETRY_WAIT_SECONDS,
     IMPORT_RETRY_SECONDS,
     LOGGER,
     MAX_HOURS_PER_REQUEST,
@@ -164,6 +174,12 @@ STOP_AUTH = "key_rejected"
 STOP_UNREACHABLE = "unreachable"
 STOP_UNKNOWN_IMPORT = "import_unknown"
 STOP_REJECTED = "rejected"
+# An error that is not the network: one of this integration's own, a recorder
+# that answers in a way it does not know, or Tag Historian answering the same
+# batch with a 500 every time it is sent. Not carried on by itself - it would
+# meet the same error at every start - so it waits for the import to be run
+# again, as a forbidden stop does.
+STOP_FAILED = "failed"
 # The statistics phase's own: the hourly history allowance, and a Tag
 # Historian older than the hours import.
 STOP_HOURS_ALLOWANCE = "hours_allowance_used_up"
@@ -171,7 +187,8 @@ STOP_HOURS_UNSUPPORTED = "hours_not_supported"
 
 # Stops of the whole import that it carries on from by itself, at the next
 # start: Tag Historian came back, or the key was replaced (a refused key never
-# gets this far - the entry asks for a new one before it loads).
+# gets this far - the entry asks for a new one before it loads). At most
+# IMPORT_MAX_RESUMES_ON_LOAD loads in a row that got no further (const.py).
 _RESUMED_ON_LOAD = (STOP_UNREACHABLE, STOP_AUTH)
 
 PHASE_STATISTICS = "statistics"
@@ -264,8 +281,14 @@ class ImportProgress:
     statistics_left_out: dict[str, str] = field(default_factory=dict)
     # When this entry first started bringing the statistics. Carried from one
     # import to the next: once set, the card that offers it is not raised
-    # again (repairs.py), whatever later imports did.
+    # again (repairs.py), whatever later imports did - unless the import that
+    # set it met a Tag Historian that could not take them yet, which brought
+    # none of them, and so leaves the offer standing (_async_stop_statistics).
     statistics_started_at: str | None = None
+    # Loads in a row that carried this import on by themselves since it last
+    # got further: back to 0 whenever a cursor moves or an entity is done
+    # (const.IMPORT_MAX_RESUMES_ON_LOAD).
+    resumed_on_load: int = 0
 
     @classmethod
     def from_saved(cls, data: dict[str, Any]) -> ImportProgress:
@@ -332,6 +355,11 @@ class HistoryImporter:
             progress.status == STATUS_STOPPED
             and progress.stop_reason in _RESUMED_ON_LOAD
             and progress.import_id
+            # Saved by a version that carries on by itself and says so. One
+            # saved before phases (2026.11) called every failure unreachable,
+            # and its notification said to run the import again.
+            and progress.phase
+            and progress.resumed_on_load < IMPORT_MAX_RESUMES_ON_LOAD
         ):
             # Paused, not ended: Tag Historian could not be reached, or the
             # key was refused and has been replaced since - this entry would
@@ -341,10 +369,12 @@ class HistoryImporter:
                 "Tag Historian is carrying on with the history import that stopped because %s",
                 "it could not be reached" if progress.stop_reason == STOP_UNREACHABLE else "the key was refused",
             )
+            progress.resumed_on_load += 1
             progress.status = STATUS_RUNNING
             progress.stop_reason = ""
             progress.message = ""
             progress.finished_at = None
+            await self._async_save()
         if self.progress.status == STATUS_RUNNING and self.progress.import_id:
             LOGGER.info(
                 "Tag Historian is carrying on with the history import it was running "
@@ -480,6 +510,9 @@ class HistoryImporter:
         since = session.window_start
         if days is not None:
             since = max(since, now - timedelta(days=days))
+        # The oldest hour the statistics phase reads: ``days`` back, at most
+        # ten years. The readings stop at the plan's window by themselves.
+        statistics_since = now - timedelta(days=min(days or MAX_IMPORT_DAYS, MAX_IMPORT_DAYS))
 
         self.progress = ImportProgress(
             status=STATUS_RUNNING,
@@ -493,16 +526,25 @@ class HistoryImporter:
             registry_ids=registry_ids(self.hass, entity_ids),
             statistics=statistics,
             phase=PHASE_STATISTICS if statistics else PHASE_READINGS,
-            statistics_since=_iso(now - timedelta(days=min(days or MAX_IMPORT_DAYS, MAX_IMPORT_DAYS))),
+            statistics_since=_iso(statistics_since),
+            # The import's own start when it is this import that sets it, so
+            # a stop can tell its own stamp from one an earlier import left.
             statistics_started_at=self.progress.statistics_started_at
-            or (_iso(now) if statistics else None),
+            or (_iso(session.started_at) if statistics else None),
         )
         await self._async_save()
         if statistics:
+            # Only an import left unbounded - no days, or the dialog's full
+            # ten years - reaches as far back as the statistics go.
+            reach = (
+                "as far back as they go"
+                if days is None or days >= MAX_IMPORT_DAYS
+                else f"back to {statistics_since:%Y-%m-%d}"
+            )
             started = (
                 f"Bringing the history Home Assistant already has for {len(entity_ids)} entities "
-                "into Tag Historian: first its hourly long-term statistics, as far back as they "
-                f"go, then the recorded readings from {since:%Y-%m-%d %H:%M} UTC."
+                f"into Tag Historian: first its hourly long-term statistics, {reach}, then the "
+                f"recorded readings from {since:%Y-%m-%d %H:%M} UTC."
             )
         else:
             started = (
@@ -552,6 +594,9 @@ class HistoryImporter:
 
     async def _async_run(self) -> None:
         progress = self.progress
+        # An import a version before phases saved as running is in its
+        # readings; said so, it carries on after a pause as this version's do.
+        progress.phase = progress.phase or PHASE_READINGS
         try:
             if progress.statistics and progress.phase == PHASE_STATISTICS:
                 if not await self._async_statistics_phase():
@@ -581,6 +626,7 @@ class HistoryImporter:
                     )
                     return
                 progress.done.append(entity_id)
+                progress.resumed_on_load = 0
                 await self._async_save()
                 self._changed()
 
@@ -588,8 +634,11 @@ class HistoryImporter:
         except asyncio.CancelledError:
             raise
         except Exception as err:  # reported on the sensor and in the log
+            # Every network failure is a TagHistorianConnectionError, met in
+            # the sends; what gets here is an error of this integration's own,
+            # which would come back at every start (STOP_FAILED).
             LOGGER.exception("Tag Historian's history import failed")
-            await self._async_finish(STATUS_STOPPED, STOP_UNREACHABLE, str(err))
+            await self._async_finish(STATUS_STOPPED, STOP_FAILED, str(err))
 
     # ------------------------------------------------------------------
     # The statistics phase
@@ -602,12 +651,27 @@ class HistoryImporter:
         own (``statistics_stop_reason``) - and the readings phase is next.
         """
         progress = self.progress
+        await self._async_until_started()
         for entity_id in progress.entities:
             if entity_id in progress.statistics_done:
                 continue
             progress.current = entity_id
             self._changed()
-            outcome = await self._async_statistics_entity(entity_id)
+            try:
+                outcome = await self._async_statistics_entity(entity_id)
+            except Exception:  # left out and said so; the log has the details
+                # The recorder's statistics query is Home Assistant's own, not
+                # a published API (statistics.py). Should it change, or fail
+                # on one entity's rows, that entity's statistics are left out
+                # with why, and the import goes on - the readings still come.
+                # Done, so a restart does not meet it again.
+                LOGGER.exception(
+                    "Tag Historian could not bring the long-term statistics of %s", entity_id
+                )
+                progress.statistics_left_out[entity_id] = (
+                    "they could not be read; Home Assistant's log has the details"
+                )
+                outcome = _GO_ON
             if outcome == _SESSION_STOPPED:
                 return False
             if outcome == _PHASE_STOPPED:
@@ -623,9 +687,37 @@ class HistoryImporter:
                 )
                 return False
             progress.statistics_done.append(entity_id)
+            progress.resumed_on_load = 0
             await self._async_save()
             self._changed()
         return True
+
+    async def _async_until_started(self) -> None:
+        """Until Home Assistant has started.
+
+        Before then an entity whose integration is still loading - at a start
+        that carries an import on - has no state, and so no unit to send its
+        statistics in: planned from the statistics' own unit, they were sent
+        in it while Home Assistant read them into the unit of a state that
+        appeared meanwhile (statistics.plan_units). From then on every entity
+        in the registry has a state, its own or the registry's stand-in, which
+        carries the unit.
+        """
+        if self.hass.state is CoreState.running:
+            return
+        started = self.hass.loop.create_future()
+
+        @callback
+        def _started(_: HomeAssistant) -> None:
+            if not started.done():
+                started.set_result(None)
+
+        unsubscribe = async_at_started(self.hass, _started)
+        try:
+            await started
+        except asyncio.CancelledError:
+            unsubscribe()
+            raise
 
     def _statistics_floor(self) -> datetime:
         """The oldest hour the statistics phase reads: ``days`` back, and no older than Tag Historian keeps."""
@@ -692,32 +784,25 @@ class HistoryImporter:
                 outcome, result = await self._async_send_hours(entity_id, tag, plan, hours[-1:], probe=True)
                 if outcome != _GO_ON or result is None:
                     return outcome
-                if tag in result.refused_tags:
-                    # The plan has no room for its tag; every hour would be refused.
+                if self._left_out(entity_id, tag, plan, result):
                     return _GO_ON
-                if result.refused_unit_mismatch:
-                    progress.statistics_left_out[entity_id] = (
-                        f"its statistics are in {plan.units or 'no unit'}, and its tag in Tag "
-                        "Historian has another unit"
-                    )
-                    return _GO_ON
-                if result.refused_unsupported:
-                    progress.statistics_left_out[entity_id] = (
-                        "Tag Historian does not take this kind of statistic"
-                    )
-                    return _GO_ON
-                line = min(started_at, result.importable_before.get(tag, started_at))
+                # The probe's hour has its answer, whatever it was: the
+                # batches start at the hour before it, so an hour the probe
+                # stored is not sent again and counted as skipped.
+                probed = datetime.fromtimestamp(hours[-1]["t"], UTC)
+                line = min(started_at, result.importable_before.get(tag, started_at), probed)
                 floor = self._statistics_floor()
                 month = statistics.month_start(line - HOUR)
                 continue
 
             if hours:
                 if pending and len(pending) + len(hours) > MAX_HOURS_PER_REQUEST:
-                    outcome, _ = await self._async_send_hours(entity_id, tag, plan, pending)
+                    outcome, result = await self._async_send_hours(entity_id, tag, plan, pending)
                     if outcome != _GO_ON:
                         return outcome
-                    progress.hours_cursor[entity_id] = pending_from.timestamp()
-                    await self._async_save()
+                    if result is not None and self._left_out(entity_id, tag, plan, result):
+                        return _GO_ON
+                    await self._async_answered(entity_id, pending_from)
                     pending = []
                 # Whole months, older in front: a month is never split
                 # between two requests.
@@ -726,12 +811,48 @@ class HistoryImporter:
             month = statistics.previous_month(month)
 
         if pending:
-            outcome, _ = await self._async_send_hours(entity_id, tag, plan, pending)
+            outcome, result = await self._async_send_hours(entity_id, tag, plan, pending)
             if outcome != _GO_ON:
                 return outcome
-            progress.hours_cursor[entity_id] = pending_from.timestamp()
-            await self._async_save()
+            if result is not None and self._left_out(entity_id, tag, plan, result):
+                return _GO_ON
+            await self._async_answered(entity_id, pending_from)
         return _GO_ON
+
+    def _left_out(
+        self, entity_id: str, tag: str, plan: statistics.EntityStatistics, result: HoursBatchResult
+    ) -> bool:
+        """Whether this answer leaves the rest of the entity's statistics out, and why.
+
+        Asked after every batch, not the probe's alone: an import carried on
+        after a restart sends no probe, and its first batch is the first
+        answer it gets - a tag refused, or given another unit since, would
+        otherwise have every month sent and refused, with no reason said.
+        """
+        progress = self.progress
+        if tag in result.refused_tags:
+            # The plan has no room for its tag; every hour would be refused.
+            # It is in refused_tags already, and the summary names it there.
+            return True
+        if result.refused_unit_mismatch:
+            progress.statistics_left_out[entity_id] = (
+                f"its statistics are in {plan.units or 'no unit'}, and its tag in Tag "
+                "Historian has another unit"
+            )
+            return True
+        if result.refused_unsupported:
+            progress.statistics_left_out[entity_id] = (
+                "Tag Historian does not take this kind of statistic"
+            )
+            return True
+        return False
+
+    async def _async_answered(self, entity_id: str, month: datetime) -> None:
+        """Tag Historian has answered for this entity's statistics back to ``month``: saved as its cursor."""
+        progress = self.progress
+        progress.hours_cursor[entity_id] = month.timestamp()
+        progress.resumed_on_load = 0
+        await self._async_save()
 
     async def _async_send_hours(
         self,
@@ -756,6 +877,7 @@ class HistoryImporter:
         # answer to the resend has them as duplicates, and they are counted
         # as stored, once.
         stored_before = 0
+        retries = _Retries()
 
         while True:
             try:
@@ -769,14 +891,18 @@ class HistoryImporter:
                 failures += 1
                 if failures >= IMPORT_MAX_CONNECTION_FAILURES:
                     progress.hours_stored += stored_before
-                    await self._async_finish(STATUS_STOPPED, STOP_UNREACHABLE, str(err))
+                    await self._async_finish(STATUS_STOPPED, _gave_up(err), str(err))
                     return _SESSION_STOPPED, None
                 await asyncio.sleep(IMPORT_RETRY_SECONDS)
                 continue
 
             if result.outcome is ImportOutcome.RETRY:
                 stored_before += result.stored
-                await asyncio.sleep(max(1, result.retry_after))
+                if (wait := retries.next_wait(result.retry_after)) is None:
+                    progress.hours_stored += stored_before
+                    await self._async_finish(STATUS_STOPPED, STOP_UNREACHABLE, result.message)
+                    return _SESSION_STOPPED, None
+                await asyncio.sleep(wait)
                 continue
             break
 
@@ -827,6 +953,16 @@ class HistoryImporter:
         progress.statistics_stop_reason = reason
         progress.statistics_message = result.message
         progress.statistics_resumes_at = _iso(result.resumes_at)
+        if (
+            reason == STOP_HOURS_UNSUPPORTED
+            and progress.statistics_started_at == progress.started_at
+            and not progress.hours_stored
+        ):
+            # This import set it, and Tag Historian took none of the years:
+            # they were not brought, so the offer stands for when it can take
+            # them (__init__._async_bring_years). A stamp an earlier import
+            # left, one that did bring them, is kept.
+            progress.statistics_started_at = None
         LOGGER.info(
             "Tag Historian's history import stopped bringing the long-term statistics (%s); "
             "it carries on with the recorded readings",
@@ -943,6 +1079,7 @@ class HistoryImporter:
         progress = self.progress
         readings = [reading for _, reading in pending]
         failures = 0
+        retries = _Retries()
 
         while True:
             try:
@@ -954,13 +1091,16 @@ class HistoryImporter:
             except TagHistorianConnectionError as err:
                 failures += 1
                 if failures >= IMPORT_MAX_CONNECTION_FAILURES:
-                    await self._async_finish(STATUS_STOPPED, STOP_UNREACHABLE, str(err))
+                    await self._async_finish(STATUS_STOPPED, _gave_up(err), str(err))
                     return None
                 await asyncio.sleep(IMPORT_RETRY_SECONDS)
                 continue
 
             if result.outcome is ImportOutcome.RETRY:
-                await asyncio.sleep(max(1, result.retry_after))
+                if (wait := retries.next_wait(result.retry_after)) is None:
+                    await self._async_finish(STATUS_STOPPED, STOP_UNREACHABLE, result.message)
+                    return None
+                await asyncio.sleep(wait)
                 continue
             break
 
@@ -986,6 +1126,7 @@ class HistoryImporter:
         if result.allowance_remaining is not None:
             progress.allowance_remaining = result.allowance_remaining
         progress.cursor[entity_id] = pending[-1][0]
+        progress.resumed_on_load = 0
         await self._async_save()
         self._changed()
 
@@ -1015,15 +1156,50 @@ class HistoryImporter:
         )
 
 
+class _Retries:
+    """How long one batch waits between "come back later" answers, and when it stops asking.
+
+    The wait doubles from one answer to the next, with Retry-After as its
+    floor and IMPORT_MAX_RETRY_WAIT_SECONDS as its ceiling, until the waits
+    add up to IMPORT_MAX_RETRY_SECONDS (const.py). Added up rather than read
+    off a clock, so the bound is the same however long the sends take.
+    """
+
+    def __init__(self) -> None:
+        self._waited = 0
+        self._wait = 0
+
+    def next_wait(self, retry_after: int) -> int | None:
+        """Seconds to wait before the next send, or None when this batch has waited long enough."""
+        if self._waited >= IMPORT_MAX_RETRY_SECONDS:
+            return None
+        self._wait = max(1, retry_after, min(self._wait * 2, IMPORT_MAX_RETRY_WAIT_SECONDS))
+        self._waited += self._wait
+        return self._wait
+
+
+def _gave_up(err: TagHistorianConnectionError) -> str:
+    """Why an import stops once a batch has failed IMPORT_MAX_CONNECTION_FAILURES times in a row.
+
+    Unreachable is carried on at the next start (_RESUMED_ON_LOAD). A 500
+    every time is Tag Historian answering, and the same batch would get the
+    same answer at every start: that waits for the import to be run again.
+    """
+    return STOP_FAILED if isinstance(err, TagHistorianServerError) else STOP_UNREACHABLE
+
+
+# Why the import stopped, said once it has. The readings' own limits say they
+# are the readings': neither counts the hourly history (the server's hours
+# import leaves both alone), so the hours above them in the summary stand.
 _STOP_SENTENCES = {
     STOP_ALLOWANCE: (
-        "It stopped because the account's import allowance is used up: your plan's daily "
-        "reading allowance times its full-resolution window. Live readings are not affected; "
-        "a larger plan raises the allowance."
+        "The readings stopped because the account's import allowance is used up: your plan's "
+        "daily reading allowance times its full-resolution window. Live readings are not "
+        "affected; a larger plan raises the allowance."
     ),
     STOP_STORAGE: (
-        "It stopped because the account reached its plan's storage cap. Live readings are "
-        "refused for the same reason until raw data ages out or the plan changes."
+        "The readings stopped because the account reached its plan's storage cap. Live readings "
+        "are refused for the same reason until raw data ages out or the plan changes."
     ),
     STOP_FORBIDDEN: "It stopped because Tag Historian is not accepting data from this account.",
     STOP_AUTH: (
@@ -1031,13 +1207,34 @@ _STOP_SENTENCES = {
         "import carries on where it stopped once it is accepted."
     ),
     STOP_UNREACHABLE: (
-        "It stopped because Tag Historian could not be reached. It carries on where it stopped "
-        "the next time Home Assistant starts, or run the import again: what Tag Historian "
-        "already has is recognised and not stored twice."
+        "It stopped because Tag Historian could not be reached, or did not take the history "
+        f"for {IMPORT_MAX_RETRY_SECONDS // 3600} hours. It carries on where it stopped the next "
+        "time Home Assistant starts, or run the import again: what Tag Historian already has is "
+        "recognised and not stored twice."
     ),
     STOP_UNKNOWN_IMPORT: "It stopped because Tag Historian no longer knows this import. Start a new one.",
     STOP_REJECTED: "It stopped because Tag Historian refused a batch it could not read.",
+    STOP_FAILED: (
+        "It stopped because of an error - in this integration, or one Tag Historian answered "
+        "the same batch with every time it was sent - and it does not carry on by itself: it "
+        "would meet the same error at every start. Run the import again once it is fixed: what "
+        "Tag Historian already has is recognised and not stored twice."
+    ),
 }
+
+# Unreachable, once it has been carried on IMPORT_MAX_RESUMES_ON_LOAD times
+# without getting any further: the next start leaves it, so it says so.
+UNREACHABLE_AGAIN_SENTENCE = (
+    "It stopped because Tag Historian could not be reached, again after carrying on by itself, "
+    "and it does not carry on by itself any more. Run the import again: what Tag Historian "
+    "already has is recognised and not stored twice."
+)
+
+# Said after a readings stop when the import brought the hourly history first.
+HOURS_UNAFFECTED_SENTENCE = (
+    "The hourly history above is not affected: it counts against neither the import allowance "
+    "nor the storage cap."
+)
 
 # Why the statistics phase stopped before the readings; the readings phase ran
 # all the same. The hourly allowance's sentence is _hours_allowance_sentence.
@@ -1048,6 +1245,10 @@ _STATISTICS_STOP_SENTENCES = {
     STOP_REJECTED: "Bringing the hourly statistics stopped: Tag Historian refused a batch it could not read.",
 }
 
+OFFERED_AGAIN_SENTENCE = (
+    "From the next time Home Assistant starts, a card under Settings, Repairs offers them again."
+)
+
 # Which entities have no long-term statistics at all, in Home Assistant's own
 # terms: selection.py offers each of these, and none of them has a
 # state_class. The website and the README say the same.
@@ -1055,6 +1256,11 @@ NO_STATISTICS_SENTENCE = (
     "Binary sensors, number and counter helpers, and sensors without a state_class have no "
     "long-term statistics."
 )
+
+
+def _hours(count: int) -> str:
+    """A count of hours, as a sentence says it: "1 hour", "744 hours"."""
+    return "1 hour" if count == 1 else f"{count} hours"
 
 
 def _month(epoch: float) -> str:
@@ -1074,9 +1280,7 @@ def _hours_allowance_sentence(progress: ImportProgress) -> str:
 
 def _statistics_summary(progress: ImportProgress) -> list[str]:
     """The statistics phase in words: what came, since when, and what did not and why."""
-    lines = [
-        f"{progress.hours_stored} hours of Home Assistant's long-term statistics imported."
-    ]
+    lines = [f"{_hours(progress.hours_stored)} of Home Assistant's long-term statistics imported."]
     if progress.hours_from:
         lines.append(
             "Hourly history back to: "
@@ -1087,9 +1291,10 @@ def _statistics_summary(progress: ImportProgress) -> list[str]:
             + "."
         )
     if progress.hours_skipped:
+        were = "was" if progress.hours_skipped == 1 else "were"
         lines.append(
-            f"{progress.hours_skipped} hours were already in Tag Historian, older than it keeps, "
-            "or not taken, and were skipped."
+            f"{_hours(progress.hours_skipped)} {were} already in Tag Historian, older than it "
+            f"keeps, or not taken, and {were} skipped."
         )
     if progress.no_statistics:
         lines.append(
@@ -1108,6 +1313,13 @@ def _statistics_summary(progress: ImportProgress) -> list[str]:
         )
         if progress.statistics_message and progress.statistics_stop_reason == STOP_REJECTED:
             lines.append(f"Tag Historian said: {progress.statistics_message}")
+        if (
+            progress.statistics_stop_reason == STOP_HOURS_UNSUPPORTED
+            and progress.statistics_started_at is None
+        ):
+            # None of them brought, by this import or any before it: the
+            # offer stands (__init__._async_bring_years).
+            lines.append(OFFERED_AGAIN_SENTENCE)
     return lines
 
 
@@ -1142,9 +1354,20 @@ def _summary(progress: ImportProgress) -> str:
             "has no room for more tags."
         )
     if progress.status == STATUS_STOPPED:
-        lines.append(_STOP_SENTENCES.get(progress.stop_reason, progress.message))
+        if (
+            progress.stop_reason == STOP_UNREACHABLE
+            and progress.resumed_on_load >= IMPORT_MAX_RESUMES_ON_LOAD
+        ):
+            lines.append(UNREACHABLE_AGAIN_SENTENCE)
+        else:
+            lines.append(_STOP_SENTENCES.get(progress.stop_reason, progress.message))
         if progress.message and progress.stop_reason in (STOP_FORBIDDEN, STOP_REJECTED):
             lines.append(f"Tag Historian said: {progress.message}")
+        elif progress.message and progress.stop_reason == STOP_FAILED:
+            # Not "Tag Historian said": the error may be this integration's own.
+            lines.append(f"The error was: {progress.message}")
+        if progress.statistics and progress.stop_reason in (STOP_ALLOWANCE, STOP_STORAGE):
+            lines.append(HOURS_UNAFFECTED_SENTENCE)
     return "\n\n".join(lines)
 
 

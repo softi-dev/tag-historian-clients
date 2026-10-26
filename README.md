@@ -236,18 +236,23 @@ Four screens:
    long-term statistics first, then the recorder's readings — see
    [Import your history](#import-your-history). Untick it to do that later,
    or never. The screen also says that this Home Assistant's **time zone** is
-   proposed to your account: Tag Historian's days, months and alert times are
-   in the account's zone, and it takes Home Assistant's only while nobody has
-   chosen one in Tag Historian's Settings, where it is changed.
+   proposed to your account. Your account's days, months and alert times are
+   in the account's time zone, and Tag Historian takes Home Assistant's only if
+   the account has none yet - none chosen under Settings, none on the account
+   owner's email channel under Alarms, and none proposed earlier. It is changed
+   under Settings.
 
 If your account has no free series at all and everything you picked would need
 one, setup stops and says so rather than finishing with an empty selection.
 
-**Already set up before version 2026.12.0?** The update leaves everything as it
-was — your selection, your saved buffer, your import's progress — and puts one
-card under **Settings → Repairs**: *Bring the years Home Assistant already has
-into Tag Historian*. Submitting it starts the same import the fourth screen
-does; it is asked once.
+**Already set up before version 2026.12.0?** The update keeps your selection,
+your saved buffer and your import's progress as they were. Like a new setup,
+it proposes this Home Assistant's **time zone** to your account from its first
+start - taken only if the account has none yet, as above, and changed under
+Settings. And it puts one card under **Settings → Repairs**: *Bring the years
+Home Assistant already has into Tag Historian*. Submitting it starts the same
+import the fourth screen does; it is asked once, and again if that Tag
+Historian could not take the years yet.
 
 Change any of it later: **Settings → Devices & services → Tag Historian →
 Configure → Change what you keep history for.**
@@ -297,8 +302,10 @@ since when, which had none and why, and what happened to the readings. A
 restart carries it on where it stopped - also one that stopped because Tag
 Historian could not be reached.
 
-What Tag Historian holds an import to — every number below is read from your
-own account, none of it is written into this integration:
+What Tag Historian holds an import to. The readings' allowance, your plan's
+full-resolution window, the tag limit and the storage cap are your own
+account's, read from Tag Historian and never written into this integration;
+the hourly history's terms are the same on every plan:
 
 - **History only.** Hours and readings older than the moment the import
   started, older than the first reading of the entity Tag Historian received

@@ -91,8 +91,10 @@ def test_a_meter_is_read_as_a_sum_an_average_as_a_mean_and_an_angle_not_at_all()
 def test_the_values_go_in_the_unit_the_entity_reads_in_when_home_assistant_can_convert_them() -> None:
     energy = StatisticInfo("sensor.e", "recorder", True, "none", "kWh")
 
-    assert plan_units(energy, "kWh") == ("kWh", None, "")
-    assert plan_units(energy, None) == ("kWh", None, ""), "an entity without a unit: as stored"
+    # Asked for by name even when nothing changes: asked for nothing, Home
+    # Assistant converts into whatever unit the read id's state has then.
+    assert plan_units(energy, "kWh") == ("kWh", {"energy": "kWh"}, "")
+    assert plan_units(energy, None) == ("kWh", {"energy": "kWh"}, ""), "an entity without a unit: as stored"
     units, convert, reason = plan_units(energy, "Wh")
     assert (units, reason) == ("Wh", "")
     assert convert == {"energy": "Wh"}
@@ -169,6 +171,30 @@ async def test_a_meter_read_in_another_unit_of_energy_is_converted_by_home_assis
     assert [row["state"] for row in rows] == [1500.0, 2500.0]
 
 
+async def test_a_plan_made_before_the_entity_had_a_state_keeps_its_unit_once_it_has_one(
+    recorder_mock, hass: HomeAssistant
+) -> None:
+    """A start that carries an import on can plan before the meter's integration has loaded.
+
+    Sent as kWh, the hours must come back as kWh - not in the Wh of a state
+    that appeared after the plan was made.
+    """
+    hours = _hours_back(2)
+    async_import_statistics(
+        hass,
+        _metadata("sensor.energy_meter", "kWh", has_sum=True),
+        [{"start": hour, "state": 1.5 + i, "sum": 1.5 + i} for i, hour in enumerate(hours)],
+    )
+    await async_wait_recording_done(hass)
+
+    plan = await statistics.async_plan(hass, history.Source("sensor.energy_meter"))
+    hass.states.async_set("sensor.energy_meter", "2500", {"unit_of_measurement": "Wh"})
+    rows = await statistics.async_rows(hass, plan, hours[0], hours[-1] + timedelta(hours=1))
+
+    assert plan.units == "kWh"
+    assert [row["state"] for row in rows] == [1.5, 2.5]
+
+
 async def test_an_entity_without_statistics_is_said_to_have_none(recorder_mock, hass: HomeAssistant) -> None:
     hass.states.async_set("binary_sensor.front_door", "off")
     await async_wait_recording_done(hass)
@@ -199,6 +225,57 @@ async def test_a_renamed_entitys_hours_come_from_its_former_id_up_to_the_rename(
     assert [row["state"] for row in rows] == [1.0, 2.0, 52.0, 53.0], (
         "the former id's hours before the rename, the entity's own after it"
     )
+
+
+async def test_a_former_id_in_another_unit_is_read_in_the_unit_the_series_is_sent_in(
+    recorder_mock, hass: HomeAssistant
+) -> None:
+    """The former id has no state of its own: asked for nothing, its rows came back in Wh and went as kWh."""
+    hours = _hours_back(4)
+    moved = hours[2]
+    async_import_statistics(
+        hass,
+        _metadata("sensor.energy_2", "Wh", has_sum=True),
+        [{"start": hour, "state": 1000.0 + i, "sum": 1000.0 + i} for i, hour in enumerate(hours)],
+    )
+    async_import_statistics(
+        hass,
+        _metadata("sensor.energy", "kWh", has_sum=True),
+        [{"start": hour, "state": 50.0 + i, "sum": 50.0 + i} for i, hour in enumerate(hours)],
+    )
+    hass.states.async_set("sensor.energy", "60", {"unit_of_measurement": "kWh"})
+    await async_wait_recording_done(hass)
+
+    plan = await statistics.async_plan(hass, history.Source("sensor.energy", "sensor.energy_2", moved))
+    rows = await statistics.async_rows(hass, plan, hours[0], hours[-1] + timedelta(hours=1))
+
+    assert plan.units == "kWh"
+    assert [row["state"] for row in rows] == pytest.approx([1.0, 1.001, 52.0, 53.0])
+
+
+async def test_a_former_id_in_a_unit_that_cannot_be_converted_is_left_alone(
+    recorder_mock, hass: HomeAssistant
+) -> None:
+    """A gas meter's m³ are not this energy meter's kWh: its own hours are read, the former id's are not."""
+    hours = _hours_back(4)
+    moved = hours[2]
+    async_import_statistics(
+        hass,
+        _metadata("sensor.energy_2", "m³", has_sum=True),
+        [{"start": hour, "state": 1.0 + i, "sum": 1.0 + i} for i, hour in enumerate(hours)],
+    )
+    async_import_statistics(
+        hass,
+        _metadata("sensor.energy", "kWh", has_sum=True),
+        [{"start": hour, "state": 50.0 + i, "sum": 50.0 + i} for i, hour in enumerate(hours)],
+    )
+    hass.states.async_set("sensor.energy", "60", {"unit_of_measurement": "kWh"})
+    await async_wait_recording_done(hass)
+
+    plan = await statistics.async_plan(hass, history.Source("sensor.energy", "sensor.energy_2", moved))
+    rows = await statistics.async_rows(hass, plan, hours[0], hours[-1] + timedelta(hours=1))
+
+    assert [row["state"] for row in rows] == [50.0, 51.0, 52.0, 53.0]
 
 
 async def test_the_month_helpers_walk_utc_months() -> None:

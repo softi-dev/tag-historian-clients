@@ -35,6 +35,15 @@ class TagHistorianConnectionError(TagHistorianError):
     """The host did not answer, or answered with something unusable."""
 
 
+class TagHistorianServerError(TagHistorianConnectionError):
+    """Tag Historian answered, with an error of its own (a 500) that it did not explain.
+
+    Retried like a lost connection - nothing is known to be stored - but it is
+    not a sign that Tag Historian cannot be reached, and the same batch may
+    well get the same answer every time (importer.STOP_FAILED).
+    """
+
+
 class TagHistorianAuthError(TagHistorianError):
     """401 - the key is wrong, revoked, or the account is inactive.
 
@@ -656,8 +665,12 @@ class TagHistorianClient:
             ) as response:
                 if response.status == 401:
                     raise TagHistorianAuthError("import")
+                # Read first, as it came: only a body that is empty on the
+                # wire means the route is not there (_classify_hours_import).
+                # aiohttp keeps it, so the JSON is read from the same bytes.
+                empty = not (await response.read()).strip()
                 body = await self._read_error_body(response)
-                return _classify_hours_import(response, body)
+                return _classify_hours_import(response, body, empty=empty)
         except (TimeoutError, aiohttp.ClientError) as err:
             raise TagHistorianConnectionError(str(err)) from err
 
@@ -889,10 +902,14 @@ def _import_status(
         LOGGER.error("Tag Historian refused an import batch with %s: %s", status, message)
         return ImportOutcome.REJECTED, 0
 
+    if status in (502, 504):
+        # The gateway lost the API for a moment: as good as unreachable.
+        raise TagHistorianConnectionError(f"import answered {status}")
     # A 500 and anything else unexpected: nothing is known to be stored, and
     # the endpoint skips what it already has, so it is retried like a socket
-    # error rather than ending the import.
-    raise TagHistorianConnectionError(f"import answered {status}")
+    # error rather than ending the import - but Tag Historian did answer, and
+    # an import that meets it every time is not carried on by itself.
+    raise TagHistorianServerError(f"import answered {status}")
 
 
 def _classify_import(response: aiohttp.ClientResponse, body: dict[str, Any]) -> ImportBatchResult:
@@ -938,7 +955,7 @@ def _count(source: dict[str, Any], key: str) -> int:
 
 
 def _classify_hours_import(
-    response: aiohttp.ClientResponse, body: dict[str, Any]
+    response: aiohttp.ClientResponse, body: dict[str, Any], *, empty: bool = False
 ) -> HoursBatchResult:
     """The answer to one hours batch: the import endpoint's statuses, and two of its own.
 
@@ -946,10 +963,13 @@ def _classify_hours_import(
       plan's tag limit times ten years of hours per rolling 30 days - and not
       the readings' allowance. It ends the statistics phase only, and comes
       back by itself at ``resumesAt``.
-    * 404 with no body at all is a route the server does not have: a Tag
-      Historian from before the hours import. That ends the statistics phase
-      and leaves the readings to theirs. "No such import" is a 404 with a body
-      that says so, and ends the session as on the readings endpoint.
+    * 404 with nothing at all on the wire (``empty``) is a route the server
+      does not have: a Tag Historian from before the hours import. That ends
+      the statistics phase and leaves the readings to theirs. "No such import"
+      is a 404 with the API's JSON that says so, and ends the session as on
+      the readings endpoint. Any other 404 - an HTML page from a proxy or the
+      ingress in front of a stopped API - is not Tag Historian's answer at
+      all, and is retried as an unreachable one is.
 
     A 503 can carry ``stored``: some months went in and some could not yet
     (the server's deploy, a file a reader held). Sent again, the batch stores
@@ -993,8 +1013,10 @@ def _classify_hours_import(
             message=message,
         )
 
-    if status == 404 and not body:
+    if status == 404 and empty:
         return HoursBatchResult(ImportOutcome.NOT_SUPPORTED, message=message)
+    if status == 404 and not body:
+        raise TagHistorianConnectionError("import answered 404 without Tag Historian's answer")
 
     outcome, retry_after = _import_status(response, body, message)
     return HoursBatchResult(

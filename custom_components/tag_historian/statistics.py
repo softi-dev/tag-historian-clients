@@ -164,20 +164,39 @@ def plan_units(info: StatisticInfo, entity_unit: str | None) -> tuple[str | None
     """The unit to send in, the conversion asked of Home Assistant, and why it cannot be done.
 
     The third value is empty unless the entity is to be left out.
+
+    The unit is asked for by name whenever a converter takes it, even when it
+    is the statistics' own: asked for nothing, Home Assistant converts each
+    read into the unit the read id's live state has at that moment - which
+    need not be the unit the series is sent as. A state that appeared after
+    the plan, or a former id with no state at all, was sent in the wrong
+    unit, a thousand times off for kWh read as Wh.
     """
     statistics_unit = info.statistics_unit
-    if entity_unit is None or entity_unit == statistics_unit:
-        return statistics_unit, None, ""
-
+    target = entity_unit if entity_unit is not None else statistics_unit
     converter = _converter(info)
-    if converter is not None and entity_unit in converter.VALID_UNITS:
-        return entity_unit, {converter.UNIT_CLASS: entity_unit}, ""
+    if converter is not None and target in converter.VALID_UNITS:
+        return target, {converter.UNIT_CLASS: target}, ""
+    if target == statistics_unit:
+        return statistics_unit, None, ""
 
     return (
         None,
         None,
         f"its long-term statistics are in {statistics_unit or 'no unit'} and it reads in "
         f"{entity_unit} now, which Home Assistant cannot convert",
+    )
+
+
+def _arrives_in(info: StatisticInfo, units: str | None, convert: dict[str, str] | None) -> bool:
+    """Whether this statistic's rows come back in ``units``: stored in it, or converted to it as asked."""
+    if info.statistics_unit == units:
+        return True
+    converter = _converter(info)
+    return (
+        converter is not None
+        and convert is not None
+        and convert.get(converter.UNIT_CLASS) == units
     )
 
 
@@ -206,10 +225,11 @@ async def async_plan(hass: HomeAssistant, source: history.Source) -> EntityStati
     if reason:
         return EntityStatistics(entity_id, info, reason=reason)
 
-    # A former id whose statistics are not the same kind as the entity's are
-    # not its history to send; read only the entity's own then.
+    # A former id whose statistics are not the same kind as the entity's, or
+    # cannot be read in the unit the series is sent in, are not its history
+    # to send; read only the entity's own then.
     former = metadata.get(source.former_id) if source.former_id else None
-    if former is not None and former.kind != info.kind:
+    if former is not None and (former.kind != info.kind or not _arrives_in(former, units, convert)):
         source = history.Source(entity_id)
 
     # The name and the unit as the live readings carry them (line_protocol):

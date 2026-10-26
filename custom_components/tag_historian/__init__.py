@@ -68,7 +68,7 @@ from .const import (
 )
 from .coordinator import QuotaCoordinator
 from .forwarder import ForwarderStats, StateForwarder
-from .importer import HistoryImporter, ImportAlreadyRunning
+from .importer import STOP_HOURS_UNSUPPORTED, HistoryImporter, ImportAlreadyRunning
 from .place import async_propose_place, async_propose_time_zone
 from .renames import (
     async_clear_renamed_issues,
@@ -329,8 +329,10 @@ async def async_setup_entry(
         entry.async_create_background_task(
             hass, async_propose_place(hass, client), f"{DOMAIN} propose place"
         )
-    # The time zone, always - the setup's last screen says so - and taken by
-    # Tag Historian only while nobody has chosen one (place.py).
+    # The time zone, at every setup, and taken by Tag Historian only if the
+    # account has no zone yet (place.py). A new entry's last screen says so;
+    # an entry set up before that screen proposes it from its first load after
+    # the update, which the README's upgrade paragraph and its repair card say.
     entry.async_create_background_task(
         hass, async_propose_time_zone(hass, client), f"{DOMAIN} propose time zone"
     )
@@ -351,17 +353,24 @@ def _async_bring_years(
     * An entry set up before that screen existed has no such option, and is
       offered the same on a repair card instead.
     * Unticked: nothing; the options dialog and the action are still there.
+    * Whichever it was, an import that met a Tag Historian that could not take
+      the statistics yet brought none of them: they are offered on the card
+      from then on, rather than started anew at every restart against a Tag
+      Historian that may still not take them.
 
     Each only until the statistics have been brought once
     (``statistics_started_at``, kept from one import to the next), and never
     while an import is running - one carried on after a restart, say.
     """
     importer = entry.runtime_data.importer
-    if importer.running or importer.progress.statistics_started_at:
+    progress = importer.progress
+    if importer.running or progress.statistics_started_at:
         return
     if not history.recorder_ready(hass):
         return
-    if CONF_IMPORT_ON_SETUP not in options:
+    if CONF_IMPORT_ON_SETUP not in options or (
+        progress.statistics_stop_reason == STOP_HOURS_UNSUPPORTED
+    ):
         async_raise_bring_years_issue(hass, entry)
         return
     if not options[CONF_IMPORT_ON_SETUP]:

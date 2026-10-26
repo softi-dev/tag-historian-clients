@@ -16,6 +16,7 @@ from custom_components.tag_historian.api import (
     TagHistorianClient,
     TagHistorianConnectionError,
     TagHistorianImportRefused,
+    TagHistorianServerError,
     WriteOutcome,
     _classify_429,
     _parse_dropped_points,
@@ -546,6 +547,40 @@ async def test_a_tag_historian_without_the_hours_endpoint_is_not_an_unknown_impo
     aioclient_mock.post(HOURS_URL, status=404)
 
     assert (await client.async_import_hours("imp-1", b"")).outcome is ImportOutcome.NOT_SUPPORTED
+
+
+async def test_a_404_page_from_something_in_front_of_tag_historian_is_not_its_answer(
+    client, aioclient_mock
+) -> None:
+    """An ingress's HTML 404 for a stopped API is retried as unreachable; it does not end the phase for good."""
+    aioclient_mock.post(
+        HOURS_URL,
+        status=404,
+        text="<html><body>404 - this container app is stopped</body></html>",
+        headers={"Content-Type": "text/html"},
+    )
+
+    with pytest.raises(TagHistorianConnectionError):
+        await client.async_import_hours("imp-1", b"")
+
+
+@pytest.mark.parametrize("status", [502, 504])
+async def test_a_gateway_that_lost_the_api_is_unreachable_not_a_server_error(
+    client, aioclient_mock, status
+) -> None:
+    aioclient_mock.post(BATCH_URL, status=status)
+
+    with pytest.raises(TagHistorianConnectionError) as raised:
+        await client.async_import_batch("imp-1", [READING])
+    assert not isinstance(raised.value, TagHistorianServerError)
+
+
+async def test_a_500_from_the_hours_endpoint_is_a_server_error(client, aioclient_mock) -> None:
+    """Retried as a lost connection is, but told apart: the importer does not carry it on by itself."""
+    aioclient_mock.post(HOURS_URL, status=500, json={"error": "An internal error occurred."})
+
+    with pytest.raises(TagHistorianServerError):
+        await client.async_import_hours("imp-1", b"")
 
 
 async def test_a_503_that_stored_part_of_the_batch_says_how_much(client, aioclient_mock) -> None:

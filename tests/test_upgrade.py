@@ -40,6 +40,8 @@ from custom_components.tag_historian.api import (
     ImportBatchResult,
     ImportOutcome,
     ImportSession,
+    TagHistorianConnectionError,
+    TagHistorianImportRefused,
     WriteOutcome,
     WriteResult,
 )
@@ -59,6 +61,7 @@ from custom_components.tag_historian.repairs import async_create_fix_flow, issue
 from .conftest import make_client
 
 CLIENT_PATH = "custom_components.tag_historian.TagHistorianClient"
+CONFIG_FLOW_CLIENT_PATH = "custom_components.tag_historian.config_flow.TagHistorianClient"
 POWER = "sensor.house_power"
 NOW = datetime(2026, 10, 17, 12, 0, tzinfo=UTC)
 ENTRY_ID = "upgraded_entry"
@@ -253,7 +256,7 @@ async def test_the_offer_to_an_existing_entry_appears_once_and_starts_the_years(
         issue = registry.async_get_issue(DOMAIN, card)
         assert issue is not None and issue.is_fixable
         assert issue.translation_placeholders == {"account": "Test House"}
-        client.async_start_import.assert_not_awaited(), "an offer, not a start"
+        client.async_start_import.assert_not_awaited()  # an offer, not a start
 
         flow = await async_create_fix_flow(hass, issue.issue_id, issue.data)
         flow.hass = hass
@@ -318,7 +321,7 @@ async def test_a_new_entry_left_unticked_neither_imports_nor_asks(hass: HomeAssi
 
 
 async def test_every_setup_proposes_home_assistants_time_zone(hass: HomeAssistant, freezer) -> None:
-    """Disclosed on the setup's last screen; taken only while nobody has chosen one."""
+    """Disclosed on the setup's last screen; taken only if the account has no zone yet."""
     freezer.move_to(NOW)
     await hass.config.async_update(time_zone="Europe/Stockholm")
     entry = make_entry(hass, **{CONF_IMPORT_ON_SETUP: False})
@@ -329,6 +332,192 @@ async def test_every_setup_proposes_home_assistants_time_zone(hass: HomeAssistan
         await hass.async_block_till_done(wait_background_tasks=True)
 
         client.async_propose_time_zone.assert_awaited_once_with("Europe/Stockholm")
+
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+def _cannot_take_hours(client: Any) -> None:
+    """A Tag Historian from before the hours import: 404 with nothing on the wire."""
+    client.async_import_hours.side_effect = None
+    client.async_import_hours.return_value = HoursBatchResult(ImportOutcome.NOT_SUPPORTED)
+
+
+async def test_a_new_entry_left_unticked_is_not_asked_after_changing_its_selection(
+    hass: HomeAssistant, freezer
+) -> None:
+    """The options dialog writes the options anew; the answer to the last screen goes with them."""
+    freezer.move_to(NOW)
+    hass.states.async_set(
+        POWER, "1500", {"device_class": "power", "state_class": "measurement", "unit_of_measurement": "W"}
+    )
+    entry = make_entry(hass, **{CONF_IMPORT_ON_SETUP: False})
+    client = importing_client()
+
+    with patch(CLIENT_PATH, return_value=client), patch(CONFIG_FLOW_CLIENT_PATH, return_value=client):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done(wait_background_tasks=True)
+
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {"next_step_id": "choose"}
+        )
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {CONF_ENTITIES: [POWER], CONF_MIN_INTERVAL: 30}
+        )
+        result = await hass.config_entries.options.async_configure(result["flow_id"], {})
+        # The options listener reloads the entry.
+        await hass.async_block_till_done(wait_background_tasks=True)
+
+        assert entry.options[CONF_IMPORT_ON_SETUP] is False
+        assert entry.options[CONF_MIN_INTERVAL] == 30, "the change went in, and the entry reloaded"
+        assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id(entry, ISSUE_BRING_YEARS)) is None
+        client.async_start_import.assert_not_awaited()
+
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_a_ticked_entry_whose_first_start_failed_tries_again_at_the_next_setup(
+    hass: HomeAssistant, freezer
+) -> None:
+    freezer.move_to(NOW)
+    entry = make_entry(hass, **{CONF_IMPORT_ON_SETUP: True})
+    client = importing_client()
+    session = client.async_start_import.return_value
+    client.async_start_import.side_effect = [TagHistorianConnectionError("down"), session]
+
+    with patch(CLIENT_PATH, return_value=client):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done(wait_background_tasks=True)
+        assert client.async_start_import.await_count == 1
+
+        assert await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done(wait_background_tasks=True)
+
+        assert client.async_start_import.await_count == 2, "nothing was started, so it is tried again"
+        assert client.hours_sent, "and the years went in"
+        assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id(entry, ISSUE_BRING_YEARS)) is None
+
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_an_import_the_last_version_left_unreachable_is_left_as_it_said_at_the_upgrade(
+    hass: HomeAssistant, hass_storage, freezer
+) -> None:
+    """2026.11 called every failure unreachable and said to run it again: not carried on, and the card is offered."""
+    freezer.move_to(NOW)
+    paused = {**SAVED_IMPORT, "status": "stopped", "stop_reason": "unreachable", "message": "down", "done": []}
+    hass_storage[IMPORT_KEY] = _version_1(IMPORT_KEY, paused)
+    entry = make_entry(hass)
+    client = importing_client()
+
+    with patch(CLIENT_PATH, return_value=client):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done(wait_background_tasks=True)
+
+        importer = entry.runtime_data.importer
+        assert not importer.running
+        assert importer.progress.import_id == "imp-2026-10"
+        assert importer.progress.status == "stopped"
+        client.async_import_batch.assert_not_awaited()
+        assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id(entry, ISSUE_BRING_YEARS)) is not None
+
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_the_offer_comes_back_when_the_tag_historian_could_not_take_the_years_yet(
+    hass: HomeAssistant, hass_storage, freezer
+) -> None:
+    """Answered against a Tag Historian without the hours import, none of the years were brought."""
+    freezer.move_to(NOW)
+    hass_storage[IMPORT_KEY] = _version_1(IMPORT_KEY, dict(SAVED_IMPORT))
+    entry = make_entry(hass)
+    client = importing_client()
+    _cannot_take_hours(client)
+    registry = ir.async_get(hass)
+    card = issue_id(entry, ISSUE_BRING_YEARS)
+
+    with patch(CLIENT_PATH, return_value=client):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        issue = registry.async_get_issue(DOMAIN, card)
+        flow = await async_create_fix_flow(hass, issue.issue_id, issue.data)
+        flow.hass = hass
+        await flow.async_step_confirm({})
+        await hass.async_block_till_done(wait_background_tasks=True)
+        assert entry.runtime_data.importer.progress.statistics_started_at is None
+
+        assert await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done(wait_background_tasks=True)
+        assert registry.async_get_issue(DOMAIN, card) is not None, "offered again"
+
+        # Answered again once Tag Historian takes them: brought, and not offered any more.
+        fixed = importing_client()
+        entry.runtime_data.importer._client = fixed
+        flow = await async_create_fix_flow(hass, issue.issue_id, issue.data)
+        flow.hass = hass
+        await flow.async_step_confirm({})
+        await hass.async_block_till_done(wait_background_tasks=True)
+        assert fixed.hours_sent
+        assert entry.runtime_data.importer.progress.statistics_started_at is not None
+        assert registry.async_get_issue(DOMAIN, card) is None
+
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_a_ticked_entry_that_met_a_tag_historian_without_the_hours_import_is_offered_them(
+    hass: HomeAssistant, freezer
+) -> None:
+    """Not started anew at every restart: from then on the card asks, and the user says when."""
+    freezer.move_to(NOW)
+    entry = make_entry(hass, **{CONF_IMPORT_ON_SETUP: True})
+    client = importing_client()
+    _cannot_take_hours(client)
+
+    with patch(CLIENT_PATH, return_value=client):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done(wait_background_tasks=True)
+        client.async_start_import.assert_awaited_once_with(hours=True)
+
+        assert await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done(wait_background_tasks=True)
+
+        assert client.async_start_import.await_count == 1, "not started again by itself"
+        assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id(entry, ISSUE_BRING_YEARS)) is not None
+
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_a_refused_start_from_the_card_says_why_and_leaves_the_card(
+    hass: HomeAssistant, hass_storage, freezer
+) -> None:
+    freezer.move_to(NOW)
+    hass_storage[IMPORT_KEY] = _version_1(IMPORT_KEY, dict(SAVED_IMPORT))
+    entry = make_entry(hass)
+    client = importing_client()
+    client.async_start_import.side_effect = TagHistorianImportRefused(
+        ImportOutcome.ALLOWANCE_SPENT, "Import allowance used up."
+    )
+    registry = ir.async_get(hass)
+    card = issue_id(entry, ISSUE_BRING_YEARS)
+
+    with patch(CLIENT_PATH, return_value=client):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        issue = registry.async_get_issue(DOMAIN, card)
+        flow = await async_create_fix_flow(hass, issue.issue_id, issue.data)
+        flow.hass = hass
+        result = await flow.async_step_confirm({})
+
+        assert result["type"] is FlowResultType.ABORT
+        assert result["reason"] == "import_refused"
+        assert result["description_placeholders"] == {"message": "Import allowance used up."}
+        assert registry.async_get_issue(DOMAIN, card) is not None, "for another try"
 
         assert await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()
