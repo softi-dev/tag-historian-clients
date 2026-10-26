@@ -280,10 +280,11 @@ order:
 
 A new installation does this by itself unless you untick **Bring the history
 Home Assistant already has** on the last setup screen, and one set up before
-2026.12.0 is offered it on a Repairs card (see [Set up](#set-up)). At any time: **Settings → Devices & services → Tag
-Historian → Configure → Import the history Home Assistant already has**, or the
-action `tag_historian.import_history` (from **Developer tools → Actions**, a
-script or an automation):
+2026.12.0 is offered it on a Repairs card (see [Set up](#set-up)). At any
+time: **Settings → Devices & services → Tag Historian → Configure → Import the
+history Home Assistant already has**, or the action
+`tag_historian.import_history` (from **Developer tools → Actions**, a script or
+an automation):
 
 ```yaml
 action: tag_historian.import_history

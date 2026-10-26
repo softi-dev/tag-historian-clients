@@ -1195,16 +1195,19 @@ class _Retries:
     waited for at exactly its Retry-After for the first
     IMPORT_MAX_TURN_RETRIES resends; a batch still refused after that is
     behind a stalled turn or a queue of several accounts, and doubles like
-    any other. A turn's resend leaves a wait the other answers have doubled
-    to as it was. The
-    waits are added up rather than read off a clock: the bound is on the
-    waits, and the time the sends themselves take comes on top.
+    any other, from its own Retry-After. A turn and the other answers each
+    double their own wait: a turn says nothing of a month not ready or the
+    write buffer, nor they of the turn, so neither starts the other's
+    doubling again or carries its wait into it. The waits are added up
+    rather than read off a clock: the bound is on the waits, and the time
+    the sends themselves take comes on top.
     """
 
     def __init__(self) -> None:
         self._waited = 0
         self._wait = 0
         self._turns = 0
+        self._turn_wait = 0
 
     def next_wait(self, retry_after: int, *, turn: bool = False) -> int | None:
         """Seconds to wait before the next send, or None when this batch has waited long enough."""
@@ -1213,10 +1216,10 @@ class _Retries:
         floor = min(max(1, retry_after), IMPORT_MAX_RETRY_WAIT_SECONDS)
         if turn and self._turns < IMPORT_MAX_TURN_RETRIES:
             self._turns += 1
-            wait = floor
-            # A wait other answers have already doubled to is kept: a turn
-            # between them does not start their doubling again.
-            self._wait = max(self._wait, floor)
+            self._turn_wait = wait = floor
+        elif turn:
+            self._turn_wait = max(floor, min(self._turn_wait * 2, IMPORT_MAX_RETRY_WAIT_SECONDS))
+            wait = self._turn_wait
         else:
             self._wait = max(floor, min(self._wait * 2, IMPORT_MAX_RETRY_WAIT_SECONDS))
             wait = self._wait

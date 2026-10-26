@@ -1593,8 +1593,9 @@ async def test_an_hours_batch_that_never_gets_its_turn_backs_off_and_stops_after
     assert max(no_waiting) == IMPORT_MAX_RETRY_WAIT_SECONDS
     assert sum(no_waiting) >= IMPORT_MAX_RETRY_SECONDS
     # The probe and 22 sends ("busy") or 21 ("account_busy"): held at what the
-    # code does, so a larger IMPORT_MAX_TURN_RETRIES has someone look again.
-    assert len(client.calls) <= 23, "not every few seconds for two hours"
+    # code does, so IMPORT_MAX_TURN_RETRIES changed either way - fewer turns
+    # at Retry-After, or more sends - has someone look again.
+    assert len(client.calls) == {"busy": 23, "account_busy": 22}[reason], "not every few seconds for two hours"
 
 
 @pytest.mark.parametrize("reason", ["months_not_ready", "read_failed", "ingest_busy"])
@@ -1630,6 +1631,25 @@ async def test_a_turn_between_other_come_back_laters_does_not_start_their_doubli
 
     assert importer.progress.status == STATUS_FINISHED
     assert no_waiting == [5, 10, 20, 40, 3, 80], "the turn at its Retry-After, then on from 40, not from 3"
+
+
+async def test_a_turn_still_refused_after_a_month_not_ready_doubles_from_its_own_retry_after(
+    hass: HomeAssistant, entry, stats, recorder, freezer, no_waiting
+) -> None:
+    """A month not ready says nothing of the turn: past its resends at Retry-After, the turn doubles from its own 3 s, not from the hold's wait."""
+    freezer.move_to(NOW)
+    stats.add_mean(POWER, NOW - timedelta(days=2), NOW)
+    hass.states.async_set(POWER, "1500", {"unit_of_measurement": "W"})
+    months = HoursBatchResult(ImportOutcome.RETRY, retry_after=300, reason="months_not_ready")
+    turn = HoursBatchResult(ImportOutcome.RETRY, retry_after=3, reason="busy")
+
+    client = Client(hours=[None, months, *[turn] * (IMPORT_MAX_TURN_RETRIES + 2)])
+    importer = make_importer(hass, entry, client)
+    await importer.async_start([POWER], None, statistics=True)
+    await _run(importer)
+
+    assert importer.progress.status == STATUS_FINISHED
+    assert no_waiting == [300, *[3] * IMPORT_MAX_TURN_RETRIES, 6, 12], "not 600 and 900"
 
 
 @pytest.mark.parametrize("reason", ["", "busy"])

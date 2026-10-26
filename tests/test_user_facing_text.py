@@ -760,12 +760,30 @@ def test_the_time_zone_is_sent_to_tag_historians_settings_not_home_assistants(su
     The setup screen said "none chosen in Tag Historian's Settings" a round
     before the README's copy of it did; "under Settings" sent the reader to
     Home Assistant's own. The setup screen and the repair card are held to the
-    same rule as the README.
+    same rule as the README, each on its own: joined, either one saying it
+    right would carry the other.
     """
-    text = flattened(README if surface == "README" else "\n".join(_translation_strings(TRANSLATIONS)))
-    assert "chosen under Settings" not in text
-    assert "changed under Settings" not in text
-    assert "none chosen in Tag Historian's Settings" in text
+    surfaces = (
+        {"README": README}
+        if surface == "README"
+        else {
+            "config.step.history": TRANSLATIONS["config"]["step"]["history"]["description"],
+            "issues.bring_years": TRANSLATIONS["issues"]["bring_years"]["fix_flow"]["step"]["confirm"]["description"],
+        }
+    )
+    everything = flattened(README if surface == "README" else "\n".join(_translation_strings(TRANSLATIONS)))
+    for bare in ("chosen under Settings", "changed under Settings", "chosen in Settings", "changed in Settings"):
+        assert bare not in everything, f"{surface} sends the reader to a bare Settings"
+    for where, text in surfaces.items():
+        assert "none chosen in Tag Historian's Settings" in flattened(text), f"{where} sends the reader to a bare Settings"
+
+
+def test_the_readme_names_the_setup_box_by_its_label() -> None:
+    """The README quotes the last setup screen's box twice; a label changed in en.json has to change it there too."""
+    label = TRANSLATIONS["config"]["step"]["history"]["data"]["import_on_setup"]
+    readme = flattened(README)
+    assert f"untick **{label}**" in readme
+    assert f"**{label}**, ticked" in readme
 
 
 def test_the_repair_card_says_nothing_of_an_update_to_an_entry_that_had_none() -> None:

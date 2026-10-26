@@ -53,7 +53,10 @@ CONF_SHARE_LOCATION: Final = "share_approximate_location"
 # already has - its long-term statistics first, then the recorder's readings
 # (importer.py). Asked on the last screen of a new entry, ticked by default.
 # An entry made before that screen existed has no such option at all, and is
-# offered the same through a repair card instead (repairs.py).
+# offered the same through a repair card instead (repairs.py). Its label
+# (import_on_setup in translations/en.json) is quoted by the README, by
+# taghistorian.com's home page and docs/home-assistant-hacs, and by the
+# Overview in Tag Historian; change them with it.
 CONF_IMPORT_ON_SETUP: Final = "import_on_setup"
 
 DEFAULT_HOST: Final = "api.taghistorian.com"
@@ -109,8 +112,8 @@ IMPORT_TIMEOUT_SECONDS: Final = 30
 # stops - stopped, not finished: running the action again carries on where it
 # left off. A 429/503 between two failures is a wait, not a failure, and does
 # not start the count again. taghistorian.com/docs/home-assistant-hacs quotes
-# the ten sends, as the README and the failed stop's notification do; change
-# both with it.
+# the ten sends, as the README does; change both with it. The failed stop's
+# notification reads it.
 IMPORT_RETRY_SECONDS: Final = 30
 IMPORT_MAX_CONNECTION_FAILURES: Final = 10
 
@@ -135,8 +138,9 @@ IMPORT_MAX_RETRY_WAIT_SECONDS: Final = 15 * 60
 # is sent again at exactly its Retry-After before it waits like any other 503.
 # The API keeps the hours turn ("busy") free for a refused batch until its
 # retry is due and renews that at every refusal, so beside one other import
-# the batch is always either in line (2 s) or kept for (Retry-After, 3 s), and
-# gets in when the batch ahead of it ends. Six resends, five seconds apart,
+# past its first batches (which go ahead of every other account by design) the
+# batch is either in line (2 s) or kept for (Retry-After, 3 s), and gets in
+# when the batch ahead of it ends. Six resends, five seconds apart,
 # cover a batch ahead of it for as long as its own client waits for it
 # (IMPORT_TIMEOUT_SECONDS); three covered some fifteen seconds, and a batch
 # ahead of it taking longer left this one doubling past the turn kept for it,
