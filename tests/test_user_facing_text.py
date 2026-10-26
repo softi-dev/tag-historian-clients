@@ -343,8 +343,16 @@ def test_every_error_and_abort_a_screen_can_show_has_words() -> None:
     # A 503's error on setup and reauthentication, and its abort on the
     # options screens, is picked by a helper rather than written at the call;
     # ask it.
-    by_503 = {config_flow._unavailable_reason(sign_in), config_flow._unavailable_reason(other)}
-    assert by_503 == {"key_not_checked", "unavailable"}
+    # Setup and reauthentication also say whether the address is known to be
+    # right; Configure's aborts never do.
+    setup_503 = {
+        config_flow._unavailable_reason(err, address_known=known)
+        for err in (sign_in, other)
+        for known in (False, True)
+    }
+    assert setup_503 == {"key_not_checked", "unavailable", "unavailable_known_host"}
+    options_503 = {config_flow._unavailable_reason(sign_in), config_flow._unavailable_reason(other)}
+    assert options_503 == {"key_not_checked", "unavailable"}
 
     _, _, action = keys_handed_out(tag_historian.async_start_import)
     assert {"import_key_not_checked", "import_unavailable", "import_cannot_connect"} <= action
@@ -353,14 +361,16 @@ def test_every_error_and_abort_a_screen_can_show_has_words() -> None:
         (
             "config",
             (config_flow.SelectionStepsMixin, config_flow.TagHistorianConfigFlow),
-            by_503,
-            set(),
+            setup_503,
+            # Chosen by Home Assistant's own helpers, not written in the flow:
+            # _abort_if_unique_id_configured and async_update_reload_and_abort.
+            {"already_configured", "reauth_successful"},
         ),
         (
             "options",
             (config_flow.SelectionStepsMixin, config_flow.TagHistorianOptionsFlow),
             set(),
-            by_503,
+            options_503,
         ),
     ):
         errors, reasons, _ = keys_handed_out(*owners)

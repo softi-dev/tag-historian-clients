@@ -31,6 +31,7 @@ from custom_components.tag_historian.const import (
     CONF_OWN_TAG_SINCE,
     CONF_SEND_AS,
     CONF_SHARE_LOCATION,
+    DIALOG_TIMEOUT_SECONDS,
     DOMAIN,
     MAX_IMPORT_DAYS,
 )
@@ -361,11 +362,13 @@ async def test_a_read_only_key_is_named_as_such(hass: HomeAssistant) -> None:
 
 @pytest.mark.parametrize(
     ("reason", "expected_error"),
-    [("sign_in_unavailable", "key_not_checked"), ("", "unavailable")],
+    [("sign_in_unavailable", "key_not_checked"), ("", "unavailable_known_host")],
 )
 async def test_a_503_after_the_first_call_is_still_not_cannot_connect(
     hass: HomeAssistant, reason, expected_error
 ) -> None:
+    """/api/customers/me answered with this account, so the address is right:
+    a 503 after it is not sent to the address."""
     client = make_client()
     client.async_get_quota.side_effect = TagHistorianUnavailableError(
         "/api/usage/limits", reason=reason, retry_after=35
@@ -451,7 +454,7 @@ async def test_reauth_replaces_the_key_in_place(hass: HomeAssistant) -> None:
 
 @pytest.mark.parametrize(
     ("reason", "expected_error"),
-    [("sign_in_unavailable", "key_not_checked"), ("", "unavailable")],
+    [("sign_in_unavailable", "key_not_checked"), ("", "unavailable_known_host")],
 )
 async def test_reauth_says_a_key_not_checked_and_keeps_the_old_one(
     hass: HomeAssistant, reason, expected_error
@@ -459,7 +462,8 @@ async def test_reauth_says_a_key_not_checked_and_keeps_the_old_one(
     """Not "did not accept that key": it was not looked at. Asked again, it can be.
 
     A 503 without the reason is not called a key not checked either - only
-    "could not do this just now".
+    "could not do this just now", with nothing about an address this form
+    does not show.
     """
     entry = MockConfigEntry(
         domain=DOMAIN, unique_id=STUB_ACCOUNT["customerId"], data=CREDENTIALS
@@ -485,6 +489,51 @@ async def test_reauth_says_a_key_not_checked_and_keeps_the_old_one(
     assert result["step_id"] == "reauth_confirm"
     assert result["errors"] == {"base": expected_error}
     assert entry.data[CONF_API_KEY] == CREDENTIALS[CONF_API_KEY]
+
+
+def _recording(built: list[dict]):
+    """A TagHistorianClient stand-in that records how each screen built it."""
+
+    def _build(*args, **kwargs):
+        built.append(kwargs)
+        return make_client()
+
+    return _build
+
+
+async def test_setup_and_reauth_wait_long_enough_for_a_key_not_checked(
+    hass: HomeAssistant,
+) -> None:
+    """The API may take up to about half a minute to say it could not check a key.
+
+    A screen that gave up after the write path's ten seconds said that answer
+    as "could not reach that host". Connecting is still bounded by ten
+    (test_api).
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN, unique_id=STUB_ACCOUNT["customerId"], data=CREDENTIALS
+    )
+    entry.add_to_hass(hass)
+    built: list[dict] = []
+
+    with patch(CLIENT_PATH, side_effect=_recording(built)), patch(
+        SETUP_PATH, return_value=True
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": SOURCE_USER}
+        )
+        await hass.config_entries.flow.async_configure(result["flow_id"], CREDENTIALS)
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": SOURCE_REAUTH, "entry_id": entry.entry_id},
+            data=entry.data,
+        )
+        await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_API_KEY: "a-different-key"}
+        )
+
+    assert built == [{"answer_within": DIALOG_TIMEOUT_SECONDS}] * 2
+    assert DIALOG_TIMEOUT_SECONDS > 30
 
 
 async def test_reauth_refuses_a_key_for_a_different_account(
@@ -989,7 +1038,11 @@ def loaded_entry(hass: HomeAssistant, house):
     )
     entry.add_to_hass(hass)
     entry.mock_state(hass, ConfigEntryState.LOADED)
-    entry.runtime_data = SimpleNamespace(importer=SimpleNamespace(running=False))
+    # What async_unload_entry stops at teardown, so the entry unloads cleanly.
+    entry.runtime_data = SimpleNamespace(
+        importer=SimpleNamespace(running=False, async_stop=AsyncMock()),
+        forwarder=SimpleNamespace(async_shutdown=AsyncMock()),
+    )
     with patch(
         "custom_components.tag_historian.config_flow.history.recorder_ready", return_value=True
     ), patch("custom_components.tag_historian.history.recorder_ready", return_value=True):
@@ -1099,6 +1152,24 @@ async def test_the_import_screen_says_when_the_key_could_not_be_checked(
 
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == expected
+
+
+async def test_configures_screens_wait_long_enough_for_a_key_not_checked(
+    hass: HomeAssistant, loaded_entry
+) -> None:
+    """As setup and reauthentication do: the selection's live numbers and the
+    import allowance are read with DIALOG_TIMEOUT_SECONDS to answer."""
+    built: list[dict] = []
+
+    with patch(CLIENT_PATH, side_effect=_recording(built)), patch(
+        SETUP_PATH, return_value=True
+    ):
+        result = await _open_choose(hass, loaded_entry)
+        assert result["step_id"] == "select"
+        result = await _open_import(hass, loaded_entry)
+        assert result["step_id"] == "import_history"
+
+    assert built == [{"answer_within": DIALOG_TIMEOUT_SECONDS}] * 2
 
 
 @pytest.mark.parametrize(

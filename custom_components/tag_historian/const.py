@@ -201,6 +201,15 @@ QUOTA_UPDATE_INTERVAL_MINUTES: Final = 15
 
 HTTP_TIMEOUT_SECONDS: Final = 10
 
+# How long a setup, reauthentication or Configure screen waits for Tag
+# Historian's answer once connected. When the API cannot check a key just now
+# it may take up to about half a minute to say so (a 503 with reason
+# sign_in_unavailable), and a screen that gave up sooner would wrongly say to
+# check the address. Connecting still gets HTTP_TIMEOUT_SECONDS, so an address
+# that does not answer is still said as one within that. Only the screens: the
+# forwarder's bounds are built on HTTP_TIMEOUT_SECONDS for a write.
+DIALOG_TIMEOUT_SECONDS: Final = 45
+
 # Repair issue ids. Stable strings - changing one orphans an issue that is
 # already showing in somebody's repairs panel.
 ISSUE_TAG_QUOTA: Final = "tag_quota_exceeded"
@@ -211,8 +220,9 @@ ISSUE_ENTITY_RENAMED: Final = "entity_renamed"
 ISSUE_BRING_YEARS: Final = "bring_years"
 
 # How long to wait before asking Tag Historian again to rename a tag after it
-# could not be reached or could not take the request. A rename that waits costs nothing - the readings go on
-# being stored under the old name meanwhile - so this is unhurried.
+# could not be reached or could not take the request. A rename that waits
+# costs nothing - the readings go on being stored under the old name
+# meanwhile - so this is unhurried.
 RENAME_RETRY_SECONDS: Final = 900
 
 # A single 503 is our problem and none of the user's business. Only after the

@@ -67,6 +67,7 @@
       "cannot_connect": "Could not reach that host. Check the address and that Home Assistant can get out to the internet.",
       "key_not_checked": "Tag Historian could not check the key just now. It answered, so the address is right, and this says nothing about the key itself. Try again in a minute.",
       "unavailable": "That address answered, but said it cannot serve this just now. Try again in a minute; if it keeps saying so, check the address.",
+      "unavailable_known_host": "Tag Historian answered, but could not do this just now. Try again in a minute.",
       "invalid_auth": "Tag Historian did not accept that key. Check you copied all of it, and that it has not been revoked.",
       "read_only_key": "That key's scope is Read. It can look at your data but not add to it - create a key with Scope set to Write instead.",
       "account_inactive": "That key belongs to an account that is not active. Sign in to the Tag Historian dashboard to see why.",
@@ -182,7 +183,7 @@
     },
     "service_unavailable": {
       "title": "Tag Historian has not been accepting data",
-      "description": "Writes have been failing for {minutes} minutes - Tag Historian is either unreachable or unable to take them just now: too busy, or unable to check this integration's key for the moment. Nothing about your account or the key has changed. Readings are being held, through a restart too, and will be sent when it accepts them again; if this goes on, the oldest are let go and read back from Home Assistant's recorder afterwards. Nothing needs doing at your end."
+      "description": "Writes have been failing for {minutes} minutes - Tag Historian has been answering that it cannot take them just now: it is too busy, or it cannot check this integration's key for the moment. Nothing about your account or the key has changed. Readings are being held, through a restart too, and will be sent when it accepts them again; if this goes on, the oldest are let go and read back from Home Assistant's recorder afterwards. Nothing needs doing at your end."
     },
     "entity_renamed": {
       "title": "{old} was renamed to {new} in Home Assistant",
@@ -206,7 +207,7 @@
           }
         },
         "abort": {
-          "carry_unavailable": "Tag Historian could not do this just now, so nothing was changed: it could not be reached, or could not take the request for the moment - too busy, or unable to check this integration's key. If Home Assistant has also asked for this integration's key again, the key was refused - give it a new one first. The readings go on into the old tag meanwhile, so nothing is lost. Try again from this card later.",
+          "carry_unavailable": "Tag Historian could not do this just now, so nothing was changed - it could not be reached or did not take the request. If Home Assistant has also asked for this integration's key again, the key was refused - give it a new one first. The readings go on into the old tag meanwhile, so nothing is lost. Try again from this card later.",
           "carry_refused": "Tag Historian refused, and nothing was changed. It said:\n\n{message}"
         }
       }

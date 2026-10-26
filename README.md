@@ -508,14 +508,14 @@ log as well as counted.
 
 ## When something goes wrong
 
-Everything below shows up in **Settings → Repairs**.
+Everything below that needs your attention shows up in **Settings → Repairs**.
 
 | What happened | What the integration does |
 |---|---|
 | Your API key was revoked | Asks for a new one through Home Assistant's normal re-authentication card, and stops retrying the dead key meanwhile |
 | Some readings exceed your plan's series count | Names the series, counts the readings that were lost, keeps sending everything else, and offers to reopen the picker so you can deselect |
 | Today's reading allowance is spent | Holds the newest readings — through a restart too — and waits exactly as long as the API asks; it does not hammer a closed door. What no longer fits in the buffer meanwhile is over the allowance: counted, not sent later |
-| Tag Historian is busy, briefly unreachable, or cannot check your key just now | Holds the readings and tries again after waiting as long as the API asks; only raises a card if it lasts, and that card never mentions your plan, because this is not about your plan. A key Tag Historian could not check (it answers `503` with reason `sign_in_unavailable`) is not a key it refused (`401`), and the integration never asks you for a new one for it |
+| Tag Historian is busy, cannot check your key just now, or cannot be reached | Holds the readings and tries again. When Tag Historian answered (busy, or unable to take them just now: `429` or `503`), it waits as long as the API asks, and raises a card only if that goes on for half an hour; that card never mentions your plan, because this is not about your plan. When nothing answers at all (your network or the host is down) there is no wait to honour: it tries again half a minute after each failed attempt and raises no card; the `last_error` attribute on the **readings dropped** sensor says why. A key Tag Historian could not check (it answers `503` with reason `sign_in_unavailable`) is not a key it refused (`401`), and the integration never asks you for a new one for it |
 | Your account cannot write yet | Shows Tag Historian's own explanation, word for word |
 | An entity you send was renamed | Follows it and keeps its readings arriving in its history; renames the series in Tag Historian if you switched that on, or asks you on a card - see [When you rename an entity](#when-you-rename-an-entity) |
 

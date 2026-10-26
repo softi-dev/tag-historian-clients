@@ -98,6 +98,7 @@ from .const import (
     CONF_SHARE_LOCATION,
     DEFAULT_HOST,
     DEFAULT_MIN_INTERVAL_SECONDS,
+    DIALOG_TIMEOUT_SECONDS,
     DOMAIN,
     MAX_IMPORT_DAYS,
 )
@@ -475,9 +476,19 @@ class TagHistorianConfigFlow(SelectionStepsMixin, ConfigFlow, domain=DOMAIN):
         to be Tag Historian's (a proxy or another service at a mistyped
         address answers 503 too), so it is said as "answered, but could not
         do this just now": try again, and check the address if it persists.
+        Only on the first call: once /api/customers/me has answered with this
+        account the address is right, and a 503 after it says only to try
+        again.
+
+        The screen waits DIALOG_TIMEOUT_SECONDS for an answer, because the
+        API may take up to about half a minute to answer that 503; connecting
+        is still bounded by HTTP_TIMEOUT_SECONDS.
         """
         client = TagHistorianClient(
-            async_get_clientsession(self.hass), self._host, self._api_key
+            async_get_clientsession(self.hass),
+            self._host,
+            self._api_key,
+            answer_within=DIALOG_TIMEOUT_SECONDS,
         )
 
         try:
@@ -510,7 +521,7 @@ class TagHistorianConfigFlow(SelectionStepsMixin, ConfigFlow, domain=DOMAIN):
         except TagHistorianAuthError:
             return {"base": "invalid_auth"}
         except TagHistorianUnavailableError as err:
-            return {"base": _unavailable_reason(err)}
+            return {"base": _unavailable_reason(err, address_known=True)}
         except TagHistorianConnectionError:
             return {"base": "cannot_connect"}
 
@@ -583,7 +594,10 @@ class TagHistorianConfigFlow(SelectionStepsMixin, ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             self._api_key = user_input[CONF_API_KEY]
             client = TagHistorianClient(
-                async_get_clientsession(self.hass), self._host, self._api_key
+                async_get_clientsession(self.hass),
+                self._host,
+                self._api_key,
+                answer_within=DIALOG_TIMEOUT_SECONDS,
             )
             try:
                 account = await client.async_validate()
@@ -592,8 +606,9 @@ class TagHistorianConfigFlow(SelectionStepsMixin, ConfigFlow, domain=DOMAIN):
             except TagHistorianUnavailableError as err:
                 # Not this key refused. With reason sign_in_unavailable no key
                 # could be checked just now; any other 503 is a moment's
-                # trouble at that address.
-                errors["base"] = _unavailable_reason(err)
+                # trouble at the entry's own address, which this screen
+                # cannot change.
+                errors["base"] = _unavailable_reason(err, address_known=True)
             except TagHistorianConnectionError:
                 errors["base"] = "cannot_connect"
             else:
@@ -618,16 +633,25 @@ class TagHistorianConfigFlow(SelectionStepsMixin, ConfigFlow, domain=DOMAIN):
         )
 
 
-def _unavailable_reason(err: TagHistorianUnavailableError) -> str:
+def _unavailable_reason(
+    err: TagHistorianUnavailableError, *, address_known: bool = False
+) -> str:
     """The error or abort for a 503, on setup, reauthentication and Configure alike.
 
     A key not checked (reason ``sign_in_unavailable``) is said as that. Any
     other 503 - answered by Tag Historian, or by whatever stands at that
-    address, but not served just now - is ``unavailable``: not "could not
-    reach", because something answered, and not "could not check the key",
-    because nothing says so.
+    address, but not served just now - is not "could not reach", because
+    something answered, and not "could not check the key", because nothing
+    says so. On the setup screen's first call the address was just typed and
+    nothing has shown it is Tag Historian's, so ``unavailable`` says to check
+    it if it persists. Once it has answered with this account, or on
+    reauthentication, where the address is the entry's and is not on the
+    form, there is nothing there to check: ``unavailable_known_host`` says
+    only to wait. Configure's aborts have no such clause and pass nothing.
     """
-    return "key_not_checked" if err.key_not_checked else "unavailable"
+    if err.key_not_checked:
+        return "key_not_checked"
+    return "unavailable_known_host" if address_known else "unavailable"
 
 
 class TagHistorianOptionsFlow(SelectionStepsMixin, OptionsFlow):
@@ -656,6 +680,7 @@ class TagHistorianOptionsFlow(SelectionStepsMixin, OptionsFlow):
             async_get_clientsession(self.hass),
             entry.data[CONF_HOST],
             entry.data[CONF_API_KEY],
+            answer_within=DIALOG_TIMEOUT_SECONDS,
         )
         try:
             self._quota = await client.async_get_quota()
@@ -760,6 +785,7 @@ class TagHistorianOptionsFlow(SelectionStepsMixin, OptionsFlow):
             async_get_clientsession(self.hass),
             entry.data[CONF_HOST],
             entry.data[CONF_API_KEY],
+            answer_within=DIALOG_TIMEOUT_SECONDS,
         )
         try:
             allowance = await client.async_get_import_allowance()

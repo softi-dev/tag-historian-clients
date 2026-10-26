@@ -372,11 +372,25 @@ class TagHistorianClient:
     """Calls Tag Historian on behalf of one config entry."""
 
     def __init__(
-        self, session: aiohttp.ClientSession, host: str, api_key: str
+        self,
+        session: aiohttp.ClientSession,
+        host: str,
+        api_key: str,
+        *,
+        answer_within: float = HTTP_TIMEOUT_SECONDS,
     ) -> None:
+        """``answer_within`` bounds each read (``_get_json``) once connected.
+
+        The screens pass DIALOG_TIMEOUT_SECONDS, so a 503 the API takes a
+        while to send is read as its answer rather than as a host that could
+        not be reached; connecting is always bounded by HTTP_TIMEOUT_SECONDS.
+        Writes, imports and proposals keep HTTP_TIMEOUT_SECONDS whatever this
+        says: the forwarder's bounds are built on it.
+        """
         self._session = session
         self._base = self._normalise_host(host)
         self._api_key = api_key
+        self._answer_within = answer_within
 
     @staticmethod
     def _normalise_host(host: str) -> URL:
@@ -408,7 +422,9 @@ class TagHistorianClient:
             async with self._session.get(
                 self._base.join(URL(path)).update_query(params),
                 headers=self._headers(),
-                timeout=aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SECONDS),
+                timeout=aiohttp.ClientTimeout(
+                    total=self._answer_within, connect=HTTP_TIMEOUT_SECONDS
+                ),
             ) as response:
                 if response.status == 401:
                     raise TagHistorianAuthError(path)

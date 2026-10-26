@@ -23,6 +23,10 @@ from custom_components.tag_historian.api import (
     _parse_dropped_points,
     _parse_skipped_tags,
 )
+from custom_components.tag_historian.const import (
+    DIALOG_TIMEOUT_SECONDS,
+    HTTP_TIMEOUT_SECONDS,
+)
 
 WRITE_URL = "https://api.taghistorian.com/api/v2/write?precision=s"
 BODY = "°C,domain=sensor,entity_id=outdoor_temperature value=21.5 1786528800"
@@ -240,6 +244,52 @@ async def test_a_key_that_could_not_be_checked_is_not_a_connection_failure_to_a_
     assert raised.value.key_not_checked
     assert raised.value.reason == "sign_in_unavailable"
     assert raised.value.retry_after == 37
+
+
+class _TimeoutRecorder:
+    """A session that only records the timeout each GET was given."""
+
+    def __init__(self) -> None:
+        self.timeouts: list = []
+
+    def get(self, url, **kwargs):
+        self.timeouts.append(kwargs["timeout"])
+        return _Answered()
+
+
+class _Answered:
+    status = 200
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc) -> bool:
+        return False
+
+    async def json(self) -> dict:
+        return {"customerId": "00000000-0000-0000-0000-000000000001"}
+
+
+@pytest.mark.parametrize(
+    ("answer_within", "total"),
+    [(None, HTTP_TIMEOUT_SECONDS), (DIALOG_TIMEOUT_SECONDS, DIALOG_TIMEOUT_SECONDS)],
+)
+async def test_a_screen_waits_longer_for_the_answer_but_not_to_connect(
+    answer_within, total
+) -> None:
+    """The API may take up to about half a minute to answer a 503 for a key it
+    could not check. A screen's client waits that out; connecting stays bounded
+    by HTTP_TIMEOUT_SECONDS, so an address that does not answer is still said
+    as one. The runtime clients pass nothing and keep ten seconds in all."""
+    session = _TimeoutRecorder()
+    kwargs = {} if answer_within is None else {"answer_within": answer_within}
+    client = TagHistorianClient(session, "api.taghistorian.com", "k", **kwargs)
+
+    await client.async_validate()
+
+    (timeout,) = session.timeouts
+    assert timeout.total == total
+    assert timeout.connect == HTTP_TIMEOUT_SECONDS
 
 
 async def test_another_503_is_unavailable_but_not_a_key_not_checked(
