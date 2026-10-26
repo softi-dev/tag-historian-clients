@@ -233,6 +233,18 @@ def _format_value(value: float) -> str:
 FRIENDLY_NAME_FIELD = "friendly_name_str"
 UNIT_FIELD = "unit_of_measurement_str"
 
+# And two that say whether the tag is a meter, under the same names: a
+# sensor's state class, and - for a total that starts over each period - when
+# it last did. The API makes a tag nobody has chosen a type for a Counter
+# from them: total_increasing always, total only with a last reset, because
+# a total without one may be a net meter that goes down as well as up
+# (HomeAssistantAttributes.IsMeter in the API).
+STATE_CLASS_FIELD = "state_class_str"
+LAST_RESET_FIELD = "last_reset_str"
+
+# Longer than any state class or ISO timestamp Home Assistant writes.
+MAX_METER_ATTRIBUTE_LENGTH = 64
+
 # The longest friendly name and unit the API keeps - its limits on a tag's
 # description and units. Anything longer it ignores rather than cuts, so it is
 # not worth the bytes on every reading.
@@ -272,6 +284,8 @@ def encode_point(
     timestamp: datetime,
     unit: str | None = None,
     friendly_name: str | None = None,
+    state_class: object = None,
+    last_reset: object = None,
 ) -> str:
     """Encode one reading as one line of InfluxDB line protocol.
 
@@ -298,6 +312,11 @@ def encode_point(
     field is safe where a tag is not: the API takes the reading from ``value``
     and reads only those two besides, as the tag's unit and description; an
     API from before that ignored every field but ``value``.
+
+    ``state_class`` and ``last_reset`` go out as :data:`STATE_CLASS_FIELD`
+    and :data:`LAST_RESET_FIELD` the same way, when the entity has them. The
+    last reset arrives as an ISO string, or a datetime from an integration
+    that sets it as one, and is sent as ISO either way.
     """
     fields = [f"value={_format_value(value)}"]
     name_text = _attribute_text(friendly_name, MAX_FRIENDLY_NAME_LENGTH)
@@ -306,6 +325,16 @@ def encode_point(
     unit_text = _attribute_text(unit, MAX_UNIT_LENGTH)
     if unit_text is not None:
         fields.append(f"{UNIT_FIELD}={_string_field(unit_text)}")
+    class_text = _attribute_text(
+        str(state_class) if state_class is not None else None, MAX_METER_ATTRIBUTE_LENGTH
+    )
+    if class_text is not None:
+        fields.append(f"{STATE_CLASS_FIELD}={_string_field(class_text)}")
+    if isinstance(last_reset, datetime):
+        last_reset = last_reset.isoformat()
+    reset_text = _attribute_text(last_reset, MAX_METER_ATTRIBUTE_LENGTH)
+    if reset_text is not None:
+        fields.append(f"{LAST_RESET_FIELD}={_string_field(reset_text)}")
 
     measurement = _escape(unit or entity_id)
     line = (

@@ -902,3 +902,119 @@ async def test_a_shutdown_during_a_quota_pause_still_counts_the_backlog(
 
     assert forwarder.stats.dropped_shutdown == 1
     assert forwarder.stats.queued == 0
+
+
+# --------------------------------------------------------------------------
+# A meter's trailing send
+# --------------------------------------------------------------------------
+
+METER = "sensor.energy_meter"
+METER_ATTRIBUTES = {"state_class": "total_increasing", "unit_of_measurement": "kWh"}
+
+
+def _sent(client: StubClient) -> list[tuple[str, int]]:
+    """(value, timestamp) of every line sent, in order."""
+    return [
+        (line.split(" ")[1].split(",")[0].removeprefix("value="), int(line.rsplit(" ", 1)[1]))
+        for line in client.lines
+    ]
+
+
+async def test_a_meters_newest_reading_the_interval_held_back_goes_out_when_it_is_up(
+    hass: HomeAssistant, entry, make_forwarder, freezer
+) -> None:
+    """A burst ends on the reading the meter really ended on, at its own time."""
+    client = StubClient()
+    forwarder = make_forwarder(hass, entry, client, entities=[METER], min_interval=60)
+    start = dt_util.utcnow()
+
+    hass.states.async_set(METER, "10.0", METER_ATTRIBUTES)
+    freezer.tick(timedelta(seconds=5))
+    hass.states.async_set(METER, "10.1", METER_ATTRIBUTES)
+    freezer.tick(timedelta(seconds=5))
+    hass.states.async_set(METER, "10.2", METER_ATTRIBUTES)  # then quiet
+    await hass.async_block_till_done()
+    await _tick(hass, 2)
+    assert [value for value, _ in _sent(client)] == ["10.0"], "inside the interval: held"
+
+    await _advance(hass, freezer, 55)
+    await _tick(hass, 2)
+
+    assert _sent(client) == [
+        ("10.0", int(start.timestamp())),
+        ("10.2", int(start.timestamp()) + 10),
+    ], "the newest held reading, with its own time"
+    assert forwarder.stats.dropped_throttled == 1, "10.1, replaced before it went out"
+    assert 'state_class_str="total_increasing"' in client.lines[-1]
+
+
+async def test_a_meters_held_reading_gives_way_to_a_newer_one_that_is_sent(
+    hass: HomeAssistant, entry, make_forwarder, freezer
+) -> None:
+    client = StubClient()
+    forwarder = make_forwarder(hass, entry, client, entities=[METER], min_interval=60)
+
+    hass.states.async_set(METER, "10.0", METER_ATTRIBUTES)
+    freezer.tick(timedelta(seconds=30))
+    hass.states.async_set(METER, "10.1", METER_ATTRIBUTES)  # held
+    freezer.tick(timedelta(seconds=40))
+    # 70 s after the first: not held back, and the held one has nothing left to say.
+    hass.states.async_set(METER, "10.3", METER_ATTRIBUTES)
+    await hass.async_block_till_done()
+    await _advance(hass, freezer, 120)
+    await _tick(hass, 2)
+
+    assert [value for value, _ in _sent(client)] == ["10.0", "10.3"]
+    assert forwarder.stats.dropped_throttled == 1
+
+
+async def test_a_meter_sends_at_most_one_reading_per_interval_trailing_ones_included(
+    hass: HomeAssistant, entry, make_forwarder, freezer
+) -> None:
+    """The rate the review screen's arithmetic promises holds for meters too."""
+    client = StubClient()
+    make_forwarder(hass, entry, client, entities=[METER], min_interval=60)
+
+    for second in range(0, 600, 5):  # a reading every 5 s for ten minutes
+        hass.states.async_set(METER, str(10 + second / 1000), METER_ATTRIBUTES)
+        await hass.async_block_till_done()
+        await _advance(hass, freezer, 5)
+    await _advance(hass, freezer, 120)
+    await _tick(hass, 2)
+
+    assert len(client.lines) <= 600 // 60 + 1
+
+
+async def test_a_measurement_held_back_by_the_interval_is_not_sent_later(
+    hass: HomeAssistant, entry, make_forwarder, freezer
+) -> None:
+    """Only a meter gets a trailing send: for a level the interval is the point."""
+    client = StubClient()
+    forwarder = make_forwarder(hass, entry, client, entities=["sensor.house_power"], min_interval=60)
+
+    hass.states.async_set("sensor.house_power", "1500", {"state_class": "measurement"})
+    freezer.tick(timedelta(seconds=5))
+    hass.states.async_set("sensor.house_power", "1510", {"state_class": "measurement"})
+    await hass.async_block_till_done()
+    await _advance(hass, freezer, 120)
+    await _tick(hass, 2)
+
+    assert [value for value, _ in _sent(client)] == ["1500.0"]
+    assert forwarder.stats.dropped_throttled == 1
+
+
+async def test_a_meters_held_reading_goes_with_the_last_flush_on_shutdown(
+    hass: HomeAssistant, entry, make_forwarder, freezer
+) -> None:
+    client = StubClient()
+    forwarder = make_forwarder(hass, entry, client, entities=[METER], min_interval=60)
+
+    hass.states.async_set(METER, "10.0", METER_ATTRIBUTES)
+    freezer.tick(timedelta(seconds=5))
+    hass.states.async_set(METER, "10.1", METER_ATTRIBUTES)
+    await hass.async_block_till_done()
+
+    await forwarder.async_shutdown()
+
+    assert [value for value, _ in _sent(client)] == ["10.0", "10.1"]
+    assert forwarder.stats.dropped_throttled == 0

@@ -87,6 +87,27 @@ def test_the_field_names_are_the_ones_the_api_and_home_assistant_use():
     be a field the API skips without a word."""
     assert line_protocol.FRIENDLY_NAME_FIELD == "friendly_name_str"
     assert line_protocol.UNIT_FIELD == "unit_of_measurement_str"
+    # And the two that make a meter a meter (HomeAssistantAttributes.IsMeter).
+    assert line_protocol.STATE_CLASS_FIELD == "state_class_str"
+    assert line_protocol.LAST_RESET_FIELD == "last_reset_str"
+
+
+def test_a_meters_state_class_and_last_reset_go_along_as_fields():
+    """So Tag Historian makes the tag a meter by itself, as Home Assistant says it is."""
+    reset = datetime(2026, 8, 1, tzinfo=UTC)
+    line = encode_point("sensor.energy", 120.5, TS, "kWh", None, "total", reset)
+
+    assert line == (
+        "kWh,domain=sensor,entity_id=energy "
+        'value=120.5,unit_of_measurement_str="kWh",state_class_str="total",'
+        'last_reset_str="2026-08-01T00:00:00+00:00" '
+        "1786528800"
+    )
+    # As Home Assistant's state machine holds them: a string, and no reset.
+    assert encode_point("sensor.energy", 1, TS, None, None, "total_increasing", None).endswith(
+        'value=1.0,state_class_str="total_increasing" 1786528800'
+    )
+    assert "_str" not in encode_point("sensor.energy", 1, TS)
 
 
 def test_quotes_and_backslashes_in_a_name_are_escaped_inside_the_field():
