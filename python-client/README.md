@@ -202,7 +202,7 @@ try:
 except TagHistorianRateLimitError as e:
     print(f"still rate limited after {e.attempts} attempts, last Retry-After was {e.retry_after}s")
 except TagHistorianUnavailableError as e:
-    print(f"gave up, try again in a few minutes: {e.message}")  # says why, and how long it waited
+    print(f"try again in a few minutes: {e.message}")  # says why, and how long it waited
 except TagHistorianAPIError as e:
     print(f"rejected: HTTP {e.status_code}: {e.message}")
     if e.violations:
@@ -220,14 +220,14 @@ rather than guessing a backoff. They are two different answers and are budgeted 
 
 - `429` is a rate limit - the account is sending faster than it may. Retried `max_retries` times
   (default 3), then `TagHistorianRateLimitError`.
-- `503` is Tag Historian briefly unavailable: its write buffer momentarily full, or an API key it
-  could not check just now because of a moment's trouble on its side (the body says
-  `"reason": "sign_in_unavailable"`, with a `Retry-After` of 30-45 seconds). Neither is a rate limit,
-  and neither says anything about your request or your key - a key that was checked and refused is
-  a `401`. Retried for as long as the waits add up to no more than `unavailable_budget` seconds
-  (default 300; each wait at least a second, so even a `503` that asks for no wait ends inside the
-  budget), so an outage of a minute or two passes inside one call; a longer one raises
-  `TagHistorianUnavailableError`.
+- `503` is Tag Historian briefly unavailable: its write buffer momentarily full, a restart, or an
+  API key it could not check just now because of a moment's trouble on its side (the body says
+  `"reason": "sign_in_unavailable"`, with a `Retry-After` of 30-45 seconds). None of them is a rate
+  limit, and none says anything about your request or your key - a key that was checked and refused
+  is a `401`. Retried for as long as the waits add up to no more than `unavailable_budget` seconds
+  (default 300; each wait is at least a second, and a `Retry-After` under a second backs off as a
+  missing one does, so the retries end even when a `503` asks for no wait), so an outage of a
+  minute or two passes inside one call; a longer one raises `TagHistorianUnavailableError`.
 
 A `400`/`401`/`403`/`404` is never retried - retrying an unchanged, rejected request cannot
 succeed. Tune or disable this with `RetryConfig`:
@@ -245,7 +245,10 @@ See the docstring on `RetryConfig` for the full set of knobs (backoff base/ceili
 `unavailable_budget` for 503s, and a `sleep` override for tests or custom pacing).
 
 0.2.0 split the `503` out of `TagHistorianRateLimitError`: code that caught that for a `503`
-catches `TagHistorianUnavailableError` now (`TagHistorianAPIError` still catches both).
+catches `TagHistorianUnavailableError` now (`TagHistorianAPIError` still catches both). It also
+made the default `timeout` `(10.0, 45.0)`: ten seconds to connect, 45 to answer, because the API
+may take up to about half a minute to answer that `503` when it cannot check a key - waited out as
+a `503` rather than failing as a network error.
 
 ## Self-hosted / staging
 

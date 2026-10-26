@@ -84,9 +84,10 @@ _CONTENT_DISPOSITION_FILENAME_RE = re.compile(r"filename\*?=(?:UTF-8'')?\"?([^\"
 
 # The shortest wait between two 503s, whatever Retry-After or
 # RetryConfig.backoff_base say. unavailable_budget counts seconds waited, so a
-# wait of 0 s (Retry-After: 0 from a proxy, or backoff_base=0 and no header)
-# would spend none of it and the call would never return. Tag Historian itself
-# always asks for a second or more.
+# wait of 0 s (backoff_base=0 and no header) would spend none of it and the
+# call would never return. Tag Historian itself always asks for a second or
+# more; a shorter Retry-After (a proxy's 0) is read as no header, so the
+# backoff applies rather than a request a second.
 _MIN_UNAVAILABLE_WAIT = 1.0
 
 # The write endpoints' 503 names a reason but carries no sentence for a
@@ -107,8 +108,13 @@ class TagHistorianClient:
         ``write``/``write_batch``/``create_tag``), Admin maps to Admin.
     :param base_url: Overridable for self-hosted deployments or staging;
         defaults to the public API.
-    :param timeout: Per-request timeout in seconds, passed straight to
-        ``requests``.
+    :param timeout: Per-request ``(connect, read)`` timeout in seconds,
+        passed straight to ``requests``; a float applies to both. The read
+        part covers the up to about half a minute the API may take to answer
+        a ``503`` with reason ``sign_in_unavailable`` when it cannot check a
+        key, so that answer is waited out under ``unavailable_budget``
+        instead of failing as a network error. An address that does not
+        answer at all still fails within the connect part.
     :param retry: Retry/backoff policy; see :class:`taghistorian.retry.RetryConfig`.
         Defaults to a fresh ``RetryConfig()`` when omitted.
     :param session: An existing ``requests.Session`` to use instead of
@@ -127,7 +133,7 @@ class TagHistorianClient:
         api_key: str,
         base_url: str = _DEFAULT_BASE_URL,
         *,
-        timeout: float = 10.0,
+        timeout: float | tuple[float, float] = (10.0, 45.0),
         retry: RetryConfig | None = None,
         session: requests.Session | None = None,
     ) -> None:
@@ -589,18 +595,22 @@ class TagHistorianClient:
 
             if response.status_code == 503:
                 # Tag Historian briefly unavailable - its write buffer full
-                # for a moment, or a key it could not check just now
-                # (reason "sign_in_unavailable", Retry-After 30-45 s). Not a
-                # rate limit: waited out at the server's own Retry-After for
-                # up to unavailable_budget seconds in all, so a short outage
-                # passes inside one call.
+                # for a moment, it could not store writes safely just now, a
+                # restart, or a key it could not check just now (reason
+                # "sign_in_unavailable", Retry-After 30-45 s). Not a rate
+                # limit: waited out at the server's own Retry-After for up to
+                # unavailable_budget seconds in all, so a short outage passes
+                # inside one call.
                 retry_after = self._parse_retry_after(response)
-                delay = max(
-                    retry_after
-                    if retry_after is not None
-                    else self._retry.backoff_delay(unavailable_retries + 1),
-                    _MIN_UNAVAILABLE_WAIT,
-                )
+                if retry_after is not None and retry_after >= _MIN_UNAVAILABLE_WAIT:
+                    delay = retry_after
+                else:
+                    # No header, or one asking for less than a second (a
+                    # proxy's 0): back off, and never under the floor.
+                    delay = max(
+                        self._retry.backoff_delay(unavailable_retries + 1),
+                        _MIN_UNAVAILABLE_WAIT,
+                    )
                 if (
                     self._retry.max_retries > 0
                     and unavailable_waited + delay <= self._retry.unavailable_budget
@@ -626,14 +636,16 @@ class TagHistorianClient:
     ) -> TagHistorianUnavailableError:
         """The 503 the retry budget ran out on, saying what it is: not a rate limit.
 
-        A 503 body comes in two shapes. When a key could not be checked, it
-        is ``error`` (the title "Service Unavailable"), ``message`` (a
-        sentence for a person), ``reason`` ("sign_in_unavailable") and
-        ``retryAfterSeconds``. When the write endpoints cannot take a write
-        just now, it is ``error`` as a code ("ingest_unavailable"),
-        ``reason`` ("buffer_saturated", "wal_unavailable" or
-        "shutting_down") and ``retryAfterSeconds``, with no ``message``.
-        Only a sentence is quoted - the ``message``, or an ``error`` that is
+        The 503s this client meets mostly come in two shapes. When a key
+        could not be checked, it is ``error`` (the title "Service
+        Unavailable"), ``message`` (a sentence for a person), ``reason``
+        ("sign_in_unavailable") and ``retryAfterSeconds``. When the write
+        endpoints cannot take a write just now, it is ``error`` as a code
+        ("ingest_unavailable"), ``reason`` ("buffer_saturated",
+        "wal_unavailable" or "shutting_down") and ``retryAfterSeconds``, with
+        no ``message``. Others have neither a reason nor a sentence, or are
+        not JSON at all (a gateway's page), and say just "temporarily
+        unavailable". Only a sentence is quoted - the ``message``, or an ``error`` that is
         one; a known ``reason`` is put in words here, and a code or a bare
         title is never quoted as if it were something said.
         """

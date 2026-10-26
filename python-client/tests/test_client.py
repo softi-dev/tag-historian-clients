@@ -318,12 +318,20 @@ def test_503_whose_one_retry_after_is_past_the_budget_raises_at_once(make_client
     assert excinfo.value.retry_after == 40.0
 
 
+@pytest.mark.parametrize(
+    ("reason", "in_words"),
+    [
+        ("buffer_saturated", "write buffer was full"),
+        ("wal_unavailable", "could not store writes safely"),
+        ("shutting_down", "was restarting"),
+    ],
+)
 @responses.activate
-def test_503_from_a_full_write_buffer_is_unavailable_too(make_client, sleeps):
+def test_503_from_the_write_endpoints_is_unavailable_too(make_client, sleeps, reason, in_words):
     responses.add(
         responses.POST,
         MEASUREMENTS_URL,
-        json={"error": "ingest_unavailable", "reason": "buffer_saturated", "retryAfterSeconds": 3},
+        json={"error": "ingest_unavailable", "reason": reason, "retryAfterSeconds": 3},
         status=503,
         headers={"Retry-After": "3"},
     )
@@ -335,7 +343,7 @@ def test_503_from_a_full_write_buffer_is_unavailable_too(make_client, sleeps):
 
     assert sleeps == [3.0, 3.0, 3.0]
     assert excinfo.value.attempts == 4
-    assert excinfo.value.reason == "buffer_saturated"
+    assert excinfo.value.reason == reason
     text = str(excinfo.value)
     assert "temporarily unavailable" in text
     # Not the key's problem, so the key is not mentioned.
@@ -344,7 +352,7 @@ def test_503_from_a_full_write_buffer_is_unavailable_too(make_client, sleeps):
     # quoted as if the server had said it, the reason is put in words.
     assert "ingest_unavailable" not in text
     assert "It said" not in text
-    assert "write buffer was full" in text
+    assert in_words in text
     assert "not a rate limit" in text
 
 
@@ -423,7 +431,30 @@ def test_503_with_retry_after_zero_still_ends_at_the_budget(make_client, sleeps)
         headers={"Retry-After": "0"},
     )
 
-    client = make_client(unavailable_budget=5)
+    client = make_client(unavailable_budget=20)
+
+    with pytest.raises(TagHistorianUnavailableError) as excinfo:
+        client.list_active_alerts()
+
+    # A Retry-After under a second backs off as a missing one does - not a
+    # request a second for the whole budget - and still spends the budget.
+    # 1, 2, 4, 8 = 15; the next 16 would pass 20.
+    assert sleeps == [1.0, 2.0, 4.0, 8.0]
+    assert excinfo.value.attempts == 5
+    assert excinfo.value.waited == 15.0
+
+
+@responses.activate
+def test_503_with_retry_after_zero_and_no_backoff_still_ends_at_the_budget(make_client, sleeps):
+    responses.add(
+        responses.GET,
+        ACTIVE_ALERTS_URL,
+        json={"error": "Service Unavailable"},
+        status=503,
+        headers={"Retry-After": "0"},
+    )
+
+    client = make_client(backoff_base=0.0, unavailable_budget=5)
 
     with pytest.raises(TagHistorianUnavailableError) as excinfo:
         client.list_active_alerts()
@@ -1006,6 +1037,41 @@ def test_list_active_alerts_403_from_a_scope_that_lacks_read_raises_api_error(ma
         client.list_active_alerts()
 
     assert excinfo.value.status_code == 403
+
+
+# -- the timeout each request is given -------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("given", "sent"),
+    [
+        # Ten seconds to connect, 45 to answer: the API may take up to about
+        # half a minute to answer a 503 for a key it could not check, and that
+        # answer belongs to the 503 budget, not to the network-error retries.
+        (None, (10.0, 45.0)),
+        (7.5, 7.5),
+        ((3.0, 12.0), (3.0, 12.0)),
+    ],
+)
+def test_the_timeout_reaches_requests_as_given(monkeypatch, given, sent):
+    import requests
+
+    seen: list = []
+
+    def _answer(method, url, **kwargs):
+        seen.append(kwargs["timeout"])
+        response = requests.Response()
+        response.status_code = 200
+        response._content = b"[]"
+        return response
+
+    kwargs = {} if given is None else {"timeout": given}
+    client = TagHistorianClient(api_key="test-key", base_url=BASE_URL, **kwargs)
+    monkeypatch.setattr(client._session, "request", _answer)
+
+    client.list_active_alerts()
+
+    assert seen == [sent]
 
 
 # -- context manager closes the session -------------------------------------

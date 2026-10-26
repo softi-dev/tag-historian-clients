@@ -25,15 +25,11 @@ from .config import ConfigError, ServerConfig
 # before calling main(), so an uncaught ImportError here happens before any
 # of our own error handling would ever run.
 try:
-    # TagHistorianUnavailableError is not used here: importing it is the check
-    # that the client is 0.2.0 or newer (errors.py needs it), made where an
-    # older one still gets the message below rather than a bare traceback.
-    from taghistorian import (
-        RetryConfig,
-        TagHistorianClient,
-        TagHistorianUnavailableError,  # noqa: F401
-    )
+    from taghistorian import RetryConfig, TagHistorianClient
 
+    # Through errors.py, this is also the check that the client is 0.2.0 or
+    # newer: it imports TagHistorianUnavailableError, which 0.1.x does not
+    # have, so an older one gets the message below rather than a traceback.
     from .server import build_server
 except ImportError as exc:
     print(
@@ -53,15 +49,28 @@ logger = logging.getLogger("taghistorian_mcp")
 # library's default of five minutes. A tool call runs on this server's event
 # loop, so a wait inside it holds the whole server (other calls, cancellations
 # and pings wait with it), and many MCP hosts give up on a tool call after
-# 60 s. One Retry-After (30-45 s on a 503) at most, then the "temporarily
-# unavailable" message, which the LLM then actually gets to see.
+# 60 s. The budget counts the waits, not the requests between them. When the
+# API could not check the key (Retry-After 30-45 s) that is one wait and two
+# requests, so the "temporarily unavailable" message, which the LLM then gets
+# to see, usually comes back well inside 60 s - not if the requests are slow
+# too. A write the API could not take just now asks for a few seconds, so a
+# few shorter waits fit in the same 45 s.
 _UNAVAILABLE_BUDGET_SECONDS = 45.0
+
+# Each request gets ten seconds to connect and ten to answer - not the
+# library's 45 to answer, which with a 45 s wait could pass the hosts' 60 s.
+# A request that times out is a network error, retried on its own terms
+# outside the budget above; so a sign-in answer slower than ten seconds comes
+# back to the LLM as a connection error rather than as "temporarily
+# unavailable".
+_REQUEST_TIMEOUT_SECONDS = (10.0, 10.0)
 
 
 def _build_client(config: ServerConfig) -> TagHistorianClient:
     return TagHistorianClient(
         api_key=config.api_key,
         base_url=config.base_url,
+        timeout=_REQUEST_TIMEOUT_SECONDS,
         retry=RetryConfig(unavailable_budget=_UNAVAILABLE_BUDGET_SECONDS),
     )
 

@@ -6,12 +6,28 @@ from taghistorian import RetryConfig, TagHistorianClient
 
 BASE_URL = "https://api.test.local"
 
+# Far more waits than any one call here should make (the default
+# unavailable_budget of 300 s at the one-second floor is 300). A retry loop
+# that never ends - a wait of 0 s spends no budget - fails the test at once
+# instead of holding the run until the CI job is killed.
+_MAX_SLEEPS = 1000
+
+
+class _Sleeps(list):
+    def append(self, delay: float) -> None:
+        super().append(delay)
+        if len(self) > _MAX_SLEEPS:
+            raise AssertionError(
+                f"more than {_MAX_SLEEPS} retry waits: a retry loop that never ends"
+            )
+
 
 @pytest.fixture
 def sleeps() -> list[float]:
     """Captures every delay the client's retry loop would have slept for,
-    without actually blocking the test suite."""
-    return []
+    without actually blocking the test suite, and stops a loop that would
+    never end."""
+    return _Sleeps()
 
 
 @pytest.fixture

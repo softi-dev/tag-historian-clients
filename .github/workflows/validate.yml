@@ -96,6 +96,9 @@ jobs:
   python-client:
     name: Python client (${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    # A retry loop that never ends should fail the job, not hold a runner
+    # for the default six hours.
+    timeout-minutes: 15
     strategy:
       matrix:
         # The package's declared floor and the newest release: the floor is
@@ -120,6 +123,9 @@ jobs:
   mcp-server:
     name: MCP server (${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    # A retry loop that never ends should fail the job, not hold a runner
+    # for the default six hours.
+    timeout-minutes: 15
     strategy:
       matrix:
         # 3.10 is this package's own floor (FastMCP introspects PEP 604
@@ -148,6 +154,9 @@ jobs:
   influxdb-migration:
     name: InfluxDB migration (${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    # A retry loop that never ends should fail the job, not hold a runner
+    # for the default six hours.
+    timeout-minutes: 15
     strategy:
       matrix:
         # The package's declared floor and the newest release, as for

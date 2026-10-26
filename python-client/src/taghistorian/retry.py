@@ -57,10 +57,12 @@ class RetryConfig:
         that a longer one reaches the caller as
         :class:`~taghistorian.exceptions.TagHistorianUnavailableError`
         rather than a call that never returns. A wait that would go past the
-        budget is not started; the error is raised instead. Each wait between
-        503s is at least one second, even when the server asks for none
-        (``Retry-After: 0``) or ``backoff_base`` is 0, so the budget always
-        runs out and the call always returns.
+        budget is not started; the error is raised instead. A
+        ``Retry-After`` under a second (a proxy's ``0``) is read as no
+        header, so the backoff applies; and each wait between 503s is at
+        least one second, even when ``backoff_base`` is 0, so the budget
+        always runs out and the call always returns. The budget counts the
+        waits only, not the requests between them.
     """
 
     max_retries: int = 3
