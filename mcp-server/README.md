@@ -155,7 +155,11 @@ Tag Historian briefly unavailable) never crashes the whole server or ends your s
 back to the LLM as a clear, specific tool-level error message (what went wrong, and the relevant
 HTTP status/retry information where applicable), not a stack trace and not a dropped connection.
 A `503` is told apart from a rate limit: it says Tag Historian is temporarily unavailable - and,
-when the API could not check the key just now, that this says nothing about the key.
+when the API could not check the key just now, that this says nothing about the key. Within one
+call a `503` is waited out at the API's `Retry-After` for at most 45 seconds in all - one wait, not
+the client library's default of five minutes - because a tool call holds this server while it
+waits, and many MCP hosts give up on a tool call after 60 seconds. So the message reaches the LLM
+rather than the host's own timeout, and it tells it to try again in a few minutes.
 
 ## Development
 

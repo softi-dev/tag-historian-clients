@@ -29,9 +29,10 @@ class RetryConfig:
     handing over, or an API key it could not check just now because of a
     moment's trouble on its side (``reason: "sign_in_unavailable"``
     in the body, with a ``Retry-After`` of 30 to 45 seconds). Those last a
-    minute or two, and three retries at that ``Retry-After`` are over before
-    most of them are, so a 503 is retried for as long as its waits fit in
-    ``unavailable_budget`` instead of a count.
+    minute or two, and three retries at that ``Retry-After`` (90 to 135
+    seconds) end about when such an outage does, with no margin, so a 503 is
+    retried for as long as its waits fit in ``unavailable_budget`` instead of
+    a count: a few minutes that ride it out.
 
     :param max_retries: How many extra attempts to make after the first one
         fails with a 429 or a transient network error. Default 3 (so up to 4
@@ -56,7 +57,10 @@ class RetryConfig:
         that a longer one reaches the caller as
         :class:`~taghistorian.exceptions.TagHistorianUnavailableError`
         rather than a call that never returns. A wait that would go past the
-        budget is not started; the error is raised instead.
+        budget is not started; the error is raised instead. Each wait between
+        503s is at least one second, even when the server asks for none
+        (``Retry-After: 0``) or ``backoff_base`` is 0, so the budget always
+        runs out and the call always returns.
     """
 
     max_retries: int = 3

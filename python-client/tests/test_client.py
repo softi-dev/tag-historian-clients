@@ -274,6 +274,51 @@ def test_503_gives_up_at_the_budget_and_says_unavailable_not_rate_limit(make_cli
 
 
 @responses.activate
+def test_503_waits_that_land_exactly_on_the_budget_are_all_made(make_client, sleeps):
+    """'No more than unavailable_budget' includes the budget itself."""
+    responses.add(
+        responses.GET,
+        ACTIVE_ALERTS_URL,
+        json=_SIGN_IN_UNAVAILABLE,
+        status=503,
+        headers={"Retry-After": "40"},
+    )
+
+    client = make_client(unavailable_budget=120)
+
+    with pytest.raises(TagHistorianUnavailableError) as excinfo:
+        client.list_active_alerts()
+
+    # 40 + 40 + 40 is exactly 120, so the third wait is made; a fourth would
+    # end at 160 and is not started.
+    assert sleeps == [40.0] * 3
+    assert excinfo.value.attempts == 4
+    assert excinfo.value.waited == 120.0
+
+
+@responses.activate
+def test_503_whose_one_retry_after_is_past_the_budget_raises_at_once(make_client, sleeps):
+    responses.add(
+        responses.GET,
+        ACTIVE_ALERTS_URL,
+        json=_SIGN_IN_UNAVAILABLE,
+        status=503,
+        headers={"Retry-After": "40"},
+    )
+
+    client = make_client(unavailable_budget=30)
+
+    with pytest.raises(TagHistorianUnavailableError) as excinfo:
+        client.list_active_alerts()
+
+    assert sleeps == []
+    assert len(responses.calls) == 1
+    assert excinfo.value.attempts == 1
+    assert excinfo.value.waited == 0
+    assert excinfo.value.retry_after == 40.0
+
+
+@responses.activate
 def test_503_from_a_full_write_buffer_is_unavailable_too(make_client, sleeps):
     responses.add(
         responses.POST,
@@ -295,6 +340,58 @@ def test_503_from_a_full_write_buffer_is_unavailable_too(make_client, sleeps):
     assert "temporarily unavailable" in text
     # Not the key's problem, so the key is not mentioned.
     assert "API key" not in text
+    # The write endpoints' body has a code and no sentence: the code is not
+    # quoted as if the server had said it, the reason is put in words.
+    assert "ingest_unavailable" not in text
+    assert "It said" not in text
+    assert "write buffer was full" in text
+    assert "not a rate limit" in text
+
+
+@responses.activate
+def test_503_whose_error_is_a_sentence_quotes_it(make_client, sleeps):
+    responses.add(
+        responses.GET,
+        ACTIVE_ALERTS_URL,
+        json={"error": "Down for maintenance until 03:00 UTC."},
+        status=503,
+        headers={"Retry-After": "5"},
+    )
+
+    client = make_client(unavailable_budget=4)
+
+    with pytest.raises(TagHistorianUnavailableError) as excinfo:
+        client.list_active_alerts()
+
+    assert "It said: Down for maintenance until 03:00 UTC." in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"body": "<html><body><h1>503 Service Unavailable</h1></body></html>"},
+        {"body": "upstream connect error"},
+        {"json": ["not", "an", "object"]},
+    ],
+    ids=["html", "text", "json-list"],
+)
+@responses.activate
+def test_503_whose_body_is_not_tag_historians_still_says_unavailable(make_client, sleeps, body):
+    responses.add(
+        responses.GET, ACTIVE_ALERTS_URL, status=503, headers={"Retry-After": "2"}, **body
+    )
+
+    client = make_client(unavailable_budget=3)
+
+    with pytest.raises(TagHistorianUnavailableError) as excinfo:
+        client.list_active_alerts()
+
+    err = excinfo.value
+    assert sleeps == [2.0]
+    assert err.reason is None
+    assert str(err) == (
+        "[503] Tag Historian is temporarily unavailable; gave up after 2 attempt(s) and 2s of waiting"
+    )
 
 
 @responses.activate
@@ -312,6 +409,66 @@ def test_503_without_retry_after_backs_off_within_the_budget(make_client, sleeps
     assert sleeps == [1.0, 2.0, 4.0, 8.0, 16.0, 30.0, 30.0]
     assert excinfo.value.retry_after is None
     assert excinfo.value.reason is None
+    # A title alone is not a sentence to quote.
+    assert "It said" not in str(excinfo.value)
+
+
+@responses.activate
+def test_503_with_retry_after_zero_still_ends_at_the_budget(make_client, sleeps):
+    responses.add(
+        responses.GET,
+        ACTIVE_ALERTS_URL,
+        json={"error": "Service Unavailable"},
+        status=503,
+        headers={"Retry-After": "0"},
+    )
+
+    client = make_client(unavailable_budget=5)
+
+    with pytest.raises(TagHistorianUnavailableError) as excinfo:
+        client.list_active_alerts()
+
+    # A wait is never under a second, so a 0 still spends the budget.
+    assert sleeps == [1.0] * 5
+    assert excinfo.value.attempts == 6
+    assert excinfo.value.waited == 5.0
+
+
+@responses.activate
+def test_503_with_no_backoff_and_no_retry_after_still_ends_at_the_budget(make_client, sleeps):
+    responses.add(
+        responses.GET, ACTIVE_ALERTS_URL, json={"error": "Service Unavailable"}, status=503
+    )
+
+    client = make_client(backoff_base=0.0, unavailable_budget=5)
+
+    with pytest.raises(TagHistorianUnavailableError) as excinfo:
+        client.list_active_alerts()
+
+    assert sleeps == [1.0] * 5
+    assert excinfo.value.attempts == 6
+
+
+@pytest.mark.parametrize("value", ["-5", "nan", "inf"])
+@pytest.mark.parametrize("status_code", [429, 503])
+@responses.activate
+def test_a_retry_after_nobody_can_wait_for_is_treated_as_missing(
+    make_client, sleeps, status_code, value
+):
+    responses.add(
+        responses.GET,
+        ACTIVE_ALERTS_URL,
+        json={"error": "Service Unavailable"},
+        status=status_code,
+        headers={"Retry-After": value},
+    )
+    responses.add(responses.GET, ACTIVE_ALERTS_URL, json=[], status=200)
+
+    client = make_client()
+
+    assert client.list_active_alerts() == []
+    # The backoff instead (backoff_base 1.0), not a sleep that raises or never ends.
+    assert sleeps == [1.0]
 
 
 @responses.activate

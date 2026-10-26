@@ -202,7 +202,7 @@ try:
 except TagHistorianRateLimitError as e:
     print(f"still rate limited after {e.attempts} attempts, last Retry-After was {e.retry_after}s")
 except TagHistorianUnavailableError as e:
-    print(f"Tag Historian unavailable ({e.reason}) after {e.waited:g}s of waiting: {e.message}")
+    print(f"gave up, try again in a few minutes: {e.message}")  # says why, and how long it waited
 except TagHistorianAPIError as e:
     print(f"rejected: HTTP {e.status_code}: {e.message}")
     if e.violations:
@@ -225,7 +225,8 @@ rather than guessing a backoff. They are two different answers and are budgeted 
   `"reason": "sign_in_unavailable"`, with a `Retry-After` of 30-45 seconds). Neither is a rate limit,
   and neither says anything about your request or your key - a key that was checked and refused is
   a `401`. Retried for as long as the waits add up to no more than `unavailable_budget` seconds
-  (default 300), so an outage of a minute or two passes inside one call; a longer one raises
+  (default 300; each wait at least a second, so even a `503` that asks for no wait ends inside the
+  budget), so an outage of a minute or two passes inside one call; a longer one raises
   `TagHistorianUnavailableError`.
 
 A `400`/`401`/`403`/`404` is never retried - retrying an unchanged, rejected request cannot

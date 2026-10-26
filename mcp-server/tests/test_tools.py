@@ -212,6 +212,8 @@ async def test_rate_limit_error_surfaces_retry_after_in_the_message(mock_client)
     text = result.content[0].text
     assert "7" in text
     assert "4 attempt" in text
+    assert "rate-limiting this account" in text
+    assert "temporarily unavailable" not in text
 
 
 async def test_unavailable_503_is_not_called_a_rate_limit_or_a_bad_key(mock_client):

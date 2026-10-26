@@ -25,13 +25,21 @@ from .config import ConfigError, ServerConfig
 # before calling main(), so an uncaught ImportError here happens before any
 # of our own error handling would ever run.
 try:
-    from taghistorian import TagHistorianClient
+    # TagHistorianUnavailableError is not used here: importing it is the check
+    # that the client is 0.2.0 or newer (errors.py needs it), made where an
+    # older one still gets the message below rather than a bare traceback.
+    from taghistorian import (
+        RetryConfig,
+        TagHistorianClient,
+        TagHistorianUnavailableError,  # noqa: F401
+    )
 
     from .server import build_server
 except ImportError as exc:
     print(
-        "taghistorian-mcp requires the 'taghistorian' package, which is not yet "
-        "on PyPI. Install it from the sibling python-client/ directory first:\n"
+        "taghistorian-mcp requires the 'taghistorian' package 0.2.0 or newer, which "
+        "is not yet on PyPI. Install it from the sibling python-client/ directory "
+        "first (again, if an older one is installed):\n"
         "    pip install -e ../python-client\n"
         "(path relative to mcp-server/; see this package's README for the full "
         f"story). Original import error: {exc}",
@@ -40,6 +48,22 @@ except ImportError as exc:
     raise SystemExit(1) from exc
 
 logger = logging.getLogger("taghistorian_mcp")
+
+# How long one tool call may spend waiting out 503s in all - not the client
+# library's default of five minutes. A tool call runs on this server's event
+# loop, so a wait inside it holds the whole server (other calls, cancellations
+# and pings wait with it), and many MCP hosts give up on a tool call after
+# 60 s. One Retry-After (30-45 s on a 503) at most, then the "temporarily
+# unavailable" message, which the LLM then actually gets to see.
+_UNAVAILABLE_BUDGET_SECONDS = 45.0
+
+
+def _build_client(config: ServerConfig) -> TagHistorianClient:
+    return TagHistorianClient(
+        api_key=config.api_key,
+        base_url=config.base_url,
+        retry=RetryConfig(unavailable_budget=_UNAVAILABLE_BUDGET_SECONDS),
+    )
 
 
 def _configure_logging() -> None:
@@ -64,7 +88,7 @@ def main() -> None:
         logger.error(str(exc))
         raise SystemExit(1) from exc
 
-    client = TagHistorianClient(api_key=config.api_key, base_url=config.base_url)
+    client = _build_client(config)
     mcp = build_server(client, config)
 
     # THE loud, unmissable statement of mode. Not a debug-level log line: a

@@ -26,6 +26,7 @@ than a dropped one should pass ``RetryConfig(max_retries=0)`` and handle
 
 from __future__ import annotations
 
+import math
 import re
 from datetime import datetime
 from types import TracebackType
@@ -80,6 +81,21 @@ _DEFAULT_BASE_URL = "https://api.taghistorian.com"
 _MAX_BATCH_SIZE = 5000
 
 _CONTENT_DISPOSITION_FILENAME_RE = re.compile(r"filename\*?=(?:UTF-8'')?\"?([^\";]+)\"?")
+
+# The shortest wait between two 503s, whatever Retry-After or
+# RetryConfig.backoff_base say. unavailable_budget counts seconds waited, so a
+# wait of 0 s (Retry-After: 0 from a proxy, or backoff_base=0 and no header)
+# would spend none of it and the call would never return. Tag Historian itself
+# always asks for a second or more.
+_MIN_UNAVAILABLE_WAIT = 1.0
+
+# The write endpoints' 503 names a reason but carries no sentence for a
+# person, so the client says what each reason means itself.
+_UNAVAILABLE_BECAUSE = {
+    "buffer_saturated": "its write buffer was full",
+    "wal_unavailable": "it could not store writes safely just now",
+    "shutting_down": "it was restarting",
+}
 
 
 class TagHistorianClient:
@@ -579,10 +595,11 @@ class TagHistorianClient:
                 # up to unavailable_budget seconds in all, so a short outage
                 # passes inside one call.
                 retry_after = self._parse_retry_after(response)
-                delay = (
+                delay = max(
                     retry_after
                     if retry_after is not None
-                    else self._retry.backoff_delay(unavailable_retries + 1)
+                    else self._retry.backoff_delay(unavailable_retries + 1),
+                    _MIN_UNAVAILABLE_WAIT,
                 )
                 if (
                     self._retry.max_retries > 0
@@ -609,9 +626,16 @@ class TagHistorianClient:
     ) -> TagHistorianUnavailableError:
         """The 503 the retry budget ran out on, saying what it is: not a rate limit.
 
-        The API's 503 body carries ``error`` (a title, "Service
-        Unavailable"), ``message`` (the sentence for a person) and, on most,
-        ``reason``. The sentence is the useful part, so it is the one quoted.
+        A 503 body comes in two shapes. When a key could not be checked, it
+        is ``error`` (the title "Service Unavailable"), ``message`` (a
+        sentence for a person), ``reason`` ("sign_in_unavailable") and
+        ``retryAfterSeconds``. When the write endpoints cannot take a write
+        just now, it is ``error`` as a code ("ingest_unavailable"),
+        ``reason`` ("buffer_saturated", "wal_unavailable" or
+        "shutting_down") and ``retryAfterSeconds``, with no ``message``.
+        Only a sentence is quoted - the ``message``, or an ``error`` that is
+        one; a known ``reason`` is put in words here, and a code or a bare
+        title is never quoted as if it were something said.
         """
         try:
             body = response.json()
@@ -619,7 +643,11 @@ class TagHistorianClient:
             body = None
         if not isinstance(body, dict):
             body = {}
-        detail = str(body.get("message") or body.get("error") or "").strip()
+        detail = str(body.get("message") or "").strip()
+        if not detail:
+            error = str(body.get("error") or "").strip()
+            if " " in error and error.lower() != "service unavailable":
+                detail = error
         reason = str(body.get("reason") or "") or None
         message = "Tag Historian is temporarily unavailable"
         if reason == "sign_in_unavailable":
@@ -627,6 +655,8 @@ class TagHistorianClient:
                 " and could not check the API key just now - not a rate limit,"
                 " and nothing is known to be wrong with the key"
             )
+        elif reason in _UNAVAILABLE_BECAUSE:
+            message += f" - {_UNAVAILABLE_BECAUSE[reason]}, not a rate limit"
         message += f"; gave up after {attempts} attempt(s) and {waited:g}s of waiting"
         if detail:
             message += f". It said: {detail}"
@@ -645,9 +675,15 @@ class TagHistorianClient:
         if value is None:
             return None
         try:
-            return float(value)
+            seconds = float(value)
         except ValueError:
             return None
+        # delta-seconds is a non-negative number. A negative, NaN or infinite
+        # value is no instruction anyone can follow (and time.sleep() raises
+        # on a negative one), so it is read as no header: the backoff applies.
+        if not math.isfinite(seconds) or seconds < 0:
+            return None
+        return seconds
 
     @staticmethod
     def _error_details(response: requests.Response) -> tuple[str, list | None]:
