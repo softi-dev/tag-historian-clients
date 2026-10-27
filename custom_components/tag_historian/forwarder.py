@@ -11,9 +11,12 @@ deliberate:
 
 * it reads ``Retry-After`` and it tells 422 apart from 429 apart from 503 -
   and apart from the OTHER 429, which is our write buffer being busy rather
-  than the customer's allowance being spent. The built-in integration has a
-  fixed retry schedule and no notion of partial success, so an over-quota Home
-  Assistant simply stops producing data with nothing anywhere to say why.
+  than the customer's allowance being spent. The built-in integration never
+  reads the header and has no notion of partial success: a refused batch is
+  sent again only if its ``max_retries`` is set, 20 seconds apart, and is
+  then dropped - and set up for InfluxDB 2.x it does not wait for the answer
+  at all. So an over-quota Home Assistant simply stops producing data with
+  nothing anywhere to say why.
 
 The buffer SURVIVES A RESTART. When Home Assistant stops, or the entry is
 reloaded, whatever could not be delivered is saved to ``.storage`` (bounded
@@ -52,6 +55,14 @@ well as the ones still queued - see :meth:`StateForwarder.async_flush`, whose
 ``finally`` is the only thing standing between a cancelled request and forty
 readings nobody can account for.
 
+A METER is not left on a dropped reading. The minimum interval drops a reading
+that follows the last one too soon, and for a measurement that is the point.
+For a meter (state class ``total`` or ``total_increasing``) the newest reading
+held back is sent once the interval is up instead
+(:meth:`StateForwarder._hold_trailing`), so a burst ends on the reading the
+meter really ended on, and Tag Historian's increase for that hour is the real
+one.
+
 Timing note: everything scheduled here goes through ``async_call_later``, and
 throttling compares the readings' OWN timestamps rather than a wall clock. Both
 choices are about being able to test the behaviour by moving Home Assistant's
@@ -65,10 +76,11 @@ import asyncio
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import Any, NamedTuple
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import CALLBACK_TYPE, Event, HassJob, HomeAssistant, callback
+from homeassistant.core import CALLBACK_TYPE, Event, HassJob, HomeAssistant, State, callback
 from homeassistant.helpers.event import (
     EventStateChangedData,
     async_call_later,
@@ -105,8 +117,23 @@ from .line_protocol import (
 from .renames import registry_ids, removed_since, renamed_since
 
 # How long to wait after a connection error before trying again. Shorter than
-# any Retry-After the API sends, because a socket error is usually a blip.
+# any Retry-After the API sends, because a socket error is usually a blip. The
+# same wait is used for a 429 or 503 that names no wait (_answered_wait).
 CONNECTION_RETRY_SECONDS = 30
+
+
+def _answered_wait(retry_after: int) -> float:
+    """How long to wait after a 429 or a 503, whether it said how long or not.
+
+    Tag Historian always asks for a second or more, and that is honoured
+    exactly. No header, a 0, or one that does not parse is in practice
+    something in front of it answering in its place - a gateway with nothing
+    behind it - which says no more than a host that did not answer: it is
+    waited for as long as one, not asked again every second for as long as
+    the outage lasts, by every Home Assistant at once. (The daily quota's
+    countdown reaching 0 at midnight costs half a minute at most.)
+    """
+    return retry_after if retry_after >= 1 else CONNECTION_RETRY_SECONDS
 
 # How many requests the shutdown flush is allowed to make. Home Assistant is
 # waiting on this, so the buffer gets a few batches and not a drain loop; the
@@ -133,6 +160,16 @@ INFLIGHT_WAIT_SECONDS = 5
 # attribute on a diagnostic sensor, meant to name the offender, not to be a
 # log of every entity in a badly configured house.
 MAX_UNSTORABLE_NAMES = 10
+
+# The state classes of a meter: a reading that only grows, or one that grows
+# and starts over (Home Assistant's SensorStateClass). A meter's last reading
+# before it goes quiet is worth a trailing send (StateForwarder._hold_trailing).
+METER_STATE_CLASSES = frozenset({"total", "total_increasing"})
+
+
+def _is_meter(state: State) -> bool:
+    """Whether Home Assistant says this entity is a meter (its state_class)."""
+    return str(state.attributes.get("state_class") or "") in METER_STATE_CLASSES
 
 
 class Queued(NamedTuple):
@@ -256,6 +293,11 @@ class StateForwarder:
         # the registry no longer knows the old one.
         self._registry_ids: dict[str, str] = {}
         self._last_sent: dict[str, datetime] = {}
+        # Per meter, the newest reading the minimum interval held back and the
+        # timer that sends it (_hold_trailing). At most one of each per
+        # selected entity; both go when it is sent, let go of, or stopped.
+        self._trailing: dict[str, tuple[State, float]] = {}
+        self._trailing_timers: dict[str, CALLBACK_TYPE] = {}
         self._unsub_state: CALLBACK_TYPE | None = None
         self._unsub_timer: CALLBACK_TYPE | None = None
         self._flushing = False
@@ -517,6 +559,9 @@ class StateForwarder:
             self._unsub_stop()
             self._unsub_stop = None
         self._cancel_timer()
+        for unsub in self._trailing_timers.values():
+            unsub()
+        self._trailing_timers.clear()
         if self._backfill_task is not None and not self._backfill_task.done():
             self._backfill_task.cancel()
         self._backfill_room.set()
@@ -556,6 +601,9 @@ class StateForwarder:
         """
         self._stopping = True
         self.async_stop()
+        # A meter's reading still held back goes with the last flush, or is
+        # saved with the buffer: it is the reading its burst ended on.
+        self._release_trailing()
         await self._async_settle_inflight()
         await self._async_final_flush()
 
@@ -768,21 +816,96 @@ class StateForwarder:
             # Deliberate. The daily quota counts every point SENT, including
             # ones deadband compression later discards server-side, so the only
             # place a reading can be saved is here.
+            if _is_meter(new_state):
+                self._hold_trailing(new_state, value, last)
+                return
             self.stats.dropped_throttled += 1
             return
+        # A reading of it goes out now, so one held back is older than it and
+        # has nothing left to say.
+        self._let_trailing_go(entity_id)
         self._last_sent[entity_id] = stamp
+        self._enqueue(new_state, value)
 
+    @callback
+    def _hold_trailing(self, state: State, value: float, last: datetime) -> None:
+        """A meter's reading the minimum interval holds back: sent when the interval is up, if still the newest.
+
+        A meter that goes quiet after a burst - the dishwasher's last kWh,
+        the water meter after a shower - would otherwise end its burst on a
+        reading the throttle dropped, and Tag Historian would put the hour's
+        end, and the hour's use, at the reading before. Only the newest held
+        reading is kept, one per meter, and it goes out at ``last +
+        min_interval`` with its own timestamp - a real value at its real time.
+        A newer reading that is not held back first lets it go.
+        """
+        entity_id = state.entity_id
+        if entity_id in self._trailing:
+            # Replaced by a newer one before it went out: throttled after all.
+            self.stats.dropped_throttled += 1
+        self._trailing[entity_id] = (state, value)
+        if entity_id in self._trailing_timers:
+            return
+        due = (last + timedelta(seconds=self._min_interval) - dt_util.utcnow()).total_seconds()
+        self._trailing_timers[entity_id] = async_call_later(
+            self.hass,
+            max(0.0, due),
+            HassJob(partial(self._send_trailing, entity_id), "tag_historian_trailing_send"),
+        )
+
+    @callback
+    def _send_trailing(self, entity_id: str, _now: object) -> None:
+        """The interval is up: send the meter's newest held reading."""
+        self._trailing_timers.pop(entity_id, None)
+        held = self._trailing.pop(entity_id, None)
+        if held is None or self._closed:
+            return
+        state, value = held
+        # The throttle runs from the moment it went out rather than from the
+        # reading's own time, so a meter sends at most one reading per
+        # minimum interval, trailing ones included - the rate the review
+        # screen's arithmetic promises.
+        self._last_sent[entity_id] = max(state.last_updated, dt_util.utcnow())
+        self._enqueue(state, value)
+
+    @callback
+    def _let_trailing_go(self, entity_id: str) -> None:
+        """Forget a meter's held reading, counted as throttled; it never went out."""
+        if (unsub := self._trailing_timers.pop(entity_id, None)) is not None:
+            unsub()
+        if self._trailing.pop(entity_id, None) is not None:
+            self.stats.dropped_throttled += 1
+
+    @callback
+    def _release_trailing(self) -> None:
+        """Stopping: every held meter reading goes into the buffer, for the last flush or the saved buffer."""
+        for unsub in self._trailing_timers.values():
+            unsub()
+        self._trailing_timers.clear()
+        held, self._trailing = self._trailing, {}
+        for state, value in held.values():
+            self._last_sent[state.entity_id] = state.last_updated
+            self._enqueue(state, value)
+
+    @callback
+    def _enqueue(self, state: State, value: float) -> None:
+        """One reading into the buffer, encoded for the tag its entity sends to."""
+        entity_id = state.entity_id
+        stamp = state.last_updated
         # The unit and the friendly name ride along on every reading, so the
         # tag in Tag Historian carries what Home Assistant shows - "Living room
         # temperature", 21.5 °C - and follows a rename here. The attribute,
         # not State.name: that falls back to a name made from the entity id,
-        # and an entity without a friendly name should not be given one.
+        # and an entity without a friendly name should not be given one. The
+        # state class and last reset too, which make a meter a meter there.
         line = encode_point(
             self._send_as.get(entity_id, entity_id),
             value,
             stamp,
-            new_state.attributes.get("unit_of_measurement"),
-            new_state.attributes.get("friendly_name"),
+            state.attributes.get("unit_of_measurement"),
+            state.attributes.get("friendly_name"),
+            state.attributes.get("state_class"),
+            state.attributes.get("last_reset"),
         )
 
         if len(self._queue) >= MAX_QUEUE_LENGTH:
@@ -888,6 +1011,10 @@ class StateForwarder:
             for item in [*self._queue, *self._backfill, *(self._inflight or [])]
             if item.entity_id == entity_id
         ]
+        # A meter's reading held back for its trailing send is the
+        # forwarder's to deliver as well.
+        if (held := self._trailing.get(entity_id)) is not None:
+            candidates.append(held[0].last_updated.timestamp())
         if entity_id not in self._acked:
             candidates.append(self._listening_since)
         return min(candidates, default=None)
@@ -1075,6 +1202,8 @@ class StateForwarder:
                             state.last_updated,
                             state.attributes.get("unit_of_measurement"),
                             state.attributes.get("friendly_name"),
+                            state.attributes.get("state_class"),
+                            state.attributes.get("last_reset"),
                         ),
                         self._send_as.get(entity_id, ""),
                     )
@@ -1324,15 +1453,19 @@ class StateForwarder:
                 self.hass, self.entry, result.retry_after
             )
             self._writes_failing()
-            self._pause(result.retry_after)
+            self._pause(_answered_wait(result.retry_after))
             return
 
         if result.outcome in (WriteOutcome.BACK_PRESSURE, WriteOutcome.UNAVAILABLE):
-            # Both are Tag Historian's own write buffer refusing to take more
-            # for a few seconds, and neither is anything to do with the
-            # account's allowance. They share this branch because they share
-            # the honest answer: hold the readings, wait the header out, and
-            # say nothing to the user unless it lasts long enough to matter.
+            # Tag Historian unable to take the batch for a while, and nothing
+            # to do with the account's allowance: the 429 is its write buffer
+            # refusing this account's share for a few seconds; a 503 is the
+            # buffer full, or the key not CHECKED just now - trouble on its
+            # side for a moment, which says nothing about the key (a key
+            # checked and refused is a 401, and goes to reauthentication).
+            # They share this branch because they share the honest answer:
+            # hold the readings, wait the header out, and say nothing to the
+            # user unless it lasts long enough to matter.
             self._requeue(batch)
             self.stats.last_error = result.message
             now = dt_util.utcnow()
@@ -1344,7 +1477,7 @@ class StateForwarder:
                 (now - self._unavailable_since).total_seconds(),
             )
             self._writes_failing()
-            self._pause(result.retry_after)
+            self._pause(_answered_wait(result.retry_after))
             return
 
         # Answered for good either way below: the watermark moves over the
@@ -1372,7 +1505,8 @@ class StateForwarder:
         """Put an unsent batch back at the FRONT of where it came from, preserving order.
 
         Only ever called where the API gave a definite answer that the batch
-        was NOT taken - a 401, a socket error, a 429, a 503. That is the whole
+        was NOT taken - a 401, a socket error or a gateway's 502 or 504, a
+        429, a 503. That is the whole
         difference from :meth:`_abandon_inflight`, which handles the case where
         there is no answer at all.
         """
@@ -1405,14 +1539,17 @@ class StateForwarder:
 
         The endpoint's ``Retry-After`` on a 429 counts down to the UTC midnight
         when the daily reading quota resets; on a 503 it is the write buffer's
-        own estimate. Honouring it is half the reason this component exists -
-        the built-in influxdb integration has a fixed 20/60 second schedule and
-        never reads the header at all, so an over-quota Home Assistant spends
-        the rest of the day re-sending into a closed door.
+        own estimate, or 30 to 45 seconds when the key could not be checked
+        just now. Honouring it is half the reason this component exists -
+        the built-in influxdb integration never reads the header: it sends a
+        refused batch again only if ``max_retries`` is set, 20 seconds apart,
+        then drops it (and set up for InfluxDB 2.x never sees the refusal), so
+        an over-quota Home Assistant loses the rest of the day's readings.
 
-        The floor of one second is for a malformed or absent header only. It is
-        deliberately NOT a fallback that shortens a long wait: a 429 with a
-        header we failed to parse still gets a real pause.
+        The floor of one second only keeps a zero from becoming a busy loop.
+        A 429 or a 503 that names no usable wait has already been given
+        CONNECTION_RETRY_SECONDS by :func:`_answered_wait`, so a missing or
+        unparsable header never means a request a second.
         """
         self._paused = True
         self._cancel_timer()

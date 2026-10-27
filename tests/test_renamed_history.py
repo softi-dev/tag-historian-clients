@@ -49,6 +49,7 @@ the real recorder.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import inspect
 import json
@@ -111,7 +112,7 @@ from custom_components.tag_historian.repairs import (
     async_create_fix_flow,
 )
 
-from .conftest import make_client
+from .conftest import make_client, without_statistics
 
 COMPONENT = Path(tag_historian.__file__).parent
 CLIENT_PATHS = (
@@ -193,6 +194,7 @@ def recorder(hass: HomeAssistant, monkeypatch) -> Recorder:
     monkeypatch.setattr("custom_components.tag_historian.history.recorder_ready", lambda hass: True)
     monkeypatch.setattr("custom_components.tag_historian.history.async_recorded_states", fake.read)
     monkeypatch.setattr("custom_components.tag_historian.history.async_last_recorded", fake.last)
+    without_statistics(monkeypatch)
     hass.bus.async_listen(
         er.EVENT_ENTITY_REGISTRY_UPDATED, fake.renamed, event_filter=_is_a_rename
     )
@@ -1071,13 +1073,22 @@ def test_the_import_and_the_rename_strings_are_where_the_code_looks() -> None:
         assert CONF_FOLLOW_RENAMES in select["data"]
         assert CONF_FOLLOW_RENAMES in select["data_description"]
 
-    # The import screen aborts with the action's own refusals, under the same keys.
-    refusals = set(
-        re.findall(r'translation_key="(\w+)"', inspect.getsource(tag_historian.async_start_import))
+    # The import screen and the bring-years card abort with the action's own
+    # refusals, under the same keys. Every string a translation_key= can take,
+    # both branches of a conditional included, not just the plain literals.
+    refusals = {
+        constant.value
+        for node in ast.walk(ast.parse(inspect.getsource(tag_historian.async_start_import)))
+        if isinstance(node, ast.keyword) and node.arg == "translation_key"
+        for constant in ast.walk(node.value)
+        if isinstance(constant, ast.Constant) and isinstance(constant.value, str)
+    }
+    assert {"import_key_not_checked", "import_unavailable", "import_cannot_connect"} <= refusals, (
+        "the walk still finds the conditional ones"
     )
-    assert refusals, "the pattern still finds them"
     assert refusals <= set(strings["exceptions"])
     assert refusals <= set(strings["options"]["abort"])
+    assert refusals <= set(strings["issues"]["bring_years"]["fix_flow"]["abort"])
 
     # The rename card: every choice it offers and every way it can end.
     card = strings["issues"]["entity_renamed"]["fix_flow"]

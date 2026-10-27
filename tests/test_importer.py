@@ -18,6 +18,7 @@ from homeassistant.core import HomeAssistant, State
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers.service import async_get_all_descriptions
 from homeassistant.helpers.storage import Store
+from homeassistant.helpers.translation import async_get_translations
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
@@ -32,6 +33,7 @@ from custom_components.tag_historian.api import (
     ImportSession,
     TagHistorianConnectionError,
     TagHistorianImportRefused,
+    TagHistorianUnavailableError,
     WriteOutcome,
     WriteResult,
 )
@@ -56,7 +58,7 @@ from custom_components.tag_historian.importer import (
     ImportAlreadyRunning,
 )
 
-from .conftest import make_client
+from .conftest import make_client, without_statistics
 
 POWER = "sensor.house_power"
 TEMP = "sensor.outdoor_temperature"
@@ -88,6 +90,7 @@ def recorder(monkeypatch) -> FakeRecorder:
     monkeypatch.setattr(
         "custom_components.tag_historian.history.async_recorded_states", fake.read
     )
+    without_statistics(monkeypatch)
     return fake
 
 
@@ -454,6 +457,60 @@ async def test_one_import_at_a_time(hass: HomeAssistant, entry, recorder, freeze
     importer._task.cancel()
 
 
+async def test_a_second_start_while_the_first_waits_for_its_answer_is_refused(
+    hass: HomeAssistant, entry, recorder, freezer
+) -> None:
+    """Starting waits up to DIALOG_TIMEOUT_SECONDS for Tag Historian's answer,
+    and there is no task yet to call it running. A second door - the action,
+    Configure, the card - must not start a second import meanwhile."""
+    freezer.move_to(NOW)
+    client = ImportClient()
+    asked = asyncio.Event()
+    answer = asyncio.Event()
+
+    async def _slow_start(**kwargs):
+        # Only the first start waits: a second one let through answers at
+        # once, so a missing guard fails below rather than hanging.
+        if not asked.is_set():
+            asked.set()
+            await answer.wait()
+        return session()
+
+    client.async_start_import = AsyncMock(side_effect=_slow_start)
+    importer = make_importer(hass, entry, client)
+
+    first = asyncio.get_running_loop().create_task(importer.async_start([POWER], None))
+    await asked.wait()
+
+    with pytest.raises(ImportAlreadyRunning):
+        await importer.async_start([POWER], None)
+
+    answer.set()
+    await first
+    await _run(importer)
+    assert client.async_start_import.await_count == 1
+    assert importer.progress.status == STATUS_FINISHED
+
+
+async def test_a_start_that_fails_can_be_tried_again(
+    hass: HomeAssistant, entry, recorder, freezer
+) -> None:
+    """The guard is let go however the start ends."""
+    freezer.move_to(NOW)
+    client = ImportClient()
+    client.async_start_import = AsyncMock(
+        side_effect=[TagHistorianConnectionError("no answer within 45 seconds"), session()]
+    )
+    importer = make_importer(hass, entry, client)
+
+    with pytest.raises(TagHistorianConnectionError):
+        await importer.async_start([POWER], None)
+    await importer.async_start([POWER], None)
+    await _run(importer)
+
+    assert importer.progress.status == STATUS_FINISHED
+
+
 async def test_how_far_back_is_never_before_the_window(
     hass: HomeAssistant, entry, recorder, freezer
 ) -> None:
@@ -495,11 +552,24 @@ async def test_the_action_imports_the_selected_entities_by_default(
     await hass.services.async_call(DOMAIN, SERVICE_IMPORT_HISTORY, {}, blocking=True)
     await hass.async_block_till_done()
 
-    loaded.async_start_import.assert_awaited_once()
+    loaded.async_start_import.assert_awaited_once_with(hours=True)
     assert entry.runtime_data.importer.progress.entities == [POWER, TEMP]
+    assert entry.runtime_data.importer.progress.statistics, "the long-term statistics first"
     sensor = hass.states.get("sensor.tag_historian_history_import")
     assert sensor is not None
     assert sensor.state == STATUS_FINISHED
+    assert sensor.attributes["hours_stored"] == 0
+    assert sensor.attributes["hours_skipped"] == 0
+
+
+async def test_the_action_can_leave_the_statistics_out(hass: HomeAssistant, entry, loaded) -> None:
+    await hass.services.async_call(
+        DOMAIN, SERVICE_IMPORT_HISTORY, {"statistics": False, ATTR_DAYS: 3650}, blocking=True
+    )
+    await hass.async_block_till_done()
+
+    loaded.async_start_import.assert_awaited_once_with(hours=False)
+    assert not entry.runtime_data.importer.progress.statistics
 
 
 async def test_the_action_refuses_an_entity_nobody_chose(
@@ -531,6 +601,25 @@ async def test_the_action_passes_on_the_apis_refusal(
     }
 
 
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [("sign_in_unavailable", "import_key_not_checked"), ("", "import_unavailable")],
+)
+async def test_a_key_not_checked_does_not_start_the_import_and_says_so(
+    hass: HomeAssistant, entry, loaded, reason, expected
+) -> None:
+    """A 503 for a key Tag Historian could not check is neither "could not
+    reach" nor a rejected key: no reauthentication is started for it. Any
+    other 503 is not "could not reach" either - something answered."""
+    loaded.async_start_import.side_effect = TagHistorianUnavailableError(
+        "/api/import", reason=reason, retry_after=40
+    )
+    with pytest.raises(HomeAssistantError) as raised:
+        await hass.services.async_call(DOMAIN, SERVICE_IMPORT_HISTORY, {}, blocking=True)
+    assert raised.value.translation_key == expected
+    assert not hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+
+
 async def test_without_a_recorder_there_is_nothing_to_import(
     hass: HomeAssistant, entry, loaded, monkeypatch
 ) -> None:
@@ -545,10 +634,17 @@ async def test_without_a_recorder_there_is_nothing_to_import(
 async def test_the_action_is_described_from_services_yaml_and_the_translations(
     hass: HomeAssistant, entry, loaded
 ) -> None:
-    """What the Actions panel shows: a broken services.yaml shows nothing, silently."""
+    """What the Actions panel shows: a broken services.yaml shows nothing, silently.
+
+    The name comes from the translations, which newer Home Assistants no
+    longer copy into the descriptions - the frontend asks for them itself -
+    so it is read where the panel reads it, on every version.
+    """
     descriptions = await async_get_all_descriptions(hass)
     action = descriptions[DOMAIN][SERVICE_IMPORT_HISTORY]
+    strings = await async_get_translations(hass, "en", "services", [DOMAIN])
 
-    assert action["name"] == "Import history"
-    assert set(action["fields"]) == {"config_entry_id", "entity_id", "days"}
+    assert strings[f"component.{DOMAIN}.services.{SERVICE_IMPORT_HISTORY}.name"] == "Import history"
+    assert set(action["fields"]) == {"config_entry_id", "entity_id", "statistics", "days"}
     assert action["fields"]["days"]["selector"]["number"]["min"] == 1
+    assert action["fields"]["days"]["selector"]["number"]["max"] == 3650

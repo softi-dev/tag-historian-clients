@@ -26,8 +26,11 @@ driven here too - the real flow, the real placeholders, the real schema.
 
 from __future__ import annotations
 
+import ast
+import inspect
 import json
 import re
+import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -41,10 +44,12 @@ from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.tag_historian import renames, repairs
+from custom_components import tag_historian
+from custom_components.tag_historian import config_flow, renames, repairs
 from custom_components.tag_historian.api import (
     QuotaSnapshot,
     TagHistorianClient,
+    TagHistorianUnavailableError,
     WriteOutcome,
 )
 from custom_components.tag_historian.config_flow import CONF_SHOW_ALL, CONF_TRIM
@@ -55,11 +60,15 @@ from custom_components.tag_historian.const import (
     CONF_MIN_INTERVAL,
     DOCS_URL,
     DOMAIN,
+    IMPORT_MAX_CONNECTION_FAILURES,
+    IMPORT_MAX_RESUMES_ON_LOAD,
+    IMPORT_MAX_RETRY_SECONDS,
     ISSUE_DAILY_QUOTA,
     ISSUE_SERVICE_UNAVAILABLE,
     PRICING_URL,
 )
 from custom_components.tag_historian.forwarder import INFLIGHT_WAIT_SECONDS
+from custom_components.tag_historian.importer import NO_STATISTICS_SENTENCE
 
 from .conftest import STUB_ACCOUNT, make_client
 
@@ -253,6 +262,7 @@ async def test_every_issue_string_gets_the_placeholders_it_asks_for(
     repairs.async_raise_forbidden_issue(hass, entry, "Confirm your email address.")
     repairs.async_maybe_raise_unavailable_issue(hass, entry, 3600)
     renames.async_raise_renamed_issue(hass, entry, "sensor.energy", "sensor.energy_2", merge=False)
+    repairs.async_raise_bring_years_issue(hass, entry)
 
     registry = ir.async_get(hass)
     raised = [
@@ -260,7 +270,7 @@ async def test_every_issue_string_gets_the_placeholders_it_asks_for(
         for issue in registry.issues.values()
         if issue.domain == DOMAIN
     ]
-    assert len(raised) == 5, "every card this integration can show"
+    assert len(raised) == 6, "every card this integration can show"
 
     for issue in raised:
         supplied = set(issue.translation_placeholders or {})
@@ -280,6 +290,106 @@ async def test_every_issue_string_gets_the_placeholders_it_asks_for(
         )
         # And it renders.
         render_issue(issue)
+
+
+def _strings_in(node: ast.AST) -> set[str]:
+    return {
+        n.value
+        for n in ast.walk(node)
+        if isinstance(n, ast.Constant) and isinstance(n.value, str)
+    }
+
+
+def keys_handed_out(*owners) -> tuple[set[str], set[str], set[str]]:
+    """Every error, abort and exception key these hand a screen, as literals.
+
+    Read from the syntax tree rather than a regex so a key chosen by a
+    conditional - ``"a" if err.x else "b"`` - is two keys, not none.
+    """
+    errors: set[str] = set()
+    reasons: set[str] = set()
+    raised: set[str] = set()
+    for owner in owners:
+        for node in ast.walk(ast.parse(textwrap.dedent(inspect.getsource(owner)))):
+            if isinstance(node, ast.keyword) and node.arg == "reason":
+                reasons |= _strings_in(node.value)
+            elif isinstance(node, ast.keyword) and node.arg == "translation_key":
+                raised |= _strings_in(node.value)
+            elif isinstance(node, ast.Dict):
+                for key, value in zip(node.keys, node.values, strict=True):
+                    if isinstance(key, ast.Constant) and key.value == "base":
+                        errors |= _strings_in(value)
+            elif isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if (
+                        isinstance(target, ast.Subscript)
+                        and isinstance(target.slice, ast.Constant)
+                        and target.slice.value == "base"
+                    ):
+                        errors |= _strings_in(node.value)
+    return errors, reasons, raised
+
+
+def test_every_error_and_abort_a_screen_can_show_has_words() -> None:
+    """A key en.json has no words for is drawn as the bare key, and nothing raises.
+
+    A flow result carries only the key; Home Assistant looks the sentence up
+    when it draws the dialog. So the flow tests, which compare keys, stayed
+    green with "Tag Historian could not check the key just now" deleted, and
+    the dialog would have said ``key_not_checked``.
+    """
+    sign_in = TagHistorianUnavailableError("/x", reason="sign_in_unavailable")
+    other = TagHistorianUnavailableError("/x")
+    # A 503's error on setup and reauthentication, and its abort on the
+    # options screens, is picked by a helper rather than written at the call;
+    # ask it.
+    # Setup and reauthentication also say whether the address is known to be
+    # right; Configure's aborts never do.
+    setup_503 = {
+        config_flow._unavailable_reason(err, address_known=known)
+        for err in (sign_in, other)
+        for known in (False, True)
+    }
+    assert setup_503 == {"key_not_checked", "unavailable", "unavailable_known_host"}
+    options_503 = {config_flow._unavailable_reason(sign_in), config_flow._unavailable_reason(other)}
+    assert options_503 == {"key_not_checked", "unavailable"}
+
+    _, _, action = keys_handed_out(tag_historian.async_start_import)
+    assert {"import_key_not_checked", "import_unavailable", "import_cannot_connect"} <= action
+
+    for section, owners, extra_errors, extra_reasons in (
+        (
+            "config",
+            (config_flow.SelectionStepsMixin, config_flow.TagHistorianConfigFlow),
+            setup_503,
+            # Chosen by Home Assistant's own helpers, not written in the flow:
+            # _abort_if_unique_id_configured and async_update_reload_and_abort.
+            {"already_configured", "reauth_successful"},
+        ),
+        (
+            "options",
+            (config_flow.SelectionStepsMixin, config_flow.TagHistorianOptionsFlow),
+            set(),
+            options_503,
+        ),
+    ):
+        errors, reasons, _ = keys_handed_out(*owners)
+        errors |= extra_errors
+        reasons |= extra_reasons
+        assert errors and reasons, "the walk still finds them"
+        missing_errors = errors - set(TRANSLATIONS[section].get("error", {}))
+        missing_reasons = reasons - set(TRANSLATIONS[section].get("abort", {}))
+        assert not missing_errors, f"{section}.error has no words for {missing_errors}"
+        assert not missing_reasons, f"{section}.abort has no words for {missing_reasons}"
+
+    # The import action's refusals: raised by the action, and the same keys
+    # are the options screen's and the repair card's aborts.
+    for where, keys in (
+        ("exceptions", TRANSLATIONS["exceptions"]),
+        ("options.abort", TRANSLATIONS["options"]["abort"]),
+        ("issues.bring_years.fix_flow.abort", TRANSLATIONS["issues"]["bring_years"]["fix_flow"]["abort"]),
+    ):
+        assert action <= set(keys), f"{where} has no words for {action - set(keys)}"
 
 
 # --------------------------------------------------------------------------
@@ -470,6 +580,12 @@ async def _walk_config_flow(hass: HomeAssistant, client) -> dict[str, dict]:
             },
         )
         seen[result["step_id"]] = result
+
+        # Past a review with nothing to decide, the last screen: the history
+        # Home Assistant already has.
+        if result["step_id"] == "review":
+            result = await hass.config_entries.flow.async_configure(flow_id, {})
+            seen[result["step_id"]] = result
         hass.config_entries.flow.async_abort(flow_id)
     return seen
 
@@ -720,6 +836,67 @@ def test_the_readme_names_the_wait_the_code_actually_gives_a_write() -> None:
     assert f"up to {SPELLED[INFLIGHT_WAIT_SECONDS]} seconds" in README
 
 
+def test_the_readme_bounds_the_history_import_carrying_on_as_the_code_does() -> None:
+    """A paused import is carried on for a few starts that get no further, not for good.
+
+    The README promised the carry-on without a bound for a round after the
+    code got one (importer.HistoryImporter.async_load); the counts are prose
+    here, so they are checked against the constants.
+    """
+    readme = flattened(README)
+    assert f"too busy to take it for {SPELLED[IMPORT_MAX_RETRY_SECONDS // 3600]} hours" in readme
+    assert f"up to {SPELLED[IMPORT_MAX_RESUMES_ON_LOAD]} starts in a row" in readme
+    assert f"with a server error {SPELLED[IMPORT_MAX_CONNECTION_FAILURES]} times" in readme
+
+
+def _translation_strings(node) -> list[str]:
+    """Every string in en.json, wherever it sits."""
+    if isinstance(node, str):
+        return [node]
+    if isinstance(node, dict):
+        return [s for value in node.values() for s in _translation_strings(value)]
+    return []
+
+
+@pytest.mark.parametrize("surface", ["README", "en.json"])
+def test_the_time_zone_is_sent_to_tag_historians_settings_not_home_assistants(surface: str) -> None:
+    """A bare Settings in Home Assistant is Home Assistant's, so the account's time zone is said to be in Tag Historian's.
+
+    The setup screen said "none chosen in Tag Historian's Settings" a round
+    before the README's copy of it did; "under Settings" sent the reader to
+    Home Assistant's own. The setup screen and the repair card are held to the
+    same rule as the README, each on its own: joined, either one saying it
+    right would carry the other.
+    """
+    surfaces = (
+        {"README": README}
+        if surface == "README"
+        else {
+            "config.step.history": TRANSLATIONS["config"]["step"]["history"]["description"],
+            "issues.bring_years": TRANSLATIONS["issues"]["bring_years"]["fix_flow"]["step"]["confirm"]["description"],
+        }
+    )
+    everything = flattened(README if surface == "README" else "\n".join(_translation_strings(TRANSLATIONS)))
+    for bare in ("chosen under Settings", "changed under Settings", "chosen in Settings", "changed in Settings"):
+        assert bare not in everything, f"{surface} sends the reader to a bare Settings"
+    for where, text in surfaces.items():
+        assert "none chosen in Tag Historian's Settings" in flattened(text), f"{where} sends the reader to a bare Settings"
+
+
+def test_the_readme_names_the_setup_box_by_its_label() -> None:
+    """The README quotes the last setup screen's box twice; a label changed in en.json has to change it there too."""
+    label = TRANSLATIONS["config"]["step"]["history"]["data"]["import_on_setup"]
+    readme = flattened(README)
+    assert f"untick **{label}**" in readme
+    assert f"**{label}**, ticked" in readme
+
+
+def test_the_repair_card_says_nothing_of_an_update_to_an_entry_that_had_none() -> None:
+    """The card is raised for a new entry too, once its import met a Tag Historian without the hours import."""
+    card = TRANSLATIONS["issues"]["bring_years"]["fix_flow"]["step"]["confirm"]["description"]
+    assert "after the update" not in card
+
+
 def test_the_readme_promises_that_wait_on_both_ways_out() -> None:
     """The number was right and the SCOPE was wrong, which is worse.
 
@@ -778,8 +955,10 @@ async def test_every_dropped_attribute_the_readme_names_actually_exists(
         await hass.async_block_till_done()
 
 
-# The digit runs that appear in a screen string and are not plan numbers. There
-# is one, and it is the sentence describing what an on/off entity stores.
+# The digit runs that appear in a screen string and are not plan numbers: the
+# sentence describing what an on/off entity stores, and how far the location
+# for the outdoor weather is rounded (place.py) - a fact of this integration,
+# which rounds to a tenth of a degree before anything is sent.
 #
 # An allow-list rather than a clever pattern, because the pattern is what went
 # wrong: this guard used to look for four-or-more digits, which caught the daily
@@ -788,7 +967,7 @@ async def test_every_dropped_attribute_the_readme_names_actually_exists(
 # into these strings, and it is exactly the shape the guard could not see.
 # Every number on these screens comes from GET /api/usage/limits as a
 # placeholder, so a new digit here is a decision, and it should have to be one.
-DIGITS_THAT_ARE_NOT_PLAN_NUMBERS = ("a 1 or a 0",)
+DIGITS_THAT_ARE_NOT_PLAN_NUMBERS = ("a 1 or a 0", "about 10 km")
 
 
 def plan_number_digits(text: str) -> list[str]:
@@ -1151,3 +1330,26 @@ async def test_a_refusal_is_quoted_on_the_card(hass: HomeAssistant, entry) -> No
     flow.hass = hass
 
     assert "former name of 'sensor.meter'" in render_menu(await flow.async_step_init())
+
+
+# --------------------------------------------------------------------------
+# Which entities have no long-term statistics
+# --------------------------------------------------------------------------
+
+
+def test_which_entities_have_no_statistics_is_one_sentence_wherever_it_is_said() -> None:
+    """The import's summary, its screens, the repair card and the README say it alike.
+
+    The sentence is Home Assistant's rule, and selection.py's: binary sensors
+    never get statistics, and the helpers it names can never carry a
+    state_class. Said differently in two places, one of them is wrong.
+    """
+    readme = " ".join(README.split())
+    surfaces = {
+        "config.step.history": TRANSLATIONS["config"]["step"]["history"]["description"],
+        "options.step.import_history": TRANSLATIONS["options"]["step"]["import_history"]["description"],
+        "issues.bring_years": TRANSLATIONS["issues"]["bring_years"]["fix_flow"]["step"]["confirm"]["description"],
+        "README": readme,
+    }
+    for where, text in surfaces.items():
+        assert NO_STATISTICS_SENTENCE in text, f"{where} says it some other way"

@@ -2,7 +2,8 @@
 
 Configure opens a menu of two things: choosing what to keep history for (the
 select and review screens below, again), and importing the history Home
-Assistant has already recorded (``import_history``, see importer.py).
+Assistant already has - its long-term statistics and its recorded readings
+(``import_history``, see importer.py).
 
 Four screens to add the integration, and the middle two are the reason this
 integration exists at all.
@@ -20,7 +21,14 @@ choosing, that their plan holds N tags and they have just ticked N+14.
                   with nothing to decide and a screen offering to cut the
                   selection are not the same screen and must not share a
                   description
-    4. (done)
+    4. history  - "Bring the history Home Assistant already has", ticked:
+                  its long-term statistics and the recorder's readings go in
+                  in the background once the entry is set up (importer.py).
+                  The same screen says that this Home Assistant's time zone
+                  is proposed to the account (place.py). A new entry only:
+                  the options flow changes a selection, it does not set one
+                  up, and an existing entry is offered the history on a
+                  repair card instead (repairs.py)
 
 Two rules the screens have to keep, because both were broken by code that
 looked reasonable:
@@ -74,19 +82,25 @@ from .api import (
     TagHistorianClient,
     TagHistorianConnectionError,
     TagHistorianPermissionError,
+    TagHistorianUnavailableError,
 )
 from .const import (
     ATTR_DAYS,
+    ATTR_STATISTICS,
     CONF_API_KEY,
     CONF_ENTITIES,
     CONF_FOLLOW_RENAMES,
     CONF_HOST,
+    CONF_IMPORT_ON_SETUP,
     CONF_MIN_INTERVAL,
     CONF_OWN_TAG_SINCE,
     CONF_SEND_AS,
+    CONF_SHARE_LOCATION,
     DEFAULT_HOST,
     DEFAULT_MIN_INTERVAL_SECONDS,
+    DIALOG_TIMEOUT_SECONDS,
     DOMAIN,
+    MAX_IMPORT_DAYS,
 )
 from .line_protocol import tag_name_for_entity
 from .renames import own_tag_since, send_as
@@ -188,6 +202,8 @@ class SelectionStepsMixin:
     _show_everything: bool = False
     _selection_touched: bool = False
     _follow_renames: bool = False
+    # Off until the user ticks it: a location is theirs to give (place.py).
+    _share_location: bool = False
     # Entities renamed in Home Assistant whose readings still go under their
     # old tag (renames.py) - empty for an entry being created.
     _send_as: dict[str, str] = {}  # noqa: RUF012 - replaced, never mutated
@@ -220,6 +236,7 @@ class SelectionStepsMixin:
             self._selected = list(user_input[CONF_ENTITIES])
             self._min_interval = int(user_input[CONF_MIN_INTERVAL])
             self._follow_renames = bool(user_input.get(CONF_FOLLOW_RENAMES, False))
+            self._share_location = bool(user_input.get(CONF_SHARE_LOCATION, False))
             self._selection_touched = True
             asked_for_everything = bool(user_input.get(CONF_SHOW_ALL, False))
 
@@ -274,6 +291,9 @@ class SelectionStepsMixin:
                 ): bool,
                 vol.Required(
                     CONF_FOLLOW_RENAMES, default=self._follow_renames
+                ): bool,
+                vol.Required(
+                    CONF_SHARE_LOCATION, default=self._share_location
                 ): bool,
             }
         )
@@ -448,9 +468,27 @@ class TagHistorianConfigFlow(SelectionStepsMixin, ConfigFlow, domain=DOMAIN):
         Three distinguishable failures, because they need three different
         fixes. A single "cannot connect" would send someone hunting for a
         firewall rule when what they actually pasted was a read-only key.
+
+        And a 503, which is neither an unreachable host nor a rejected key (a
+        401). With reason ``sign_in_unavailable`` it is Tag Historian
+        answering that it could not check the key just now - the address is
+        right, and only waiting a minute fixes it. Any other 503 is not known
+        to be Tag Historian's (a proxy or another service at a mistyped
+        address answers 503 too), so it is said as "answered, but could not
+        do this just now": try again, and check the address if it persists.
+        Only on the first call: once /api/customers/me has answered with this
+        account the address is right, and a 503 or a failed connection after
+        it says only to try again.
+
+        The screen waits DIALOG_TIMEOUT_SECONDS for an answer, because the
+        API may take up to about half a minute to answer that 503; connecting
+        is still bounded by HTTP_TIMEOUT_SECONDS.
         """
         client = TagHistorianClient(
-            async_get_clientsession(self.hass), self._host, self._api_key
+            async_get_clientsession(self.hass),
+            self._host,
+            self._api_key,
+            answer_within=DIALOG_TIMEOUT_SECONDS,
         )
 
         try:
@@ -461,6 +499,8 @@ class TagHistorianConfigFlow(SelectionStepsMixin, ConfigFlow, domain=DOMAIN):
             # /api/customers/me is reachable by every role, so a 403 here is
             # not a scope problem - it is an account the API is refusing.
             return {"base": "account_blocked"}
+        except TagHistorianUnavailableError as err:
+            return {"base": _unavailable_reason(err)}
         except TagHistorianConnectionError:
             return {"base": "cannot_connect"}
 
@@ -480,8 +520,13 @@ class TagHistorianConfigFlow(SelectionStepsMixin, ConfigFlow, domain=DOMAIN):
             return {"base": "read_only_key"}
         except TagHistorianAuthError:
             return {"base": "invalid_auth"}
+        except TagHistorianUnavailableError as err:
+            return {"base": _unavailable_reason(err, address_known=True)}
         except TagHistorianConnectionError:
-            return {"base": "cannot_connect"}
+            # /api/customers/me has just answered at this address with this
+            # account, so it is not the address: a dropped connection, a
+            # timeout or a server error. Nothing to check but the way out.
+            return {"base": "cannot_connect_known_host"}
 
         customer_id = account.get("customerId")
         if customer_id:
@@ -498,13 +543,41 @@ class TagHistorianConfigFlow(SelectionStepsMixin, ConfigFlow, domain=DOMAIN):
         return {}
 
     async def async_step_finish(self) -> ConfigFlowResult:
-        return self.async_create_entry(
-            title=self._account_name,
-            data={CONF_HOST: self._host, CONF_API_KEY: self._api_key},
-            options={
-                CONF_ENTITIES: self._selected,
-                CONF_MIN_INTERVAL: self._min_interval,
-                CONF_FOLLOW_RENAMES: self._follow_renames,
+        return await self.async_step_history()
+
+    async def async_step_history(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Screen 4 - bring the history Home Assistant already has, ticked.
+
+        Nothing is sent from here: the entry's first setup starts the import
+        when this is left ticked (__init__._async_bring_years), so it runs
+        with the forwarder already listening and knows where its live part
+        begins. The time zone line is a disclosure, not a question - it is
+        proposed whatever is ticked, and taken only if the account has no
+        zone yet (place.py).
+        """
+        if user_input is not None:
+            return self.async_create_entry(
+                title=self._account_name,
+                data={CONF_HOST: self._host, CONF_API_KEY: self._api_key},
+                options={
+                    CONF_ENTITIES: self._selected,
+                    CONF_MIN_INTERVAL: self._min_interval,
+                    CONF_FOLLOW_RENAMES: self._follow_renames,
+                    CONF_SHARE_LOCATION: self._share_location,
+                    CONF_IMPORT_ON_SETUP: bool(user_input.get(CONF_IMPORT_ON_SETUP, True)),
+                },
+            )
+
+        keep_days = history.recorder_keep_days(self.hass)
+        return self.async_show_form(
+            step_id="history",
+            data_schema=vol.Schema({vol.Required(CONF_IMPORT_ON_SETUP, default=True): bool}),
+            description_placeholders={
+                "selected": str(len(self._selected)),
+                "recorder_days": str(keep_days) if keep_days is not None else "some",
+                "time_zone": str(self.hass.config.time_zone),
             },
         )
 
@@ -524,14 +597,25 @@ class TagHistorianConfigFlow(SelectionStepsMixin, ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             self._api_key = user_input[CONF_API_KEY]
             client = TagHistorianClient(
-                async_get_clientsession(self.hass), self._host, self._api_key
+                async_get_clientsession(self.hass),
+                self._host,
+                self._api_key,
+                answer_within=DIALOG_TIMEOUT_SECONDS,
             )
             try:
                 account = await client.async_validate()
             except TagHistorianAuthError:
                 errors["base"] = "invalid_auth"
+            except TagHistorianUnavailableError as err:
+                # Not this key refused. With reason sign_in_unavailable no key
+                # could be checked just now; any other 503 is a moment's
+                # trouble at the entry's own address, which this screen
+                # cannot change.
+                errors["base"] = _unavailable_reason(err, address_known=True)
             except TagHistorianConnectionError:
-                errors["base"] = "cannot_connect"
+                # The entry's own address, which this form does not show and
+                # cannot change: say nothing about checking it.
+                errors["base"] = "cannot_connect_known_host"
             else:
                 # A key for a DIFFERENT account would silently start writing
                 # this house's history into somebody else's tenant.
@@ -554,6 +638,27 @@ class TagHistorianConfigFlow(SelectionStepsMixin, ConfigFlow, domain=DOMAIN):
         )
 
 
+def _unavailable_reason(
+    err: TagHistorianUnavailableError, *, address_known: bool = False
+) -> str:
+    """The error or abort for a 503, on setup, reauthentication and Configure alike.
+
+    A key not checked (reason ``sign_in_unavailable``) is said as that. Any
+    other 503 - answered by Tag Historian, or by whatever stands at that
+    address, but not served just now - is not "could not reach", because
+    something answered, and not "could not check the key", because nothing
+    says so. On the setup screen's first call the address was just typed and
+    nothing has shown it is Tag Historian's, so ``unavailable`` says to check
+    it if it persists. Once it has answered with this account, or on
+    reauthentication, where the address is the entry's and is not on the
+    form, there is nothing there to check: ``unavailable_known_host`` says
+    only to wait. Configure's aborts have no such clause and pass nothing.
+    """
+    if err.key_not_checked:
+        return "key_not_checked"
+    return "unavailable_known_host" if address_known else "unavailable"
+
+
 class TagHistorianOptionsFlow(SelectionStepsMixin, OptionsFlow):
     """Change the selection later, or import recorded history, without re-adding anything."""
 
@@ -573,16 +678,20 @@ class TagHistorianOptionsFlow(SelectionStepsMixin, OptionsFlow):
             entry.options.get(CONF_MIN_INTERVAL, DEFAULT_MIN_INTERVAL_SECONDS)
         )
         self._follow_renames = bool(entry.options.get(CONF_FOLLOW_RENAMES, False))
+        self._share_location = bool(entry.options.get(CONF_SHARE_LOCATION, False))
         self._send_as = send_as(entry.options)
 
         client = TagHistorianClient(
             async_get_clientsession(self.hass),
             entry.data[CONF_HOST],
             entry.data[CONF_API_KEY],
+            answer_within=DIALOG_TIMEOUT_SECONDS,
         )
         try:
             self._quota = await client.async_get_quota()
             self._existing_tags = await client.async_get_tag_names()
+        except TagHistorianUnavailableError as err:
+            return self.async_abort(reason=_unavailable_reason(err))
         except (
             TagHistorianAuthError,
             TagHistorianPermissionError,
@@ -601,6 +710,7 @@ class TagHistorianOptionsFlow(SelectionStepsMixin, OptionsFlow):
             CONF_ENTITIES: self._selected,
             CONF_MIN_INTERVAL: self._min_interval,
             CONF_FOLLOW_RENAMES: self._follow_renames,
+            CONF_SHARE_LOCATION: self._share_location,
             # Kept for the entities still selected: a rename waiting to be
             # confirmed is not undone by changing something else. An
             # entity no longer selected sends nothing, under any name.
@@ -613,20 +723,29 @@ class TagHistorianOptionsFlow(SelectionStepsMixin, OptionsFlow):
         # Kept whatever is selected (const.py), as the entry has it now.
         if own := own_tag_since(self.config_entry.options):
             options[CONF_OWN_TAG_SINCE] = own
+        # The answer on the setup's last screen, as the entry has it. Written
+        # anew without it, the next load took this entry for one set up before
+        # that screen existed (__init__._async_bring_years): one that unticked
+        # it was offered the years on a repair card after all, and one whose
+        # import had not started yet got the card instead of the next try.
+        if CONF_IMPORT_ON_SETUP in self.config_entry.options:
+            options[CONF_IMPORT_ON_SETUP] = self.config_entry.options[CONF_IMPORT_ON_SETUP]
         return self.async_create_entry(data=options)
 
     async def async_step_import_history(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Import what the recorder holds for the selected entities.
+        """Import the history Home Assistant has for the selected entities.
 
-        The allowance and the window on this screen are read from the API as
-        it is drawn (``GET /api/import/allowance``); nothing about a plan is
-        typed here. Submitting starts the import in the background and closes
-        the dialog - an import of a year of readings takes far longer than
-        anybody should watch a dialog for - and the sensor and a notification
-        take it from there. Nothing in the options changes, so the entry is
-        not reloaded.
+        Its long-term statistics first, unless unticked, then what the
+        recorder holds (importer.py). The allowance and the window on this
+        screen are read from the API as it is drawn (``GET
+        /api/import/allowance``); nothing about a plan is typed here.
+        Submitting starts the import in the background and closes the dialog
+        - an import of years of hours and a fortnight of readings takes far
+        longer than anybody should watch a dialog for - and the sensor and a
+        notification take it from there. Nothing in the options changes, so
+        the entry is not reloaded.
         """
         entry = self.config_entry
         selected = list(entry.options.get(CONF_ENTITIES, []))
@@ -649,7 +768,11 @@ class TagHistorianOptionsFlow(SelectionStepsMixin, OptionsFlow):
 
                 try:
                     await async_start_import(
-                        self.hass, entry, entities, int(user_input[ATTR_DAYS])
+                        self.hass,
+                        entry,
+                        entities,
+                        int(user_input[ATTR_DAYS]),
+                        statistics=bool(user_input.get(ATTR_STATISTICS, True)),
                     )
                 except HomeAssistantError as err:
                     # The action's own refusals, under the same keys: one
@@ -667,9 +790,12 @@ class TagHistorianOptionsFlow(SelectionStepsMixin, OptionsFlow):
             async_get_clientsession(self.hass),
             entry.data[CONF_HOST],
             entry.data[CONF_API_KEY],
+            answer_within=DIALOG_TIMEOUT_SECONDS,
         )
         try:
             allowance = await client.async_get_import_allowance()
+        except TagHistorianUnavailableError as err:
+            return self.async_abort(reason=_unavailable_reason(err))
         except (
             TagHistorianAuthError,
             TagHistorianPermissionError,
@@ -677,16 +803,19 @@ class TagHistorianOptionsFlow(SelectionStepsMixin, OptionsFlow):
         ):
             return self.async_abort(reason="cannot_connect")
 
-        window_days = max(1, allowance.window_days)
         keep_days = history.recorder_keep_days(self.hass)
+        # As far back as either phase reaches: the statistics up to ten
+        # years, the readings no further than the plan's window, which the
+        # import holds them to whatever this says.
         schema = vol.Schema(
             {
                 vol.Required(CONF_ENTITIES, default=selected): EntitySelector(
                     EntitySelectorConfig(multiple=True, include_entities=selected)
                 ),
-                vol.Required(ATTR_DAYS, default=window_days): NumberSelector(
+                vol.Required(ATTR_STATISTICS, default=True): bool,
+                vol.Required(ATTR_DAYS, default=MAX_IMPORT_DAYS): NumberSelector(
                     NumberSelectorConfig(
-                        min=1, max=window_days, mode=NumberSelectorMode.BOX,
+                        min=1, max=MAX_IMPORT_DAYS, mode=NumberSelectorMode.BOX,
                         unit_of_measurement="days",
                     )
                 ),

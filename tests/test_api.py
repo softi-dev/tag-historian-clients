@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import gzip
+import json
+
+import aiohttp
 import pytest
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -13,10 +17,17 @@ from custom_components.tag_historian.api import (
     TagHistorianClient,
     TagHistorianConnectionError,
     TagHistorianImportRefused,
+    TagHistorianServerError,
+    TagHistorianUnavailableError,
     WriteOutcome,
     _classify_429,
     _parse_dropped_points,
     _parse_skipped_tags,
+)
+from custom_components.tag_historian.const import (
+    DIALOG_TIMEOUT_SECONDS,
+    HTTP_TIMEOUT_SECONDS,
+    IMPORT_TIMEOUT_SECONDS,
 )
 
 WRITE_URL = "https://api.taghistorian.com/api/v2/write?precision=s"
@@ -188,6 +199,187 @@ async def test_503_is_retryable_and_carries_its_own_retry_after(
     assert result.retryable
 
 
+# The API's 503 when it could not CHECK a key (a moment's trouble on its
+# side), on every endpoint that needs a sign-in. A key it checked and
+# refused is a 401.
+SIGN_IN_UNAVAILABLE = {
+    "error": "Service Unavailable",
+    "message": "Your sign-in could not be checked just now. This is on our side and says "
+    "nothing about your API key or session - send the same request again in a moment.",
+    "traceId": "0HN-test",
+    "reason": "sign_in_unavailable",
+    "retryAfterSeconds": 37,
+}
+
+
+async def test_a_write_whose_key_could_not_be_checked_waits_like_any_503(
+    client, aioclient_mock
+) -> None:
+    """Not a 401: no reauthentication, the batch is held and sent again."""
+    aioclient_mock.post(
+        WRITE_URL, status=503, headers={"Retry-After": "37"}, json=SIGN_IN_UNAVAILABLE
+    )
+
+    result = await client.async_write(BODY)
+
+    assert result.outcome is WriteOutcome.UNAVAILABLE
+    assert result.retry_after == 37
+    assert result.retryable
+
+
+async def test_a_key_that_could_not_be_checked_is_not_a_connection_failure_to_a_screen(
+    client, aioclient_mock
+) -> None:
+    """The 503 keeps what it is: a connection error to whoever only retries,
+    and to a screen a key not checked - neither an unreachable host nor a 401."""
+    aioclient_mock.get(
+        "https://api.taghistorian.com/api/customers/me",
+        status=503,
+        headers={"Retry-After": "37"},
+        json=SIGN_IN_UNAVAILABLE,
+    )
+
+    with pytest.raises(TagHistorianUnavailableError) as raised:
+        await client.async_validate()
+
+    assert isinstance(raised.value, TagHistorianConnectionError)
+    assert raised.value.key_not_checked
+    assert raised.value.reason == "sign_in_unavailable"
+    assert raised.value.retry_after == 37
+
+
+class _TimeoutRecorder:
+    """A session that only records the timeout each request was given."""
+
+    def __init__(self, status: int = 200) -> None:
+        self.timeouts: list = []
+        self.status = status
+
+    def get(self, url, **kwargs):
+        self.timeouts.append(kwargs["timeout"])
+        return _Answered(self.status)
+
+    post = get
+
+
+class _Answered:
+    def __init__(self, status: int) -> None:
+        self.status = status
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc) -> bool:
+        return False
+
+    async def json(self, **kwargs) -> dict:
+        return {
+            "customerId": "00000000-0000-0000-0000-000000000001",
+            "importId": "imp-1",
+            "startedAt": "2026-10-17T12:00:00Z",
+            "windowStart": "2026-10-03T12:00:00Z",
+            "maxReadingsPerBatch": 5000,
+            "allowance": {},
+        }
+
+
+@pytest.mark.parametrize(
+    ("answer_within", "total"),
+    [(None, HTTP_TIMEOUT_SECONDS), (DIALOG_TIMEOUT_SECONDS, DIALOG_TIMEOUT_SECONDS)],
+)
+async def test_a_screen_waits_longer_for_the_answer_but_not_to_connect(
+    answer_within, total
+) -> None:
+    """The API may take up to about half a minute to answer a 503 for a key it
+    could not check. A screen's client waits that out; connecting stays bounded
+    by HTTP_TIMEOUT_SECONDS, so an address that does not answer is still said
+    as one. The runtime clients pass nothing and keep ten seconds in all
+    (test_init and test_renames pin that they pass nothing)."""
+    session = _TimeoutRecorder()
+    kwargs = {} if answer_within is None else {"answer_within": answer_within}
+    client = TagHistorianClient(session, "api.taghistorian.com", "k", **kwargs)
+
+    await client.async_validate()
+
+    (timeout,) = session.timeouts
+    assert timeout.total == total
+    assert timeout.connect == HTTP_TIMEOUT_SECONDS
+
+
+@pytest.mark.parametrize(
+    ("status", "send"),
+    [
+        (204, lambda client: client.async_write(BODY)),
+        (200, lambda client: client.async_rename_tag("old", "new")),
+        (200, lambda client: client.async_merge_tags("old", "new")),
+        (200, lambda client: client.async_propose_time_zone("Europe/Stockholm")),
+    ],
+    ids=["write", "rename", "merge", "proposal"],
+)
+async def test_what_is_sent_keeps_ten_seconds_whatever_a_screen_waits(
+    status, send
+) -> None:
+    """The forwarder's bounds are built on HTTP_TIMEOUT_SECONDS for a write. A
+    client built to wait DIALOG_TIMEOUT_SECONDS for a screen's answer still
+    gives a write, a rename or merge and a proposal ten seconds in all."""
+    session = _TimeoutRecorder(status)
+    client = TagHistorianClient(
+        session, "api.taghistorian.com", "k", answer_within=DIALOG_TIMEOUT_SECONDS
+    )
+
+    await send(client)
+
+    (timeout,) = session.timeouts
+    assert timeout.total == HTTP_TIMEOUT_SECONDS
+
+
+async def test_an_import_batch_keeps_its_own_bound_whatever_a_screen_waits() -> None:
+    session = _TimeoutRecorder(200)
+    client = TagHistorianClient(
+        session, "api.taghistorian.com", "k", answer_within=DIALOG_TIMEOUT_SECONDS
+    )
+
+    await client.async_import_batch("imp-1", [])
+
+    (timeout,) = session.timeouts
+    assert timeout.total == IMPORT_TIMEOUT_SECONDS
+
+
+@pytest.mark.parametrize("answer_within", [None, DIALOG_TIMEOUT_SECONDS])
+async def test_starting_an_import_waits_for_a_slow_answer_but_not_to_connect(
+    answer_within,
+) -> None:
+    """A person always starts an import, never the forwarder. Whichever client
+    starts it - the entry's own, too - waits for a slow 503 for a key that
+    could not be checked, so it is said as that and not as "could not reach";
+    connecting stays bounded by ten seconds."""
+    session = _TimeoutRecorder(201)
+    kwargs = {} if answer_within is None else {"answer_within": answer_within}
+    client = TagHistorianClient(session, "api.taghistorian.com", "k", **kwargs)
+
+    await client.async_start_import()
+
+    (timeout,) = session.timeouts
+    assert timeout.total == DIALOG_TIMEOUT_SECONDS
+    assert timeout.connect == HTTP_TIMEOUT_SECONDS
+
+
+async def test_another_503_is_unavailable_but_not_a_key_not_checked(
+    client, aioclient_mock
+) -> None:
+    aioclient_mock.get(
+        "https://api.taghistorian.com/api/import/allowance",
+        status=503,
+        json={"error": "Service Unavailable", "message": "The operation was cancelled."},
+    )
+
+    with pytest.raises(TagHistorianUnavailableError) as raised:
+        await client.async_get_import_allowance()
+
+    assert not raised.value.key_not_checked
+    assert raised.value.retry_after == 0
+
+
 async def test_403_is_permanent_and_keeps_the_apis_own_wording(
     client, aioclient_mock
 ) -> None:
@@ -214,6 +406,67 @@ async def test_401_raises_rather_than_returning(client, aioclient_mock) -> None:
 
     with pytest.raises(TagHistorianAuthError):
         await client.async_write(BODY)
+
+
+async def test_a_write_that_gets_no_answer_says_so(client, aioclient_mock) -> None:
+    """aiohttp's total timeout is a TimeoutError that prints as nothing, and
+    this text is the readings dropped sensor's last_error - where an empty one
+    is what a clean write leaves behind."""
+    aioclient_mock.post(WRITE_URL, exc=TimeoutError())
+
+    with pytest.raises(TagHistorianConnectionError) as raised:
+        await client.async_write(BODY)
+
+    assert str(raised.value) == f"no answer within {HTTP_TIMEOUT_SECONDS} seconds"
+
+
+async def test_a_read_or_an_import_start_that_gets_no_answer_says_so_too(
+    client, aioclient_mock
+) -> None:
+    aioclient_mock.get("https://api.taghistorian.com/api/customers/me", exc=TimeoutError())
+    aioclient_mock.post("https://api.taghistorian.com/api/import", exc=TimeoutError())
+
+    with pytest.raises(TagHistorianConnectionError, match="no answer within 10 seconds"):
+        await client.async_validate()
+    with pytest.raises(TagHistorianConnectionError, match="no answer within 45 seconds"):
+        await client.async_start_import()
+
+
+async def test_a_failure_with_words_of_its_own_keeps_them(client, aioclient_mock) -> None:
+    aioclient_mock.post(WRITE_URL, exc=aiohttp.ClientConnectionError("Connection refused"))
+
+    with pytest.raises(TagHistorianConnectionError, match="^Connection refused$"):
+        await client.async_write(BODY)
+
+
+@pytest.mark.parametrize("status", [502, 504])
+async def test_a_gateway_that_lost_the_api_is_unreachable_for_a_write_too(
+    client, aioclient_mock, status
+) -> None:
+    """Not REJECTED: that drops the batch for good and counts it as refused.
+    Tag Historian itself did not answer, so the batch is held like a socket
+    error's."""
+    aioclient_mock.post(WRITE_URL, status=status, text="<html>Bad Gateway</html>")
+
+    with pytest.raises(TagHistorianConnectionError) as raised:
+        await client.async_write(BODY)
+
+    assert not isinstance(raised.value, TagHistorianServerError)
+    assert str(raised.value) == f"write answered {status}"
+
+
+@pytest.mark.parametrize("status", [400, 413, 500])
+async def test_a_body_tag_historian_cannot_take_is_still_dropped(
+    client, aioclient_mock, status
+) -> None:
+    """A batch that gets the same answer every time must not be held at the
+    front of the queue: it would stop every reading behind it."""
+    aioclient_mock.post(WRITE_URL, status=status, json={"message": "no"})
+
+    result = await client.async_write(BODY)
+
+    assert result.outcome is WriteOutcome.REJECTED
+    assert not result.retryable
 
 
 async def test_quota_comes_from_the_api_and_nowhere_else(
@@ -354,6 +607,20 @@ async def test_an_import_that_cannot_start_says_why(
     assert refused.value.message == f"{error}."
 
 
+async def test_an_import_whose_key_could_not_be_checked_did_not_start_for_that_reason(
+    client, aioclient_mock
+) -> None:
+    aioclient_mock.post(
+        IMPORT_URL, status=503, headers={"Retry-After": "40"}, json=SIGN_IN_UNAVAILABLE
+    )
+
+    with pytest.raises(TagHistorianUnavailableError) as raised:
+        await client.async_start_import()
+
+    assert raised.value.key_not_checked
+    assert raised.value.retry_after == 40
+
+
 async def test_a_batch_answer_is_read_field_by_field(client, aioclient_mock) -> None:
     aioclient_mock.post(
         BATCH_URL,
@@ -423,6 +690,204 @@ async def test_a_500_from_the_import_endpoint_is_retried_like_a_socket_error(
 
     with pytest.raises(TagHistorianConnectionError):
         await client.async_import_batch("imp-1", [READING])
+
+
+async def test_an_import_that_brings_hours_says_so_when_it_starts(client, aioclient_mock) -> None:
+    """The readings allowance does not come back once spent; an import with hours starts anyway."""
+    aioclient_mock.post(
+        IMPORT_URL,
+        status=201,
+        json={
+            "importId": "imp-1",
+            "startedAt": "2026-10-17T12:00:00Z",
+            "windowStart": "2026-10-03T12:00:00Z",
+            "allowance": {"total": 900, "used": 900, "remaining": 0},
+        },
+    )
+
+    started = await client.async_start_import(hours=True)
+
+    assert aioclient_mock.mock_calls[0][2] == {"source": "home-assistant", "hours": True}
+    assert started.allowance.remaining == 0
+
+
+# --------------------------------------------------------------------------
+# The hours endpoint (the statistics phase)
+# --------------------------------------------------------------------------
+
+HOURS_URL = "https://api.taghistorian.com/api/import/imp-1/hours"
+
+
+async def test_an_hours_batch_goes_gzipped_and_its_answer_is_read_field_by_field(
+    client, aioclient_mock
+) -> None:
+    """What the endpoint says about each hour, under the names ImportController gives them."""
+    aioclient_mock.post(
+        HOURS_URL,
+        status=200,
+        json={
+            "importId": "imp-1",
+            "received": 20,
+            "stored": 9,
+            "duplicates": 2,
+            "outsideRetention": 1,
+            "negativeChange": 1,
+            "refused": {
+                "notHistory": 1,
+                "tagLimit": 0,
+                "unitMismatch": 3,
+                "invalid": 1,
+                "unsupported": 0,
+                "hoursAllowance": 2,
+                "unwritable": 1,
+            },
+            "refusedTags": [],
+            "importableBefore": {"sensor.house_power": "2026-10-16T08:00:00Z"},
+            "oldestAllowed": "2016-11-01T00:00:00Z",
+            "hoursAllowance": {"limit": 100, "usedLast30Days": 100, "remaining": 0, "resumesAt": "2026-11-02T00:00:00Z"},
+        },
+    )
+    body = {"series": [{"tagName": "sensor.house_power", "hours": [{"t": 3600, "mean": 1, "min": 0, "max": 2}]}]}
+
+    result = await client.async_import_hours("imp-1", gzip.compress(json.dumps(body).encode()))
+
+    assert result.outcome is ImportOutcome.TAKEN
+    assert (result.stored, result.duplicates, result.outside_retention, result.negative_change) == (9, 2, 1, 1)
+    assert result.refused_unit_mismatch == 3
+    assert result.refused_hours_allowance == 2
+    assert result.refused == 1 + 3 + 1 + 2 + 1
+    assert result.skipped == 2 + 1 + result.refused
+    assert result.importable_before["sensor.house_power"].hour == 8
+    assert result.oldest_allowed is not None and result.oldest_allowed.year == 2016
+    assert result.resumes_at is not None and result.resumes_at.month == 11
+
+    _, _, sent, headers = aioclient_mock.mock_calls[0]
+    assert headers["Content-Encoding"] == "gzip"
+    assert json.loads(gzip.decompress(sent)) == body, "gzip on the wire, the batch inside"
+
+
+async def test_the_hourly_allowance_is_its_own_402(client, aioclient_mock) -> None:
+    """Not the readings' allowance: it ends the statistics phase only, and says when more goes in."""
+    aioclient_mock.post(
+        HOURS_URL,
+        status=402,
+        json={
+            "error": "Hourly history allowance used up",
+            "code": "hours_allowance",
+            "resumesAt": "2026-11-02T00:00:00Z",
+            "message": "This account has stored 100 hours of hourly history in the last 30 days.",
+        },
+    )
+
+    result = await client.async_import_hours("imp-1", b"")
+
+    assert result.outcome is ImportOutcome.HOURS_ALLOWANCE_SPENT
+    assert result.resumes_at is not None and result.resumes_at.day == 2
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "outcome"),
+    [
+        (402, {"error": "Import allowance used up"}, ImportOutcome.ALLOWANCE_SPENT),
+        (403, {"error": "Account scheduled for deletion"}, ImportOutcome.FORBIDDEN),
+        (404, {"error": "No import with that id on this account"}, ImportOutcome.UNKNOWN_IMPORT),
+        (400, {"error": "series is empty"}, ImportOutcome.REJECTED),
+        (413, {"error": "at most 5000 hours per request"}, ImportOutcome.REJECTED),
+    ],
+)
+async def test_every_hours_refusal_is_read_as_the_readings_endpoints_are(
+    client, aioclient_mock, status, body, outcome
+) -> None:
+    aioclient_mock.post(HOURS_URL, status=status, json=body)
+
+    assert (await client.async_import_hours("imp-1", b"")).outcome is outcome
+
+
+async def test_a_tag_historian_without_the_hours_endpoint_is_not_an_unknown_import(
+    client, aioclient_mock
+) -> None:
+    """A route that is not there answers 404 with no body; "no such import" has one."""
+    aioclient_mock.post(HOURS_URL, status=404)
+
+    assert (await client.async_import_hours("imp-1", b"")).outcome is ImportOutcome.NOT_SUPPORTED
+
+
+@pytest.mark.parametrize(
+    ("url", "send"),
+    [
+        pytest.param(BATCH_URL, lambda c: c.async_import_batch("imp-1", [READING]), id="readings"),
+        pytest.param(HOURS_URL, lambda c: c.async_import_hours("imp-1", b""), id="hours"),
+    ],
+)
+async def test_a_404_page_from_something_in_front_of_tag_historian_is_not_its_answer(
+    client, aioclient_mock, url, send
+) -> None:
+    """An ingress's HTML 404 for a stopped API is retried as unreachable; it does not end the import for good."""
+    aioclient_mock.post(
+        url,
+        status=404,
+        text="<html><body>404 - this container app is stopped</body></html>",
+        headers={"Content-Type": "text/html"},
+    )
+
+    with pytest.raises(TagHistorianConnectionError) as raised:
+        await send(client)
+    assert not isinstance(raised.value, TagHistorianServerError), "carried on as unreachable"
+
+
+@pytest.mark.parametrize(
+    ("reason", "retry_after"), [("busy", 3), ("account_busy", 5), ("months_not_ready", 60)]
+)
+async def test_an_hours_503_says_why_it_asked_for_the_batch_again(
+    client, aioclient_mock, reason, retry_after
+) -> None:
+    """The hours endpoint's turns are told from trouble by the reason (importer._TURN_REASONS)."""
+    aioclient_mock.post(
+        HOURS_URL,
+        status=503,
+        json={"error": "import_unavailable", "reason": reason, "retryAfterSeconds": retry_after},
+        headers={"Retry-After": str(retry_after)},
+    )
+
+    result = await client.async_import_hours("imp-1", b"")
+
+    assert result.outcome is ImportOutcome.RETRY
+    assert (result.reason, result.retry_after) == (reason, retry_after)
+
+
+@pytest.mark.parametrize("status", [502, 504])
+async def test_a_gateway_that_lost_the_api_is_unreachable_not_a_server_error(
+    client, aioclient_mock, status
+) -> None:
+    aioclient_mock.post(BATCH_URL, status=status)
+
+    with pytest.raises(TagHistorianConnectionError) as raised:
+        await client.async_import_batch("imp-1", [READING])
+    assert not isinstance(raised.value, TagHistorianServerError)
+
+
+async def test_a_500_from_the_hours_endpoint_is_a_server_error(client, aioclient_mock) -> None:
+    """Retried as a lost connection is, but told apart: the importer does not carry it on by itself."""
+    aioclient_mock.post(HOURS_URL, status=500, json={"error": "An internal error occurred."})
+
+    with pytest.raises(TagHistorianServerError):
+        await client.async_import_hours("imp-1", b"")
+
+
+async def test_a_503_that_stored_part_of_the_batch_says_how_much(client, aioclient_mock) -> None:
+    """The resend finds those hours as duplicates; the importer counts them as stored, once."""
+    aioclient_mock.post(
+        HOURS_URL,
+        status=503,
+        json={"error": "import_unavailable", "reason": "months_not_ready", "stored": 24},
+        headers={"Retry-After": "60"},
+    )
+
+    result = await client.async_import_hours("imp-1", b"")
+
+    assert result.outcome is ImportOutcome.RETRY
+    assert result.retry_after == 60
+    assert result.stored == 24
 
 
 # --------------------------------------------------------------------------
@@ -532,3 +997,40 @@ async def test_a_key_that_may_not_rename_says_which_key_can(client, aioclient_mo
 
     assert result.outcome is LineageOutcome.REFUSED
     assert "Write scope" in result.message
+
+
+PROPOSAL_URL = "https://api.taghistorian.com/api/account/settings/proposal"
+
+
+async def test_the_place_is_proposed_as_given_and_named_as_home_assistants(
+    client, aioclient_mock
+) -> None:
+    aioclient_mock.post(PROPOSAL_URL, status=200, json={"place": {"lat": 59.3, "lon": 18.1}})
+
+    assert await client.async_propose_place(59.3, 18.1) is True
+
+    body = aioclient_mock.mock_calls[0][2]
+    assert body == {"place": {"lat": 59.3, "lon": 18.1}, "source": "ha"}
+
+
+async def test_a_tag_historian_without_the_weather_is_not_an_error(client, aioclient_mock) -> None:
+    """An older server answers 404; nothing depends on the proposal."""
+    aioclient_mock.post(PROPOSAL_URL, status=404)
+
+    assert await client.async_propose_place(59.3, 18.1) is None
+
+
+async def test_a_refused_key_on_the_proposal_is_the_auth_error(client, aioclient_mock) -> None:
+    aioclient_mock.post(PROPOSAL_URL, status=401)
+
+    with pytest.raises(TagHistorianAuthError):
+        await client.async_propose_place(59.3, 18.1)
+
+
+async def test_the_time_zone_is_proposed_as_home_assistants(client, aioclient_mock) -> None:
+    """The same endpoint as the place, and like the place only ever a proposal."""
+    aioclient_mock.post(PROPOSAL_URL, status=200, json={"timeZone": {"id": "Europe/Stockholm"}})
+
+    assert await client.async_propose_time_zone("Europe/Stockholm") is True
+
+    assert aioclient_mock.mock_calls[0][2] == {"timeZone": "Europe/Stockholm", "source": "ha"}

@@ -42,6 +42,23 @@ CONF_SEND_AS: Final = "send_as"
 # history its own.
 CONF_OWN_TAG_SINCE: Final = "own_tag_since"
 
+# Whether Tag Historian may be told this Home Assistant's approximate location,
+# so the account can show the outdoor weather from SMHI's nearest stations
+# beside its charts (place.py). OFF by default: a location is the user's to
+# give, and they tick it. Rounded to a tenth of a degree - about 10 km - here,
+# before it leaves Home Assistant, and again by the API.
+CONF_SHARE_LOCATION: Final = "share_approximate_location"
+
+# Whether the first setup of the entry brings the history Home Assistant
+# already has - its long-term statistics first, then the recorder's readings
+# (importer.py). Asked on the last screen of a new entry, ticked by default.
+# An entry made before that screen existed has no such option at all, and is
+# offered the same through a repair card instead (repairs.py). Its label
+# (import_on_setup in translations/en.json) is quoted by the README, by
+# taghistorian.com's home page and docs/home-assistant-hacs, and by the
+# Overview in Tag Historian; change them with it.
+CONF_IMPORT_ON_SETUP: Final = "import_on_setup"
+
 DEFAULT_HOST: Final = "api.taghistorian.com"
 
 # The three write-path limits below are PROTOCOL facts, not plan facts, so they
@@ -91,15 +108,72 @@ IMPORT_BATCH_SIZE: Final = 2000
 IMPORT_TIMEOUT_SECONDS: Final = 30
 
 # How long the import waits after a socket error before it tries the same
-# batch again, and how many times in a row it does before it stops - stopped,
-# not finished: running the action again carries on where it left off.
+# batch again, and how many failed sends of one batch it allows before it
+# stops - stopped, not finished: running the action again carries on where it
+# left off. A 429/503 between two failures is a wait, not a failure, and does
+# not start the count again. taghistorian.com/docs/home-assistant-hacs quotes
+# the ten sends, as the README does; change both with it. The failed stop's
+# notification reads it.
 IMPORT_RETRY_SECONDS: Final = 30
 IMPORT_MAX_CONNECTION_FAILURES: Final = 10
+
+# How long, in waits added up, one batch is sent again while Tag Historian
+# answers 429 or 503, and the longest wait between two sends. Its own waits
+# are short - 15 seconds for a file that did not read, minutes for a month not
+# ready yet, the deploy's grace at most half an hour - so a batch still not
+# taken after two hours is not "a moment": the import stops as unreachable and
+# carries on at the next start, rather than asking every 15 seconds for good
+# (each ask one more request for Tag Historian to answer). Between sends the
+# wait doubles, with the answer's Retry-After as its floor. The hours
+# endpoint's turns ("busy", "account_busy") are the exception for their first
+# IMPORT_MAX_TURN_RETRIES resends: those are sent at exactly Retry-After, and
+# only then does the wait double, within the same two hours
+# (importer._TURN_REASONS says why each is resent that way).
+# taghistorian.com/docs/home-assistant-hacs quotes the two hours, as the
+# README does; change both with it.
+IMPORT_MAX_RETRY_SECONDS: Final = 2 * 60 * 60
+IMPORT_MAX_RETRY_WAIT_SECONDS: Final = 15 * 60
+
+# How many times one hours batch refused for its turn ("busy", "account_busy")
+# is sent again at exactly its Retry-After before it waits like any other 503.
+# The API keeps the hours turn ("busy") free for a refused batch until its
+# retry is due and renews that at every refusal, so beside one other import
+# past its first batches (which go ahead of every other account by design) the
+# batch is either in line (2 s) or kept for (Retry-After, 3 s), and gets in
+# when the batch ahead of it ends. Six resends, five seconds apart,
+# cover a batch ahead of it for as long as its own client waits for it
+# (IMPORT_TIMEOUT_SECONDS); three covered some fifteen seconds, and a batch
+# ahead of it taking longer left this one doubling past the turn kept for it,
+# minutes per batch. One still refused after six is behind a stalled turn or a
+# queue of several accounts, where a send every three seconds for two hours of
+# waits would be some 2 400 sends; with the doubling after six it is some 22.
+IMPORT_MAX_TURN_RETRIES: Final = 6
+
+# How many loads in a row carry a paused import on by themselves without it
+# getting any further (importer.HistoryImporter.async_load). A Tag Historian
+# that is down comes back; a batch that fails the same way every time does
+# not, and carried on at every start it would be sent for good.
+# taghistorian.com/docs/home-assistant-hacs quotes the three starts, as the
+# README does; change both with it.
+IMPORT_MAX_RESUMES_ON_LOAD: Final = 3
+
+# Hours per request of the statistics phase. ImportService.MaxHoursPerBatch
+# on the API side; above it the hours endpoint answers 413. A batch is whole
+# UTC months of one entity, so it holds at most six of them.
+MAX_HOURS_PER_REQUEST: Final = 5000
 
 # Services. Stable strings: automations call them by name.
 SERVICE_IMPORT_HISTORY: Final = "import_history"
 ATTR_CONFIG_ENTRY_ID: Final = "config_entry_id"
 ATTR_DAYS: Final = "days"
+# Whether the import brings Home Assistant's long-term statistics too, before
+# the recorder's readings. On unless said otherwise.
+ATTR_STATISTICS: Final = "statistics"
+
+# The furthest back an import may be asked to reach, in days: the ten years
+# Tag Historian keeps hourly history for. The statistics phase goes no
+# further back than the API's own oldestAllowed either way.
+MAX_IMPORT_DAYS: Final = 3650
 
 # .storage keys, one of each per config entry. Version bumps here need a
 # migration; the key names must not change, or a restart forgets what it was
@@ -127,6 +201,16 @@ QUOTA_UPDATE_INTERVAL_MINUTES: Final = 15
 
 HTTP_TIMEOUT_SECONDS: Final = 10
 
+# How long a setup, reauthentication or Configure screen waits for Tag
+# Historian's answer once connected. When the API cannot check a key just now
+# it may take up to about half a minute to say so (a 503 with reason
+# sign_in_unavailable), and a screen that gave up sooner would wrongly say to
+# check the address. Connecting still gets HTTP_TIMEOUT_SECONDS, so an address
+# that does not answer is still said as one within that. Only the screens, and
+# starting an import, which a person always asks for (api.async_start_import):
+# the forwarder's bounds are built on HTTP_TIMEOUT_SECONDS for a write.
+DIALOG_TIMEOUT_SECONDS: Final = 45
+
 # Repair issue ids. Stable strings - changing one orphans an issue that is
 # already showing in somebody's repairs panel.
 ISSUE_TAG_QUOTA: Final = "tag_quota_exceeded"
@@ -134,10 +218,12 @@ ISSUE_DAILY_QUOTA: Final = "daily_quota_exceeded"
 ISSUE_WRITE_FORBIDDEN: Final = "write_forbidden"
 ISSUE_SERVICE_UNAVAILABLE: Final = "service_unavailable"
 ISSUE_ENTITY_RENAMED: Final = "entity_renamed"
+ISSUE_BRING_YEARS: Final = "bring_years"
 
 # How long to wait before asking Tag Historian again to rename a tag after it
-# could not be reached. A rename that waits costs nothing - the readings go on
-# being stored under the old name meanwhile - so this is unhurried.
+# could not be reached or could not take the request. A rename that waits
+# costs nothing - the readings go on being stored under the old name
+# meanwhile - so this is unhurried.
 RENAME_RETRY_SECONDS: Final = 900
 
 # A single 503 is our problem and none of the user's business. Only after the

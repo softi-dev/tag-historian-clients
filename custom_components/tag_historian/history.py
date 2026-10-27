@@ -15,8 +15,10 @@ in for. Two choices in it are load-bearing:
   it was recorded or not at all.
 
 Long-term statistics (the hourly mean/min/max Home Assistant keeps after the
-recorder purges its states) are deliberately not read here: they are not
-readings, and Tag Historian stores readings. The README says so.
+recorder purges its states) are not read here: they are not readings, and
+nothing sends them as readings. statistics.py reads them, for the history
+import's first phase, and they go to Tag Historian as what they are - hourly
+summaries, kept in its hour tier and marked as Home Assistant's statistics.
 
 And one entity is not always one id. Renaming an entity moves its recorded
 history to the new id - unless the new id has a recorded history of its own,

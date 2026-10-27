@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import voluptuous as vol
@@ -18,6 +18,7 @@ from custom_components.tag_historian.api import (
     TagHistorianAuthError,
     TagHistorianConnectionError,
     TagHistorianPermissionError,
+    TagHistorianUnavailableError,
 )
 from custom_components.tag_historian.config_flow import CONF_SHOW_ALL
 from custom_components.tag_historian.const import (
@@ -25,10 +26,14 @@ from custom_components.tag_historian.const import (
     CONF_ENTITIES,
     CONF_FOLLOW_RENAMES,
     CONF_HOST,
+    CONF_IMPORT_ON_SETUP,
     CONF_MIN_INTERVAL,
     CONF_OWN_TAG_SINCE,
     CONF_SEND_AS,
+    CONF_SHARE_LOCATION,
+    DIALOG_TIMEOUT_SECONDS,
     DOMAIN,
+    MAX_IMPORT_DAYS,
 )
 
 from .conftest import STUB_ACCOUNT, STUB_ALLOWANCE, STUB_QUOTA, make_client
@@ -76,6 +81,42 @@ async def _start(hass: HomeAssistant, client):
         )
 
 
+async def _bring_history(hass: HomeAssistant, result, bring: bool = True):
+    """The last screen of a new entry: bring the history Home Assistant already has."""
+    assert result["step_id"] == "history"
+    return await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_IMPORT_ON_SETUP: bring}
+    )
+
+
+async def test_the_last_screen_offers_the_history_ticked_and_says_the_time_zone_goes_too(
+    hass: HomeAssistant, house
+) -> None:
+    """Ticked by default; unticked is kept as unticked; the zone is disclosed, not asked."""
+    await hass.config.async_update(time_zone="Europe/Stockholm")
+    client = make_client()
+
+    with patch(CLIENT_PATH, return_value=client), patch(SETUP_PATH, return_value=True):
+        result = await _start(hass, client)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_ENTITIES: ["sensor.house_power"], CONF_MIN_INTERVAL: 10}
+        )
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+
+        assert result["step_id"] == "history"
+        assert result["data_schema"]({})[CONF_IMPORT_ON_SETUP] is True
+        assert result["description_placeholders"]["time_zone"] == "Europe/Stockholm"
+        assert result["description_placeholders"]["selected"] == "1"
+
+        result = await _bring_history(hass, result, bring=False)
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["options"][CONF_IMPORT_ON_SETUP] is False
+    # Nothing is sent from the flow: the entry's setup proposes and imports.
+    client.async_propose_time_zone.assert_not_called()
+    client.async_start_import.assert_not_called()
+
+
 async def test_happy_path_creates_an_entry(hass: HomeAssistant, house) -> None:
     """Connect, choose, review, done."""
     client = make_client()
@@ -101,6 +142,8 @@ async def test_happy_path_creates_an_entry(hass: HomeAssistant, house) -> None:
         assert result["step_id"] == "review"
 
         result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+        assert result["step_id"] == "history", "and the last screen: the history already there"
+        result = await _bring_history(hass, result)
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["title"] == "Test House"
@@ -111,6 +154,11 @@ async def test_happy_path_creates_an_entry(hass: HomeAssistant, house) -> None:
         # Off unless asked for: renaming a tag is a decision about the
         # customer's data, offered on a repair card instead (renames.py).
         CONF_FOLLOW_RENAMES: False,
+        # Off unless ticked: the location is the user's to give (place.py).
+        CONF_SHARE_LOCATION: False,
+        # On unless unticked: the entry's first setup brings the history
+        # Home Assistant already has (__init__._async_bring_years).
+        CONF_IMPORT_ON_SETUP: True,
     }
     # The stable customer id, not the host - two entries for one account would
     # send every reading twice and bill for it twice.
@@ -221,6 +269,7 @@ async def test_over_quota_selection_is_trimmed_to_the_available_budget(
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], {"trim_to_fit": True}
         )
+        result = await _bring_history(hass, result)
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["options"][CONF_ENTITIES] == ["sensor.house_power"]
@@ -258,6 +307,7 @@ async def test_over_quota_can_be_accepted_deliberately(
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], {"trim_to_fit": False}
         )
+        result = await _bring_history(hass, result)
 
     assert len(result["options"][CONF_ENTITIES]) == 2
 
@@ -268,12 +318,24 @@ async def test_over_quota_can_be_accepted_deliberately(
         (TagHistorianAuthError("nope"), "invalid_auth"),
         (TagHistorianConnectionError("dns"), "cannot_connect"),
         (TagHistorianPermissionError("blocked"), "account_blocked"),
+        # Only a 503 with reason sign_in_unavailable proves Tag Historian
+        # answered: the address is right, and the key was not refused - it
+        # could not be checked just now.
+        (
+            TagHistorianUnavailableError(
+                "/api/customers/me", reason="sign_in_unavailable", retry_after=40
+            ),
+            "key_not_checked",
+        ),
+        # A 503 without that reason may not be Tag Historian at all: nothing
+        # is said about the address being right or about the key.
+        (TagHistorianUnavailableError("/api/customers/me"), "unavailable"),
     ],
 )
 async def test_connect_failures_say_which_one_it_was(
     hass: HomeAssistant, side_effect, expected_error
 ) -> None:
-    """Three different problems need three different fixes."""
+    """Different problems need different fixes - and a 503 needs none but a minute."""
     client = make_client()
     client.async_validate.side_effect = side_effect
 
@@ -296,6 +358,41 @@ async def test_a_read_only_key_is_named_as_such(hass: HomeAssistant) -> None:
     result = await _start(hass, client)
 
     assert result["errors"] == {"base": "read_only_key"}
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected_error"),
+    [("sign_in_unavailable", "key_not_checked"), ("", "unavailable_known_host")],
+)
+async def test_a_503_after_the_first_call_is_still_not_cannot_connect(
+    hass: HomeAssistant, reason, expected_error
+) -> None:
+    """/api/customers/me answered with this account, so the address is right:
+    a 503 after it is not sent to the address."""
+    client = make_client()
+    client.async_get_quota.side_effect = TagHistorianUnavailableError(
+        "/api/usage/limits", reason=reason, retry_after=35
+    )
+
+    result = await _start(hass, client)
+
+    assert result["errors"] == {"base": expected_error}
+
+
+@pytest.mark.parametrize("call", ["async_get_quota", "async_get_tag_names"])
+async def test_a_failed_call_after_the_first_does_not_send_to_the_address(
+    hass: HomeAssistant, call
+) -> None:
+    """/api/customers/me answered with this account, so a later failure - a
+    dropped connection, a timeout, a 502 - is not the address either."""
+    client = make_client()
+    getattr(client, call).side_effect = TagHistorianConnectionError(
+        "/api/usage/limits answered 502"
+    )
+
+    result = await _start(hass, client)
+
+    assert result["errors"] == {"base": "cannot_connect_known_host"}
 
 
 async def test_an_inactive_account_is_named_as_such(hass: HomeAssistant) -> None:
@@ -371,6 +468,107 @@ async def test_reauth_replaces_the_key_in_place(hass: HomeAssistant) -> None:
     assert entry.data[CONF_API_KEY] == "a-different-key"
 
 
+@pytest.mark.parametrize(
+    ("side_effect", "expected_error"),
+    [
+        (
+            TagHistorianUnavailableError(
+                "/api/customers/me", reason="sign_in_unavailable", retry_after=40
+            ),
+            "key_not_checked",
+        ),
+        (
+            TagHistorianUnavailableError("/api/customers/me", retry_after=40),
+            "unavailable_known_host",
+        ),
+        (TagHistorianConnectionError("dns"), "cannot_connect_known_host"),
+    ],
+)
+async def test_reauth_says_a_key_not_checked_and_keeps_the_old_one(
+    hass: HomeAssistant, side_effect, expected_error
+) -> None:
+    """Not "did not accept that key": it was not looked at. Asked again, it can be.
+
+    A 503 without the reason is not called a key not checked either - only
+    "could not do this just now", with nothing about an address this form
+    does not show. Nor is a connection that failed sent to that address.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN, unique_id=STUB_ACCOUNT["customerId"], data=CREDENTIALS
+    )
+    entry.add_to_hass(hass)
+
+    client = make_client()
+    client.async_validate.side_effect = side_effect
+
+    with patch(CLIENT_PATH, return_value=client), patch(SETUP_PATH, return_value=True):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": SOURCE_REAUTH, "entry_id": entry.entry_id},
+            data=entry.data,
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_API_KEY: "a-different-key"}
+        )
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "reauth_confirm"
+    assert result["errors"] == {"base": expected_error}
+    assert entry.data[CONF_API_KEY] == CREDENTIALS[CONF_API_KEY]
+
+
+def _recording(built: list[dict]):
+    """A TagHistorianClient stand-in that records how each screen built it."""
+
+    def _build(*args, **kwargs):
+        built.append(kwargs)
+        return make_client()
+
+    return _build
+
+
+async def test_setup_and_reauth_wait_long_enough_for_a_key_not_checked(
+    hass: HomeAssistant,
+) -> None:
+    """The API may take up to about half a minute to say it could not check a key.
+
+    A screen that gave up after the write path's ten seconds said that answer
+    as "could not reach that host". Connecting is still bounded by ten
+    (test_api).
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN, unique_id=STUB_ACCOUNT["customerId"], data=CREDENTIALS
+    )
+    entry.add_to_hass(hass)
+    # The reauthentication succeeds and reloads the entry with its setup
+    # patched out; what async_unload_entry stops at teardown, so it unloads
+    # cleanly rather than with a traceback.
+    entry.runtime_data = SimpleNamespace(
+        importer=SimpleNamespace(running=False, async_stop=AsyncMock()),
+        forwarder=SimpleNamespace(async_shutdown=AsyncMock()),
+    )
+    built: list[dict] = []
+
+    with patch(CLIENT_PATH, side_effect=_recording(built)), patch(
+        SETUP_PATH, return_value=True
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": SOURCE_USER}
+        )
+        await hass.config_entries.flow.async_configure(result["flow_id"], CREDENTIALS)
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": SOURCE_REAUTH, "entry_id": entry.entry_id},
+            data=entry.data,
+        )
+        await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_API_KEY: "a-different-key"}
+        )
+
+    assert built == [{"answer_within": DIALOG_TIMEOUT_SECONDS}] * 2
+    assert DIALOG_TIMEOUT_SECONDS > 30
+
+
 async def test_reauth_refuses_a_key_for_a_different_account(
     hass: HomeAssistant,
 ) -> None:
@@ -430,6 +628,7 @@ async def test_options_flow_changes_the_selection(hass: HomeAssistant, house) ->
         CONF_ENTITIES: ["sensor.outdoor_temperature", "binary_sensor.heat_pump_running"],
         CONF_MIN_INTERVAL: 30,
         CONF_FOLLOW_RENAMES: False,
+        CONF_SHARE_LOCATION: False,
         CONF_SEND_AS: {},
     }
 
@@ -470,6 +669,41 @@ async def test_options_flow_keeps_a_new_tag_chosen_on_the_rename_card(
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.options[CONF_ENTITIES] == ["sensor.outdoor_temperature"]
     assert entry.options[CONF_OWN_TAG_SINCE] == own
+
+
+@pytest.mark.parametrize("answer", [False, True])
+async def test_options_flow_keeps_the_answer_to_bring_the_years(
+    hass: HomeAssistant, house, answer
+) -> None:
+    """The setup's last screen is answered once; changing the selection does not forget it.
+
+    Forgotten, the entry read as one set up before that screen existed, and
+    was offered the years on a repair card (__init__._async_bring_years) -
+    the one that unticked them, too.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=STUB_ACCOUNT["customerId"],
+        data=CREDENTIALS,
+        options={
+            CONF_ENTITIES: ["sensor.house_power"],
+            CONF_MIN_INTERVAL: 10,
+            CONF_IMPORT_ON_SETUP: answer,
+        },
+    )
+    entry.add_to_hass(hass)
+
+    with patch(CLIENT_PATH, return_value=make_client()), patch(SETUP_PATH, return_value=True):
+        result = await _open_choose(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {CONF_ENTITIES: ["sensor.outdoor_temperature"], CONF_MIN_INTERVAL: 10},
+        )
+        result = await hass.config_entries.options.async_configure(result["flow_id"], {})
+        await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options[CONF_IMPORT_ON_SETUP] is answer
 
 
 # --------------------------------------------------------------------------
@@ -702,6 +936,7 @@ async def test_a_full_account_still_works_if_the_tags_already_exist(
         )
         assert result["description_placeholders"]["new_tags"] == "0"
         result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+        result = await _bring_history(hass, result)
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["options"][CONF_ENTITIES] == ["sensor.house_power"]
@@ -760,6 +995,7 @@ async def test_trim_is_measured_in_tags_and_actually_fits(
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], {"trim_to_fit": True}
         )
+        result = await _bring_history(hass, result)
 
     kept = result["options"][CONF_ENTITIES]
     new_tags = [e for e in kept if e != "binary_sensor.heat_pump_running"]
@@ -791,6 +1027,34 @@ async def test_options_flow_refuses_to_show_a_stale_budget(
     assert result["reason"] == "cannot_connect"
 
 
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    # Something answered either way, so neither is "could not reach".
+    [("sign_in_unavailable", "key_not_checked"), ("", "unavailable")],
+)
+async def test_options_flow_says_when_the_key_could_not_be_checked(
+    hass: HomeAssistant, house, reason, expected
+) -> None:
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=STUB_ACCOUNT["customerId"],
+        data=CREDENTIALS,
+        options={CONF_ENTITIES: [], CONF_MIN_INTERVAL: 10},
+    )
+    entry.add_to_hass(hass)
+
+    client = make_client()
+    client.async_get_quota.side_effect = TagHistorianUnavailableError(
+        "/api/usage/limits", reason=reason
+    )
+
+    with patch(CLIENT_PATH, return_value=client), patch(SETUP_PATH, return_value=True):
+        result = await _open_choose(hass, entry)
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == expected
+
+
 # --------------------------------------------------------------------------
 # The history import, from Configure
 # --------------------------------------------------------------------------
@@ -807,7 +1071,11 @@ def loaded_entry(hass: HomeAssistant, house):
     )
     entry.add_to_hass(hass)
     entry.mock_state(hass, ConfigEntryState.LOADED)
-    entry.runtime_data = SimpleNamespace(importer=SimpleNamespace(running=False))
+    # What async_unload_entry stops at teardown, so the entry unloads cleanly.
+    entry.runtime_data = SimpleNamespace(
+        importer=SimpleNamespace(running=False, async_stop=AsyncMock()),
+        forwarder=SimpleNamespace(async_shutdown=AsyncMock()),
+    )
     with patch(
         "custom_components.tag_historian.config_flow.history.recorder_ready", return_value=True
     ), patch("custom_components.tag_historian.history.recorder_ready", return_value=True):
@@ -833,7 +1101,10 @@ async def test_the_import_screen_shows_the_allowance_from_the_api(
     assert placeholders["window_days"] == f"{STUB_ALLOWANCE.window_days}"
     defaults = result["data_schema"]({})
     assert defaults[CONF_ENTITIES] == ["sensor.house_power", "sensor.outdoor_temperature"]
-    assert defaults["days"] == STUB_ALLOWANCE.window_days, "as far back as the window reaches"
+    assert defaults["statistics"] is True, "the long-term statistics first, unless unticked"
+    assert defaults["days"] == MAX_IMPORT_DAYS, (
+        "as far back as either part reaches: the readings stop at the window by themselves"
+    )
 
 
 async def test_submitting_the_import_screen_starts_the_import_and_closes(
@@ -851,10 +1122,30 @@ async def test_submitting_the_import_screen_starts_the_import_and_closes(
     assert result["reason"] == "import_started"
     start.assert_awaited_once()
     assert start.await_args.args[2:] == (["sensor.house_power"], 2)
+    assert start.await_args.kwargs == {"statistics": True}, (
+        "the box is ticked unless unticked, so the long-term statistics go first"
+    )
     assert loaded_entry.options[CONF_ENTITIES] == [
         "sensor.house_power",
         "sensor.outdoor_temperature",
     ], "starting an import changes nothing in the options, so nothing reloads"
+
+
+async def test_an_unticked_statistics_box_imports_only_the_readings(
+    hass: HomeAssistant, loaded_entry
+) -> None:
+    with patch(CLIENT_PATH, return_value=make_client()), patch(
+        "custom_components.tag_historian.async_start_import"
+    ) as start:
+        result = await _open_import(hass, loaded_entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {CONF_ENTITIES: ["sensor.house_power"], "statistics": False, "days": 2},
+        )
+
+    assert result["reason"] == "import_started"
+    start.assert_awaited_once()
+    assert start.await_args.kwargs == {"statistics": False}, "unticked: the recorder's readings only"
 
 
 async def test_a_refused_import_says_what_tag_historian_said(
@@ -878,6 +1169,64 @@ async def test_a_refused_import_says_what_tag_historian_said(
     assert result["description_placeholders"] == {"message": "Import allowance used up."}
 
 
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [("sign_in_unavailable", "key_not_checked"), ("", "unavailable")],
+)
+async def test_the_import_screen_says_when_the_key_could_not_be_checked(
+    hass: HomeAssistant, loaded_entry, reason, expected
+) -> None:
+    client = make_client()
+    client.async_get_import_allowance.side_effect = TagHistorianUnavailableError(
+        "/api/import/allowance", reason=reason, retry_after=40
+    )
+    with patch(CLIENT_PATH, return_value=client):
+        result = await _open_import(hass, loaded_entry)
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == expected
+
+
+async def test_configures_screens_wait_long_enough_for_a_key_not_checked(
+    hass: HomeAssistant, loaded_entry
+) -> None:
+    """As setup and reauthentication do: the selection's live numbers and the
+    import allowance are read with DIALOG_TIMEOUT_SECONDS to answer."""
+    built: list[dict] = []
+
+    with patch(CLIENT_PATH, side_effect=_recording(built)), patch(
+        SETUP_PATH, return_value=True
+    ):
+        result = await _open_choose(hass, loaded_entry)
+        assert result["step_id"] == "select"
+        result = await _open_import(hass, loaded_entry)
+        assert result["step_id"] == "import_history"
+
+    assert built == [{"answer_within": DIALOG_TIMEOUT_SECONDS}] * 2
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [("sign_in_unavailable", "import_key_not_checked"), ("", "import_unavailable")],
+)
+async def test_an_import_start_that_got_a_503_says_so_from_configure(
+    hass: HomeAssistant, loaded_entry, reason, expected
+) -> None:
+    """Through the real action, not a patched one: the screen aborts with its key."""
+    loaded_entry.runtime_data.importer.async_start = AsyncMock(
+        side_effect=TagHistorianUnavailableError("/api/import", reason=reason, retry_after=40)
+    )
+    with patch(CLIENT_PATH, return_value=make_client()):
+        result = await _open_import(hass, loaded_entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {CONF_ENTITIES: ["sensor.house_power"], "days": 2}
+        )
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == expected
+    assert not hass.config_entries.flow.async_progress_by_handler(DOMAIN), "no reauthentication"
+
+
 async def test_an_import_already_running_is_not_started_twice(
     hass: HomeAssistant, loaded_entry
 ) -> None:
@@ -898,3 +1247,79 @@ async def test_an_import_of_nothing_is_asked_again(hass: HomeAssistant, loaded_e
 
     assert result["type"] is FlowResultType.FORM
     assert result["errors"] == {"base": "import_nothing_selected"}
+
+
+async def test_the_location_for_the_weather_is_offered_unticked_and_kept_when_ticked(
+    hass: HomeAssistant, house
+) -> None:
+    """A location is the user's to give: the box starts empty, and only a tick sends it."""
+    client = make_client()
+
+    with patch(CLIENT_PATH, return_value=client), patch(SETUP_PATH, return_value=True):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": SOURCE_USER}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], CREDENTIALS
+        )
+        assert result["step_id"] == "select"
+        defaults = {
+            str(key): key.default() for key in result["data_schema"].schema
+            if hasattr(key, "default") and callable(key.default)
+        }
+        assert defaults[CONF_SHARE_LOCATION] is False
+
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {
+                CONF_ENTITIES: ["sensor.house_power"],
+                CONF_MIN_INTERVAL: 10,
+                CONF_SHARE_LOCATION: True,
+            },
+        )
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+        result = await _bring_history(hass, result)
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["options"][CONF_SHARE_LOCATION] is True
+    # Choosing it proposes nothing yet: the entry's setup does (place.py).
+    client.async_propose_place.assert_not_called()
+
+
+async def test_the_options_flow_shows_the_location_choice_as_it_is_and_can_untick_it(
+    hass: HomeAssistant, house
+) -> None:
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=STUB_ACCOUNT["customerId"],
+        data=CREDENTIALS,
+        options={
+            CONF_ENTITIES: ["sensor.house_power"],
+            CONF_MIN_INTERVAL: 10,
+            CONF_SHARE_LOCATION: True,
+        },
+    )
+    entry.add_to_hass(hass)
+
+    with patch(CLIENT_PATH, return_value=make_client()), patch(
+        SETUP_PATH, return_value=True
+    ):
+        result = await _open_choose(hass, entry)
+        defaults = {
+            str(key): key.default() for key in result["data_schema"].schema
+            if hasattr(key, "default") and callable(key.default)
+        }
+        assert defaults[CONF_SHARE_LOCATION] is True
+
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {
+                CONF_ENTITIES: ["sensor.house_power"],
+                CONF_MIN_INTERVAL: 10,
+                CONF_SHARE_LOCATION: False,
+            },
+        )
+        result = await hass.config_entries.options.async_configure(result["flow_id"], {})
+        await hass.async_block_till_done()
+
+    assert entry.options[CONF_SHARE_LOCATION] is False

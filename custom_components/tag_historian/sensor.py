@@ -251,9 +251,15 @@ class ImportSensor(SensorEntity):
     def extra_state_attributes(self) -> dict[str, Any]:
         progress = self._entry.runtime_data.importer.progress
         return {
+            # "statistics" while Home Assistant's long-term statistics go in,
+            # "readings" while the recorder's readings do (importer.py).
+            "phase": progress.phase or None,
             "entities": len(progress.entities),
             "entities_done": len(progress.done),
             "current_entity": progress.current,
+            "hours_stored": progress.hours_stored,
+            "hours_skipped": progress.hours_skipped,
+            "statistics_stopped_because": progress.statistics_stop_reason or None,
             "imported_from": progress.since,
             "readings_imported": progress.stored,
             "readings_already_there": progress.duplicates,

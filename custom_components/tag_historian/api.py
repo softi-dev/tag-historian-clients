@@ -24,7 +24,12 @@ from typing import Any
 import aiohttp
 from yarl import URL
 
-from .const import HTTP_TIMEOUT_SECONDS, IMPORT_TIMEOUT_SECONDS, LOGGER
+from .const import (
+    DIALOG_TIMEOUT_SECONDS,
+    HTTP_TIMEOUT_SECONDS,
+    IMPORT_TIMEOUT_SECONDS,
+    LOGGER,
+)
 
 
 class TagHistorianError(Exception):
@@ -33,6 +38,44 @@ class TagHistorianError(Exception):
 
 class TagHistorianConnectionError(TagHistorianError):
     """The host did not answer, or answered with something unusable."""
+
+
+class TagHistorianServerError(TagHistorianConnectionError):
+    """Tag Historian answered, with an error of its own (a 500) that it did not explain.
+
+    Retried like a lost connection - nothing is known to be stored - but it is
+    not a sign that Tag Historian cannot be reached, and the same batch may
+    well get the same answer every time (importer.STOP_FAILED).
+    """
+
+
+# The ``reason`` of the 503 that Tag Historian answers when it could not CHECK a
+# key at all - a moment of trouble on its side - on every endpoint
+# that needs a sign-in. A key it checked and refused is a 401, never this.
+SIGN_IN_UNAVAILABLE = "sign_in_unavailable"
+
+
+class TagHistorianUnavailableError(TagHistorianConnectionError):
+    """503 - Tag Historian answered, but could not serve this just now.
+
+    A connection error to every caller that only asks "did it go through",
+    because the answer is the same - nothing happened, ask again later - but
+    the screens a person is looking at must not call it an unreachable host
+    or a rejected key. ``reason`` is the body's: ``sign_in_unavailable``
+    (:data:`SIGN_IN_UNAVAILABLE`) when the key could not be checked just now,
+    which says nothing about the key. ``Retry-After`` is 30 to 45 seconds
+    then.
+    """
+
+    def __init__(self, what: str, *, reason: str = "", retry_after: int = 0) -> None:
+        super().__init__(f"{what} answered 503" + (f" ({reason})" if reason else ""))
+        self.reason = reason
+        self.retry_after = retry_after
+
+    @property
+    def key_not_checked(self) -> bool:
+        """The key could not be checked just now - not refused, not checked at all."""
+        return self.reason == SIGN_IN_UNAVAILABLE
 
 
 class TagHistorianAuthError(TagHistorianError):
@@ -70,6 +113,19 @@ class TagHistorianPermissionError(TagHistorianError):
     """
 
 
+def _no_answer(err: Exception, within: float) -> str:
+    """Why a request got nothing usable back, in words - never an empty string.
+
+    aiohttp's own total timeout is a bare ``TimeoutError`` that prints as
+    nothing: a host that does not answer, or an answer slower than
+    ``within``. This text becomes the ``last_error`` the readings dropped
+    sensor shows, where an empty one is what a clean write leaves behind, so
+    the commonest silent failure must not be the one that says nothing.
+    aiohttp's connect and read timeouts carry text of their own, which is kept.
+    """
+    return str(err) or f"no answer within {within:g} seconds"
+
+
 class WriteOutcome(Enum):
     """What the write endpoint said, in the vocabulary of what to do next.
 
@@ -86,7 +142,10 @@ class WriteOutcome(Enum):
     BACK_PRESSURE = "back_pressure"  # 429 (controller) - our saturation
     UNAVAILABLE = "unavailable"  # 503 - wait for Retry-After
     FORBIDDEN = "forbidden"  # 403/402 - permanent until a human acts
-    REJECTED = "rejected"  # 400/413 - our bug; the batch is unsendable
+    # 400/413, and an unexplained answer of Tag Historian's own (a 500): the
+    # batch is not sent again. A gateway's 502/504 is not this - it raises
+    # TagHistorianConnectionError and the batch is held.
+    REJECTED = "rejected"
 
 
 @dataclass
@@ -134,8 +193,14 @@ class ImportOutcome(Enum):
     RETRY = "retry"  # 429/503 - wait Retry-After, send the same batch again
     ALLOWANCE_SPENT = "allowance_spent"  # 402 - the account's import allowance is used up
     STORAGE_FULL = "storage_full"  # 402 - the plan's storage cap
+    # 402 with code hours_allowance - the hourly history allowance, which is
+    # not the readings' and comes back by itself (resumes_at).
+    HOURS_ALLOWANCE_SPENT = "hours_allowance_spent"
     FORBIDDEN = "forbidden"  # 403 - unconfirmed address, account being erased
     UNKNOWN_IMPORT = "unknown_import"  # 404 - the import is not this account's (any more)
+    # 404 with no body: the route is not there - a Tag Historian older than
+    # the hours import. Only the hours endpoint can answer it.
+    NOT_SUPPORTED = "not_supported"
     REJECTED = "rejected"  # 400/413 - a body this integration should not have built
 
 
@@ -211,6 +276,57 @@ class ImportBatchResult:
         )
 
 
+@dataclass
+class HoursBatchResult:
+    """One batch of hourly statistics (``POST /api/import/{id}/hours``), as the endpoint answered it."""
+
+    outcome: ImportOutcome
+    retry_after: int = 0
+    stored: int = 0
+    duplicates: int = 0
+    outside_retention: int = 0
+    # Meter hours stored with a negative change, as sent: a meter that was
+    # swapped or reset in a way Home Assistant did not see as a reset.
+    negative_change: int = 0
+    refused_not_history: int = 0
+    refused_tag_limit: int = 0
+    refused_unit_mismatch: int = 0
+    refused_invalid: int = 0
+    refused_unsupported: int = 0
+    refused_hours_allowance: int = 0
+    refused_unwritable: int = 0
+    refused_tags: list[str] = field(default_factory=list)
+    # Per tag in the batch: an hour must END by this to be imported - the
+    # import's start, or the tag's first reading or first import, if earlier.
+    # The readings endpoint's name for the same line.
+    importable_before: dict[str, datetime] = field(default_factory=dict)
+    # The first hour Tag Historian keeps; older hours are skipped.
+    oldest_allowed: datetime | None = None
+    # While the hourly history allowance is used up: when more goes in.
+    resumes_at: datetime | None = None
+    message: str = ""
+    # Why a 503 asked for the batch again; "busy" and "account_busy" are
+    # turns, not trouble (importer._TURN_REASONS).
+    reason: str = ""
+
+    @property
+    def refused(self) -> int:
+        return (
+            self.refused_not_history
+            + self.refused_tag_limit
+            + self.refused_unit_mismatch
+            + self.refused_invalid
+            + self.refused_unsupported
+            + self.refused_hours_allowance
+            + self.refused_unwritable
+        )
+
+    @property
+    def skipped(self) -> int:
+        """Hours this batch did not store, whatever the reason."""
+        return self.duplicates + self.outside_retention + self.refused
+
+
 class TagHistorianImportRefused(TagHistorianError):
     """An import could not be started: the allowance is spent, or the account cannot write.
 
@@ -277,11 +393,28 @@ class TagHistorianClient:
     """Calls Tag Historian on behalf of one config entry."""
 
     def __init__(
-        self, session: aiohttp.ClientSession, host: str, api_key: str
+        self,
+        session: aiohttp.ClientSession,
+        host: str,
+        api_key: str,
+        *,
+        answer_within: float = HTTP_TIMEOUT_SECONDS,
     ) -> None:
+        """``answer_within`` bounds each read (``_get_json``) once connected.
+
+        The screens pass DIALOG_TIMEOUT_SECONDS, so a 503 the API takes a
+        while to send is read as its answer rather than as a host that could
+        not be reached; connecting is always bounded by HTTP_TIMEOUT_SECONDS.
+        Writes, renames, merges and proposals keep HTTP_TIMEOUT_SECONDS, and
+        import batches IMPORT_TIMEOUT_SECONDS, whatever this says: the
+        forwarder's bounds are built on them. Starting an import always waits
+        DIALOG_TIMEOUT_SECONDS for its answer, whichever client starts it
+        (:meth:`async_start_import`).
+        """
         self._session = session
         self._base = self._normalise_host(host)
         self._api_key = api_key
+        self._answer_within = answer_within
 
     @staticmethod
     def _normalise_host(host: str) -> URL:
@@ -313,19 +446,23 @@ class TagHistorianClient:
             async with self._session.get(
                 self._base.join(URL(path)).update_query(params),
                 headers=self._headers(),
-                timeout=aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SECONDS),
+                timeout=aiohttp.ClientTimeout(
+                    total=self._answer_within, connect=HTTP_TIMEOUT_SECONDS
+                ),
             ) as response:
                 if response.status == 401:
                     raise TagHistorianAuthError(path)
                 if response.status == 403:
                     raise TagHistorianPermissionError(path)
+                if response.status == 503:
+                    raise await self._unavailable(path, response)
                 if response.status >= 400:
                     raise TagHistorianConnectionError(
                         f"{path} answered {response.status}"
                     )
                 return await response.json()
         except (TimeoutError, aiohttp.ClientError) as err:
-            raise TagHistorianConnectionError(str(err)) from err
+            raise TagHistorianConnectionError(_no_answer(err, self._answer_within)) from err
 
     async def async_validate(self) -> dict[str, Any]:
         """Prove the key works and return the account it belongs to.
@@ -438,7 +575,8 @@ class TagHistorianClient:
                 if response.status == 404 and code == "not_found":
                     return LineageResult(LineageOutcome.NOT_FOUND, message)
                 if response.status == 429 or response.status >= 500:
-                    # Rate limited, the deploy handover (503), or a gateway
+                    # Rate limited, the deploy handover or a key that could
+                    # not be checked just now (503), or a gateway
                     # that lost the backend for a moment (502/504): all of
                     # them pass. A REFUSED here used to become a permanent
                     # card quoting "answered 502" for a rename that would
@@ -458,25 +596,95 @@ class TagHistorianClient:
                     )
                 return LineageResult(LineageOutcome.REFUSED, message)
         except (TimeoutError, aiohttp.ClientError) as err:
-            return LineageResult(LineageOutcome.UNAVAILABLE, str(err))
+            return LineageResult(
+                LineageOutcome.UNAVAILABLE, _no_answer(err, HTTP_TIMEOUT_SECONDS)
+            )
+
+    async def async_propose_place(self, lat: float, lon: float) -> bool | None:
+        """Propose the account's coarse place (``POST /api/account/settings/proposal``).
+
+        A proposal is taken only while the account has no place AND has never
+        had one removed: a place an Admin set in Settings, one proposed
+        before, and a place an Admin removed all stand - a removed place stays
+        removed, and no proposal fills it again. Sending it again is therefore
+        harmless. True when the API answered, and None when it could not be
+        asked or does not know the endpoint (a Tag Historian older than the
+        weather) - nothing here depends on it, so neither is an error.
+        """
+        return await self._propose({"place": {"lat": lat, "lon": lon}, "source": "ha"}, "place")
+
+    async def async_propose_time_zone(self, time_zone: str) -> bool | None:
+        """Propose the account's time zone (``POST /api/account/settings/proposal``).
+
+        Taken only while nobody has chosen one: neither an Admin in Settings,
+        nor anybody for the owner's email channel under Alarms, nor an earlier
+        proposal. The zone is what Tag Historian's increases per day and
+        month, the Monday summary and alert times are in. True when the API
+        answered, None when it could not be asked or is older than account
+        settings - as for the place, neither is an error.
+        """
+        return await self._propose({"timeZone": time_zone, "source": "ha"}, "time zone")
+
+    async def _propose(self, body: dict[str, Any], what: str) -> bool | None:
+        path = "/api/account/settings/proposal"
+        try:
+            async with self._session.post(
+                self._base.join(URL(path)),
+                headers=self._headers(),
+                json=body,
+                timeout=aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SECONDS),
+            ) as response:
+                if response.status == 401:
+                    raise TagHistorianAuthError(path)
+                if response.status >= 400:
+                    LOGGER.debug("%s answered %s; the %s was not proposed", path, response.status, what)
+                    return None
+                return True
+        except (TimeoutError, aiohttp.ClientError) as err:
+            LOGGER.debug("%s could not be reached (%s); the %s was not proposed", path, err, what)
+            return None
 
     async def async_get_import_allowance(self) -> ImportAllowance:
         """How much history this account may still import, and where the window starts."""
         return ImportAllowance.from_json(await self._get_json("/api/import/allowance"))
 
-    async def async_start_import(self, source: str = "home-assistant") -> ImportSession:
+    async def async_start_import(
+        self, source: str = "home-assistant", *, hours: bool = False
+    ) -> ImportSession:
         """Start an import. Its readings must be older than ``started_at``.
 
         Raises :class:`TagHistorianImportRefused` when the account cannot
         import at all right now - the allowance spent (402), the storage cap
         reached (402), or an account that may not write (403).
+
+        ``hours``: the import brings hourly statistics too. The readings
+        allowance does not come back once it is spent, and the hours have one
+        of their own, so such an import is started even then - its readings
+        are refused instead, batch by batch, and ``allowance.remaining`` says
+        so from the start.
+
+        A person always starts an import - the action, Configure, the
+        bring-years card, or the setup's last screen through the entry's
+        background start - and never the forwarder, so it waits
+        DIALOG_TIMEOUT_SECONDS for the answer once connected, whichever client
+        starts it. A 503 for a key that could not be checked, which the API may
+        take up to about half a minute to send, is then read as that answer and
+        not as a host that could not be reached.
         """
+        body: dict[str, Any] = {"source": source}
+        if hours:
+            body["hours"] = True
         try:
             async with self._session.post(
                 self._base.join(URL("/api/import")),
                 headers=self._headers(),
-                json={"source": source},
-                timeout=aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SECONDS),
+                json=body,
+                # Like a screen: a slow answer is waited for, connecting stays
+                # bounded by HTTP_TIMEOUT_SECONDS. Nothing on the forwarder's
+                # path waits on this request.
+                timeout=aiohttp.ClientTimeout(
+                    total=DIALOG_TIMEOUT_SECONDS, connect=HTTP_TIMEOUT_SECONDS
+                ),
             ) as response:
                 if response.status == 401:
                     raise TagHistorianAuthError("import")
@@ -486,11 +694,13 @@ class TagHistorianClient:
                         _classify_import_refusal(response.status, body),
                         str(body.get("message") or body.get("error") or ""),
                     )
+                if response.status == 503:
+                    raise await self._unavailable("/api/import", response)
                 if response.status != 201:
                     raise TagHistorianConnectionError(f"/api/import answered {response.status}")
                 payload = await response.json()
         except (TimeoutError, aiohttp.ClientError) as err:
-            raise TagHistorianConnectionError(str(err)) from err
+            raise TagHistorianConnectionError(_no_answer(err, DIALOG_TIMEOUT_SECONDS)) from err
 
         return ImportSession(
             import_id=str(payload["importId"]),
@@ -523,7 +733,38 @@ class TagHistorianClient:
                 body = await self._read_error_body(response)
                 return _classify_import(response, body)
         except (TimeoutError, aiohttp.ClientError) as err:
-            raise TagHistorianConnectionError(str(err)) from err
+            raise TagHistorianConnectionError(_no_answer(err, IMPORT_TIMEOUT_SECONDS)) from err
+
+    async def async_import_hours(self, import_id: str, gzipped: bytes) -> HoursBatchResult:
+        """Send one batch of hourly statistics, already gzipped, and classify the answer.
+
+        ``POST /api/import/{id}/hours`` takes at most 4 MB once decompressed
+        and 5 000 hours, and gzip is what keeps years of hours off a home
+        connection's upload: the body is mostly the same keys over and over.
+        The body is compressed by the caller, off the event loop
+        (statistics.py). Raises like :meth:`async_import_batch`.
+        """
+        try:
+            async with self._session.post(
+                self._base.join(URL(f"/api/import/{import_id}/hours")),
+                headers={
+                    **self._headers(),
+                    "Content-Type": "application/json",
+                    "Content-Encoding": "gzip",
+                },
+                data=gzipped,
+                timeout=aiohttp.ClientTimeout(total=IMPORT_TIMEOUT_SECONDS),
+            ) as response:
+                if response.status == 401:
+                    raise TagHistorianAuthError("import")
+                # Read first, as it came: only a body that is empty on the
+                # wire means the route is not there (_classify_hours_import).
+                # aiohttp keeps it, so the JSON is read from the same bytes.
+                empty = not (await response.read()).strip()
+                body = await self._read_error_body(response)
+                return _classify_hours_import(response, body, empty=empty)
+        except (TimeoutError, aiohttp.ClientError) as err:
+            raise TagHistorianConnectionError(_no_answer(err, IMPORT_TIMEOUT_SECONDS)) from err
 
     async def async_write(self, body: str) -> WriteResult:
         """POST line protocol and classify the answer.
@@ -543,7 +784,7 @@ class TagHistorianClient:
             ) as response:
                 return await self._classify(response)
         except (TimeoutError, aiohttp.ClientError) as err:
-            raise TagHistorianConnectionError(str(err)) from err
+            raise TagHistorianConnectionError(_no_answer(err, HTTP_TIMEOUT_SECONDS)) from err
 
     async def _classify(self, response: aiohttp.ClientResponse) -> WriteResult:
         if response.status == 204:
@@ -551,6 +792,17 @@ class TagHistorianClient:
 
         if response.status == 401:
             raise TagHistorianAuthError("write")
+
+        if response.status in (502, 504):
+            # A gateway in front of Tag Historian that could not reach it
+            # (502) or gave up waiting for it (504) - the hosted ingress with
+            # nothing behind it for a moment, or a proxy in front of a stopped
+            # API. Tag Historian itself did not answer, so this is a host that
+            # cannot be reached: held and tried again like a socket error,
+            # never dropped as a body it could not take. A 504 may have reached
+            # the API, as a write that timed out here may have, and that one
+            # is tried again too.
+            raise TagHistorianConnectionError(f"write answered {response.status}")
 
         body = await self._read_error_body(response)
         message = str(body.get("message") or body.get("error") or "")
@@ -589,11 +841,27 @@ class TagHistorianClient:
 
         # 400 and 413 mean this integration built a body the endpoint cannot
         # take. That is a bug here, not a user problem, so it is logged loudly
-        # and the batch is dropped rather than retried into a loop.
+        # and the batch is dropped rather than retried into a loop. A 500 -
+        # Tag Historian's own error, unexplained - stays here too: the batch
+        # goes back to the FRONT of the queue when it is held, so a body that
+        # causes one every time would stop every reading behind it for good.
+        # (502 and 504 are a gateway's, raised as unreachable above.)
         LOGGER.error(
             "Tag Historian refused a write with %s: %s", response.status, message
         )
         return WriteResult(WriteOutcome.REJECTED, message=message)
+
+    @classmethod
+    async def _unavailable(
+        cls, what: str, response: aiohttp.ClientResponse
+    ) -> TagHistorianUnavailableError:
+        """The 503 as an error that keeps its reason and its Retry-After."""
+        body = await cls._read_error_body(response)
+        return TagHistorianUnavailableError(
+            what,
+            reason=str(body.get("reason") or ""),
+            retry_after=_parse_retry_after(response),
+        )
 
     @staticmethod
     async def _read_error_body(response: aiohttp.ClientResponse) -> dict[str, Any]:
@@ -640,12 +908,17 @@ def _parse_retry_after(response: aiohttp.ClientResponse) -> int:
     """Read ``Retry-After`` as RFC 9110 delta-seconds.
 
     The endpoint always sends the integer form - on the daily-quota 429 it is
-    the seconds to the UTC midnight when the quota resets, and on the
-    back-pressure 429 and the 503 it is the write buffer's own estimate.
-    Honouring it is half the reason this component exists: the built-in
-    influxdb integration has a fixed 20/60 second retry schedule and never
-    looks at the header at all, so it spends a whole day re-sending into a
-    quota that will not reset until midnight.
+    the seconds to the UTC midnight when the quota resets, on the
+    back-pressure 429 and the write buffer's 503 it is the buffer's own
+    estimate, and on the 503 for a key that could not be checked just now it
+    is 30 to 45 seconds. Honouring it is half the reason this component
+    exists. Home Assistant's built-in influxdb integration never looks at the
+    header: set up for InfluxDB 1.x it sends a refused batch again only when
+    ``max_retries`` is set (it is 0 unless configured), 20 seconds apart,
+    and then drops it; set up for 2.x it writes without waiting for the
+    answer, so a refused batch is simply gone. Either way a day over quota
+    loses every reading until midnight, and a minute of 503s loses that
+    minute.
     """
     raw = response.headers.get("Retry-After")
     if not raw:
@@ -730,6 +1003,45 @@ def _classify_import_refusal(status: int, body: dict[str, Any]) -> ImportOutcome
     return ImportOutcome.ALLOWANCE_SPENT
 
 
+def _import_status(
+    response: aiohttp.ClientResponse, body: dict[str, Any], message: str
+) -> tuple[ImportOutcome, int]:
+    """What a refusal from either batch endpoint of an import means: the outcome, and how long to wait.
+
+    One reading of the statuses for readings and hours alike, so the two
+    phases of an import stop, wait and retry for the same answers.
+    """
+    status = response.status
+
+    if status in (402, 403):
+        return _classify_import_refusal(status, body), 0
+
+    if status == 404:
+        if not body:
+            # "No such import" is a 404 with the API's JSON that says so. One
+            # without it - an HTML page from a proxy or the ingress in front
+            # of a stopped API - is not Tag Historian's answer at all, and is
+            # retried as an unreachable one is rather than ending the import.
+            raise TagHistorianConnectionError("import answered 404 without Tag Historian's answer")
+        return ImportOutcome.UNKNOWN_IMPORT, 0
+
+    if status in (429, 503):
+        return ImportOutcome.RETRY, _parse_retry_after(response)
+
+    if status in (400, 413):
+        LOGGER.error("Tag Historian refused an import batch with %s: %s", status, message)
+        return ImportOutcome.REJECTED, 0
+
+    if status in (502, 504):
+        # The gateway lost the API for a moment: as good as unreachable.
+        raise TagHistorianConnectionError(f"import answered {status}")
+    # A 500 and anything else unexpected: nothing is known to be stored, and
+    # the endpoint skips what it already has, so it is retried like a socket
+    # error rather than ending the import - but Tag Historian did answer, and
+    # an import that meets it every time is not carried on by itself.
+    raise TagHistorianServerError(f"import answered {status}")
+
+
 def _classify_import(response: aiohttp.ClientResponse, body: dict[str, Any]) -> ImportBatchResult:
     status = response.status
     message = str(body.get("message") or body.get("error") or "")
@@ -760,22 +1072,89 @@ def _classify_import(response: aiohttp.ClientResponse, body: dict[str, Any]) -> 
             message=message,
         )
 
-    if status in (402, 403):
-        return ImportBatchResult(_classify_import_refusal(status, body), message=message)
+    outcome, retry_after = _import_status(response, body, message)
+    return ImportBatchResult(outcome, retry_after=retry_after, message=message)
 
-    if status == 404:
-        return ImportBatchResult(ImportOutcome.UNKNOWN_IMPORT, message=message)
 
-    if status in (429, 503):
-        return ImportBatchResult(
-            ImportOutcome.RETRY, retry_after=_parse_retry_after(response), message=message
+def _count(source: dict[str, Any], key: str) -> int:
+    """A count from an answer, 0 when it is absent or not a number."""
+    try:
+        return int(source.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _classify_hours_import(
+    response: aiohttp.ClientResponse, body: dict[str, Any], *, empty: bool = False
+) -> HoursBatchResult:
+    """The answer to one hours batch: the import endpoint's statuses, and two of its own.
+
+    * 402 with ``code: hours_allowance`` is the hourly history allowance - the
+      plan's tag limit times ten years of hours per rolling 30 days - and not
+      the readings' allowance. It ends the statistics phase only, and comes
+      back by itself at ``resumesAt``.
+    * 404 with nothing at all on the wire (``empty``) is a route the server
+      does not have: a Tag Historian from before the hours import. That ends
+      the statistics phase and leaves the readings to theirs. "No such import"
+      is a 404 with the API's JSON that says so, and ends the session as on
+      the readings endpoint. Any other 404 without the API's JSON is read as
+      on the readings endpoint (_import_status): not Tag Historian's answer,
+      and retried as an unreachable one is. Only the one that is empty on the
+      wire is the hours endpoint's own.
+
+    A 503 can carry ``stored``: some months went in and some could not yet
+    (the server's deploy, a file a reader held). Sent again, the batch stores
+    the rest, and what went in now comes back as duplicates; the importer
+    counts it from here. It also carries ``reason``, which tells the hours
+    endpoint's turns (``busy``, ``account_busy``) from trouble: the importer
+    waits for a turn differently (importer._TURN_REASONS).
+    """
+    status = response.status
+    message = str(body.get("message") or body.get("error") or "")
+
+    if status == 200:
+        refused = body.get("refused") or {}
+        importable = {
+            str(tag): parsed
+            for tag, value in (body.get("importableBefore") or {}).items()
+            if (parsed := _parse_time(value)) is not None
+        }
+        return HoursBatchResult(
+            ImportOutcome.TAKEN,
+            stored=_count(body, "stored"),
+            duplicates=_count(body, "duplicates"),
+            outside_retention=_count(body, "outsideRetention"),
+            negative_change=_count(body, "negativeChange"),
+            refused_not_history=_count(refused, "notHistory"),
+            refused_tag_limit=_count(refused, "tagLimit"),
+            refused_unit_mismatch=_count(refused, "unitMismatch"),
+            refused_invalid=_count(refused, "invalid"),
+            refused_unsupported=_count(refused, "unsupported"),
+            refused_hours_allowance=_count(refused, "hoursAllowance"),
+            refused_unwritable=_count(refused, "unwritable"),
+            refused_tags=[str(t) for t in body.get("refusedTags") or []],
+            importable_before=importable,
+            oldest_allowed=_parse_time(body.get("oldestAllowed")),
+            resumes_at=_parse_time((body.get("hoursAllowance") or {}).get("resumesAt")),
+            message=message,
         )
 
-    if status in (400, 413):
-        LOGGER.error("Tag Historian refused an import batch with %s: %s", status, message)
-        return ImportBatchResult(ImportOutcome.REJECTED, message=message)
+    if status == 402 and str(body.get("code") or "") == "hours_allowance":
+        return HoursBatchResult(
+            ImportOutcome.HOURS_ALLOWANCE_SPENT,
+            resumes_at=_parse_time(body.get("resumesAt")),
+            message=message,
+        )
 
-    # A 500 and anything else unexpected: nothing is known to be stored, and
-    # the endpoint skips what it already has, so it is retried like a socket
-    # error rather than ending the import.
-    raise TagHistorianConnectionError(f"import answered {status}")
+    if status == 404 and empty:
+        return HoursBatchResult(ImportOutcome.NOT_SUPPORTED, message=message)
+
+    outcome, retry_after = _import_status(response, body, message)
+    retry = outcome is ImportOutcome.RETRY
+    return HoursBatchResult(
+        outcome,
+        retry_after=retry_after,
+        stored=_count(body, "stored") if retry else 0,
+        message=message,
+        reason=str(body.get("reason") or "") if retry else "",
+    )

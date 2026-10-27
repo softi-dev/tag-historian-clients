@@ -19,6 +19,7 @@ from taghistorian import (
     TagHistorianAPIError,
     TagHistorianClient,
     TagHistorianRateLimitError,
+    TagHistorianUnavailableError,
 )
 from taghistorian._time import serialize_timestamp
 
@@ -177,34 +178,412 @@ def test_429_retry_honours_retry_after_header(make_client, sleeps):
 
 
 @responses.activate
-def test_503_retries_exhausted_raises_rate_limit_error_with_details(make_client, sleeps):
-    # max_retries=2 => 3 total attempts, all refused.
-    for _ in range(3):
-        responses.add(
-            responses.POST,
-            MEASUREMENTS_URL,
-            json={
-                "error": "ingest_unavailable",
-                "reason": "buffer_saturated",
-                "retryAfterSeconds": 3,
-            },
-            status=503,
-            headers={"Retry-After": "3"},
-        )
+def test_429_retries_exhausted_raises_rate_limit_error_with_details(make_client, sleeps):
+    # max_retries=2 => 3 total attempts, all refused. A 429 is still counted
+    # by max_retries, as it always was.
+    responses.add(
+        responses.POST,
+        MEASUREMENTS_URL,
+        json={"error": "Rate limit exceeded. Please try again later.", "retryAfterSeconds": "3"},
+        status=429,
+        headers={"Retry-After": "3"},
+    )
 
     client = make_client(max_retries=2)
 
     with pytest.raises(TagHistorianRateLimitError) as excinfo:
         client.write("t", 1.0)
 
-    assert excinfo.value.status_code == 503
+    assert excinfo.value.status_code == 429
     assert excinfo.value.attempts == 3
     assert excinfo.value.retry_after == 3.0
     assert len(responses.calls) == 3
-    # Slept before the 2nd and 3rd attempts, each honouring the header - not
-    # zero (would mean no retry happened) and not more than the attempts
-    # actually made.
     assert sleeps == [3.0, 3.0]
+
+
+# -- 503: temporarily unavailable, not a rate limit --------------------------
+
+# The API's answer when it could not CHECK a key (a moment's trouble on its
+# side): a 401 is only ever a key that was checked and refused.
+_SIGN_IN_UNAVAILABLE = {
+    "error": "Service Unavailable",
+    "message": "Your sign-in could not be checked just now. This is on our side and says "
+    "nothing about your API key or session - send the same request again in a moment.",
+    "traceId": "0HN-test",
+    "reason": "sign_in_unavailable",
+    "retryAfterSeconds": 40,
+}
+
+
+@responses.activate
+def test_503_sign_in_unavailable_is_ridden_out_past_max_retries(make_client, sleeps):
+    """A sign-in outage of a few Retry-Afters passes inside one call.
+
+    Four 503s at 40 s is 160 s of waiting - past the two retries a 429 would
+    get here, inside the 503's budget of seconds.
+    """
+    for _ in range(4):
+        responses.add(
+            responses.GET,
+            ACTIVE_ALERTS_URL,
+            json=_SIGN_IN_UNAVAILABLE,
+            status=503,
+            headers={"Retry-After": "40"},
+        )
+    responses.add(responses.GET, ACTIVE_ALERTS_URL, json=[], status=200)
+
+    client = make_client(max_retries=2)
+
+    assert client.list_active_alerts() == []
+    assert len(responses.calls) == 5
+    assert sleeps == [40.0, 40.0, 40.0, 40.0]
+
+
+@responses.activate
+def test_503_gives_up_at_the_budget_and_says_unavailable_not_rate_limit(make_client, sleeps):
+    responses.add(
+        responses.GET,
+        ACTIVE_ALERTS_URL,
+        json=_SIGN_IN_UNAVAILABLE,
+        status=503,
+        headers={"Retry-After": "40"},
+    )
+
+    client = make_client()  # the default budget: 300 s of waiting
+
+    with pytest.raises(TagHistorianUnavailableError) as excinfo:
+        client.list_active_alerts()
+
+    err = excinfo.value
+    # Seven waits of 40 s fit in 300; an eighth would end at 320, so it is
+    # not started - the call is bounded by the budget, not the outage.
+    assert sleeps == [40.0] * 7
+    assert err.attempts == 8
+    assert err.waited == 280.0
+    assert err.retry_after == 40.0
+    assert err.reason == "sign_in_unavailable"
+    assert err.status_code == 503
+    assert not isinstance(err, TagHistorianRateLimitError)
+    assert isinstance(err, TagHistorianAPIError)
+    text = str(err)
+    assert "temporarily unavailable" in text
+    assert "could not check the API key" in text
+    assert "not a rate limit" in text
+    # The server's own sentence, not its title.
+    assert "Your sign-in could not be checked just now" in text
+
+
+@responses.activate
+def test_503_waits_that_land_exactly_on_the_budget_are_all_made(make_client, sleeps):
+    """'No more than unavailable_budget' includes the budget itself."""
+    responses.add(
+        responses.GET,
+        ACTIVE_ALERTS_URL,
+        json=_SIGN_IN_UNAVAILABLE,
+        status=503,
+        headers={"Retry-After": "40"},
+    )
+
+    client = make_client(unavailable_budget=120)
+
+    with pytest.raises(TagHistorianUnavailableError) as excinfo:
+        client.list_active_alerts()
+
+    # 40 + 40 + 40 is exactly 120, so the third wait is made; a fourth would
+    # end at 160 and is not started.
+    assert sleeps == [40.0] * 3
+    assert excinfo.value.attempts == 4
+    assert excinfo.value.waited == 120.0
+
+
+@responses.activate
+def test_503_whose_one_retry_after_is_past_the_budget_raises_at_once(make_client, sleeps):
+    responses.add(
+        responses.GET,
+        ACTIVE_ALERTS_URL,
+        json=_SIGN_IN_UNAVAILABLE,
+        status=503,
+        headers={"Retry-After": "40"},
+    )
+
+    client = make_client(unavailable_budget=30)
+
+    with pytest.raises(TagHistorianUnavailableError) as excinfo:
+        client.list_active_alerts()
+
+    assert sleeps == []
+    assert len(responses.calls) == 1
+    assert excinfo.value.attempts == 1
+    assert excinfo.value.waited == 0
+    assert excinfo.value.retry_after == 40.0
+
+
+@pytest.mark.parametrize(
+    ("reason", "in_words"),
+    [
+        ("buffer_saturated", "write buffer was full"),
+        ("wal_unavailable", "could not store writes safely"),
+        ("shutting_down", "was restarting"),
+    ],
+)
+@responses.activate
+def test_503_from_the_write_endpoints_is_unavailable_too(make_client, sleeps, reason, in_words):
+    responses.add(
+        responses.POST,
+        MEASUREMENTS_URL,
+        json={"error": "ingest_unavailable", "reason": reason, "retryAfterSeconds": 3},
+        status=503,
+        headers={"Retry-After": "3"},
+    )
+
+    client = make_client(unavailable_budget=10)
+
+    with pytest.raises(TagHistorianUnavailableError) as excinfo:
+        client.write("t", 1.0)
+
+    assert sleeps == [3.0, 3.0, 3.0]
+    assert excinfo.value.attempts == 4
+    assert excinfo.value.reason == reason
+    text = str(excinfo.value)
+    assert "temporarily unavailable" in text
+    # Not the key's problem, so the key is not mentioned.
+    assert "API key" not in text
+    # The write endpoints' body has a code and no sentence: the code is not
+    # quoted as if the server had said it, the reason is put in words.
+    assert "ingest_unavailable" not in text
+    assert "It said" not in text
+    assert in_words in text
+    assert "not a rate limit" in text
+
+
+@responses.activate
+def test_503_whose_error_is_a_sentence_quotes_it(make_client, sleeps):
+    responses.add(
+        responses.GET,
+        ACTIVE_ALERTS_URL,
+        json={"error": "Down for maintenance until 03:00 UTC."},
+        status=503,
+        headers={"Retry-After": "5"},
+    )
+
+    client = make_client(unavailable_budget=4)
+
+    with pytest.raises(TagHistorianUnavailableError) as excinfo:
+        client.list_active_alerts()
+
+    assert "It said: Down for maintenance until 03:00 UTC." in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"body": "<html><body><h1>503 Service Unavailable</h1></body></html>"},
+        {"body": "upstream connect error"},
+        {"json": ["not", "an", "object"]},
+    ],
+    ids=["html", "text", "json-list"],
+)
+@responses.activate
+def test_503_whose_body_is_not_tag_historians_still_says_unavailable(make_client, sleeps, body):
+    responses.add(
+        responses.GET, ACTIVE_ALERTS_URL, status=503, headers={"Retry-After": "2"}, **body
+    )
+
+    client = make_client(unavailable_budget=3)
+
+    with pytest.raises(TagHistorianUnavailableError) as excinfo:
+        client.list_active_alerts()
+
+    err = excinfo.value
+    assert sleeps == [2.0]
+    assert err.reason is None
+    assert str(err) == (
+        "[503] Tag Historian is temporarily unavailable; gave up after 2 attempt(s) and 2s of waiting"
+    )
+
+
+@responses.activate
+def test_503_without_retry_after_backs_off_within_the_budget(make_client, sleeps):
+    responses.add(
+        responses.GET, ACTIVE_ALERTS_URL, json={"error": "Service Unavailable"}, status=503
+    )
+
+    client = make_client(unavailable_budget=100)
+
+    with pytest.raises(TagHistorianUnavailableError) as excinfo:
+        client.list_active_alerts()
+
+    # 1, 2, 4, 8, 16, 30, 30 = 91; the next 30 would pass 100.
+    assert sleeps == [1.0, 2.0, 4.0, 8.0, 16.0, 30.0, 30.0]
+    assert excinfo.value.retry_after is None
+    assert excinfo.value.reason is None
+    # A title alone is not a sentence to quote.
+    assert "It said" not in str(excinfo.value)
+
+
+@responses.activate
+def test_503_with_retry_after_zero_still_ends_at_the_budget(make_client, sleeps):
+    responses.add(
+        responses.GET,
+        ACTIVE_ALERTS_URL,
+        json={"error": "Service Unavailable"},
+        status=503,
+        headers={"Retry-After": "0"},
+    )
+
+    client = make_client(unavailable_budget=20)
+
+    with pytest.raises(TagHistorianUnavailableError) as excinfo:
+        client.list_active_alerts()
+
+    # A Retry-After under a second backs off as a missing one does - not a
+    # request a second for the whole budget - and still spends the budget.
+    # 1, 2, 4, 8 = 15; the next 16 would pass 20.
+    assert sleeps == [1.0, 2.0, 4.0, 8.0]
+    assert excinfo.value.attempts == 5
+    assert excinfo.value.waited == 15.0
+
+
+@responses.activate
+def test_503_with_retry_after_zero_and_no_backoff_still_ends_at_the_budget(make_client, sleeps):
+    responses.add(
+        responses.GET,
+        ACTIVE_ALERTS_URL,
+        json={"error": "Service Unavailable"},
+        status=503,
+        headers={"Retry-After": "0"},
+    )
+
+    client = make_client(backoff_base=0.0, unavailable_budget=5)
+
+    with pytest.raises(TagHistorianUnavailableError) as excinfo:
+        client.list_active_alerts()
+
+    # A wait is never under a second, so a 0 still spends the budget.
+    assert sleeps == [1.0] * 5
+    assert excinfo.value.attempts == 6
+    assert excinfo.value.waited == 5.0
+
+
+@pytest.mark.parametrize("attempt", [1, 63, 1025, 5000])
+def test_the_backoff_never_overflows_however_many_retries_a_budget_allows(attempt):
+    """A 2000 s budget at the one-second floor reaches retry number 1025, where
+    2 ** 1024 no longer converts to a float: it must still be a wait."""
+    assert RetryConfig(backoff_base=0.0).backoff_delay(attempt) == 0.0
+    expected = 1.0 if attempt == 1 else 30.0
+    assert RetryConfig().backoff_delay(attempt) == expected
+
+
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [
+        # Tag Historian's own shortest ask, a second, is honoured exactly.
+        ("1", [1.0, 1.0, 1.0, 1.0, 1.0]),
+        # Under a second is a proxy's, read as no header: the backoff applies.
+        ("0.5", [1.0, 2.0]),
+    ],
+)
+@responses.activate
+def test_a_retry_after_of_one_second_is_honoured_and_under_one_backs_off(
+    make_client, sleeps, header, expected
+):
+    responses.add(
+        responses.GET,
+        ACTIVE_ALERTS_URL,
+        json={"error": "Service Unavailable"},
+        status=503,
+        headers={"Retry-After": header},
+    )
+
+    client = make_client(unavailable_budget=5)
+
+    with pytest.raises(TagHistorianUnavailableError):
+        client.list_active_alerts()
+
+    assert sleeps == expected
+
+
+@responses.activate
+def test_503_with_no_backoff_and_no_retry_after_still_ends_at_the_budget(make_client, sleeps):
+    responses.add(
+        responses.GET, ACTIVE_ALERTS_URL, json={"error": "Service Unavailable"}, status=503
+    )
+
+    client = make_client(backoff_base=0.0, unavailable_budget=5)
+
+    with pytest.raises(TagHistorianUnavailableError) as excinfo:
+        client.list_active_alerts()
+
+    assert sleeps == [1.0] * 5
+    assert excinfo.value.attempts == 6
+
+
+@pytest.mark.parametrize("value", ["-5", "nan", "inf"])
+@pytest.mark.parametrize("status_code", [429, 503])
+@responses.activate
+def test_a_retry_after_nobody_can_wait_for_is_treated_as_missing(
+    make_client, sleeps, status_code, value
+):
+    responses.add(
+        responses.GET,
+        ACTIVE_ALERTS_URL,
+        json={"error": "Service Unavailable"},
+        status=status_code,
+        headers={"Retry-After": value},
+    )
+    responses.add(responses.GET, ACTIVE_ALERTS_URL, json=[], status=200)
+
+    client = make_client()
+
+    assert client.list_active_alerts() == []
+    # The backoff instead (backoff_base 1.0), not a sleep that raises or never ends.
+    assert sleeps == [1.0]
+
+
+@responses.activate
+def test_503s_do_not_spend_the_retries_of_a_429_that_follows(make_client, sleeps):
+    for _ in range(3):
+        responses.add(
+            responses.GET,
+            ACTIVE_ALERTS_URL,
+            json=_SIGN_IN_UNAVAILABLE,
+            status=503,
+            headers={"Retry-After": "30"},
+        )
+    responses.add(
+        responses.GET,
+        ACTIVE_ALERTS_URL,
+        json={"error": "Rate limit exceeded"},
+        status=429,
+        headers={"Retry-After": "5"},
+    )
+    responses.add(responses.GET, ACTIVE_ALERTS_URL, json=[], status=200)
+
+    client = make_client(max_retries=1)
+
+    assert client.list_active_alerts() == []
+    assert sleeps == [30.0, 30.0, 30.0, 5.0]
+
+
+@responses.activate
+def test_max_retries_zero_raises_a_503_at_once(sleeps):
+    responses.add(
+        responses.GET,
+        ACTIVE_ALERTS_URL,
+        json=_SIGN_IN_UNAVAILABLE,
+        status=503,
+        headers={"Retry-After": "40"},
+    )
+
+    retry = RetryConfig(max_retries=0, sleep=sleeps.append)
+    client = TagHistorianClient(api_key="test-key", base_url=BASE_URL, retry=retry)
+
+    with pytest.raises(TagHistorianUnavailableError) as excinfo:
+        client.list_active_alerts()
+
+    assert excinfo.value.attempts == 1
+    assert excinfo.value.waited == 0
+    assert sleeps == []
 
 
 # -- non-retryable errors ---------------------------------------------------
@@ -250,6 +629,37 @@ def test_400_with_violations_surfaces_them_on_the_exception(make_client):
         client.write("1 bad tag", 1.0)
 
     assert excinfo.value.violations == ["must not contain spaces", "must not start with a digit"]
+
+
+@responses.activate
+def test_create_tag_sends_a_meter_as_counter_and_documents_it(make_client):
+    # Tag Historian 1.0.55 has meters: TagType.Counter. The client sends the
+    # type as given; its documentation is where a caller learns the name.
+    doc = TagHistorianClient.create_tag.__doc__ or ""
+    assert '``"Counter"``' in doc
+    assert "meter" in doc
+
+    responses.add(
+        responses.POST,
+        f"{BASE_URL}/api/tags",
+        json={
+            "tagName": "sensor.energy",
+            "description": "",
+            "units": "kWh",
+            "tagType": "Counter",
+            "enableCompression": True,
+            "compressionDeadband": 0.001,
+            "totalMeasurements": 0,
+            "compressedMeasurements": 0,
+            "compressionRatio": 0.0,
+        },
+        status=201,
+    )
+
+    tag = make_client().create_tag("sensor.energy", units="kWh", tag_type="Counter")
+
+    assert json.loads(responses.calls[0].request.body)["tagType"] == "Counter"
+    assert tag.tag_type == "Counter"
 
 
 @responses.activate
@@ -665,6 +1075,41 @@ def test_list_active_alerts_403_from_a_scope_that_lacks_read_raises_api_error(ma
         client.list_active_alerts()
 
     assert excinfo.value.status_code == 403
+
+
+# -- the timeout each request is given -------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("given", "sent"),
+    [
+        # Ten seconds to connect, 45 to answer: the API may take up to about
+        # half a minute to answer a 503 for a key it could not check, and that
+        # answer belongs to the 503 budget, not to the network-error retries.
+        (None, (10.0, 45.0)),
+        (7.5, 7.5),
+        ((3.0, 12.0), (3.0, 12.0)),
+    ],
+)
+def test_the_timeout_reaches_requests_as_given(monkeypatch, given, sent):
+    import requests
+
+    seen: list = []
+
+    def _answer(method, url, **kwargs):
+        seen.append(kwargs["timeout"])
+        response = requests.Response()
+        response.status_code = 200
+        response._content = b"[]"
+        return response
+
+    kwargs = {} if given is None else {"timeout": given}
+    client = TagHistorianClient(api_key="test-key", base_url=BASE_URL, **kwargs)
+    monkeypatch.setattr(client._session, "request", _answer)
+
+    client.list_active_alerts()
+
+    assert seen == [sent]
 
 
 # -- context manager closes the session -------------------------------------

@@ -13,8 +13,9 @@ measurements (or, for values inside the compression deadband, two
 compression decisions), not one. This client retries a 429/503 (both mean
 "try again later", not "something is wrong with your data") and a
 transient network error automatically, within the bounds of
-:class:`taghistorian.retry.RetryConfig`. For 429/503 this is safe: the
-server never accepted the request in the first place. For a network error
+:class:`taghistorian.retry.RetryConfig` - a 429 a few times, a 503 for up
+to a few minutes of waiting. For 429/503 this is safe: the server never
+accepted the request in the first place. For a network error
 it is a judgement call - the request *might* have been accepted and only
 the response was lost - which is exactly why the retry budget defaults to a
 small, finite number and is fully callable-configurable rather than a silent
@@ -25,6 +26,7 @@ than a dropped one should pass ``RetryConfig(max_retries=0)`` and handle
 
 from __future__ import annotations
 
+import math
 import re
 from datetime import datetime
 from types import TracebackType
@@ -37,6 +39,7 @@ from .exceptions import (
     TagHistorianAPIError,
     TagHistorianConnectionError,
     TagHistorianRateLimitError,
+    TagHistorianUnavailableError,
 )
 from .models import (
     AggregatedReadResult,
@@ -79,6 +82,22 @@ _MAX_BATCH_SIZE = 5000
 
 _CONTENT_DISPOSITION_FILENAME_RE = re.compile(r"filename\*?=(?:UTF-8'')?\"?([^\";]+)\"?")
 
+# The shortest wait between two 503s, whatever Retry-After or
+# RetryConfig.backoff_base say. unavailable_budget counts seconds waited, so a
+# wait of 0 s (backoff_base=0 and no header) would spend none of it and the
+# call would never return. Tag Historian itself always asks for a second or
+# more; a shorter Retry-After (a proxy's 0) is read as no header, so the
+# backoff applies rather than a request a second.
+_MIN_UNAVAILABLE_WAIT = 1.0
+
+# The write endpoints' 503 names a reason but carries no sentence for a
+# person, so the client says what each reason means itself.
+_UNAVAILABLE_BECAUSE = {
+    "buffer_saturated": "its write buffer was full",
+    "wal_unavailable": "it could not store writes safely just now",
+    "shutting_down": "it was restarting",
+}
+
 
 class TagHistorianClient:
     """Client for the Tag Historian HTTP API.
@@ -89,8 +108,17 @@ class TagHistorianClient:
         ``write``/``write_batch``/``create_tag``), Admin maps to Admin.
     :param base_url: Overridable for self-hosted deployments or staging;
         defaults to the public API.
-    :param timeout: Per-request timeout in seconds, passed straight to
-        ``requests``.
+    :param timeout: Per-request ``(connect, read)`` timeout in seconds,
+        passed straight to ``requests``; a float applies to both. The read
+        part covers the up to about half a minute the API may take to answer
+        a ``503`` with reason ``sign_in_unavailable`` when it cannot check a
+        key, so that answer is waited out under ``unavailable_budget``
+        instead of failing as a network error. An address that does not
+        answer at all still fails within the connect part. A server that
+        accepts the connection and then sends nothing takes the read part to
+        fail, on every attempt: a timeout is retried ``max_retries`` times
+        like any network error, about three minutes in all by default.
+        ``timeout=10.0`` gives the 0.1.0 bound back.
     :param retry: Retry/backoff policy; see :class:`taghistorian.retry.RetryConfig`.
         Defaults to a fresh ``RetryConfig()`` when omitted.
     :param session: An existing ``requests.Session`` to use instead of
@@ -109,7 +137,7 @@ class TagHistorianClient:
         api_key: str,
         base_url: str = _DEFAULT_BASE_URL,
         *,
-        timeout: float = 10.0,
+        timeout: float | tuple[float, float] = (10.0, 45.0),
         retry: RetryConfig | None = None,
         session: requests.Session | None = None,
     ) -> None:
@@ -344,7 +372,12 @@ class TagHistorianClient:
         :meth:`write_batch` create one implicitly on first write and only need
         Write scope.
 
-        :param tag_type: ``"Analog"`` or ``"Discrete"``.
+        :param tag_type: ``"Analog"`` (a level), ``"Discrete"`` (a state) or
+            ``"Counter"`` (a meter: an energy, water or gas reading that only
+            grows, whose increase per hour, day and month Tag Historian works
+            out; servers from 1.0.55). A type other than ``"Analog"`` given
+            here is a person's choice: Home Assistant's state class no longer
+            changes it.
         :param compression_deadband: A fraction of the last stored value,
             from 0 to 1 - not a distance in the tag's unit. ``0.01`` stores
             a reading when it moves more than 1% from the last one stored;
@@ -498,6 +531,12 @@ class TagHistorianClient:
     ) -> requests.Response:
         url = f"{self._base_url}{path}"
         attempt = 0
+        # Two budgets, because a 429 and a 503 are two answers (RetryConfig):
+        # 429s and network errors count against max_retries, 503s against
+        # the seconds of unavailable_budget.
+        retries = 0
+        unavailable_retries = 0
+        unavailable_waited = 0.0
 
         while True:
             attempt += 1
@@ -511,8 +550,9 @@ class TagHistorianClient:
                     stream=stream,
                 )
             except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
-                if attempt <= self._retry.max_retries:
-                    self._retry.sleep(self._retry.backoff_delay(attempt))
+                if retries < self._retry.max_retries:
+                    retries += 1
+                    self._retry.sleep(self._retry.backoff_delay(retries))
                     continue
                 raise TagHistorianConnectionError(
                     f"Could not reach {url} after {attempt} attempt(s): {exc}",
@@ -530,13 +570,14 @@ class TagHistorianClient:
             if response.status_code < 300:
                 return response
 
-            if response.status_code in (429, 503):
+            if response.status_code == 429:
                 retry_after = self._parse_retry_after(response)
-                if attempt <= self._retry.max_retries:
+                if retries < self._retry.max_retries:
+                    retries += 1
                     delay = (
                         retry_after
                         if retry_after is not None
-                        else self._retry.backoff_delay(attempt)
+                        else self._retry.backoff_delay(retries)
                     )
                     # The body is never read on this branch - no .json()/.text
                     # call between here and the retry - so without an explicit
@@ -544,7 +585,7 @@ class TagHistorianClient:
                     # until garbage collection gets to it. Harmless for a
                     # normal JSON call (small body, GC runs soon), but
                     # export_measurements() sets stream=True, and a rate-limited
-                    # or saturated download hitting this branch would otherwise
+                    # or unavailable download hitting this branch would otherwise
                     # hold a real connection open for the life of the retry
                     # loop for no reason - we are about to fire a brand new
                     # request on the same session either way.
@@ -556,10 +597,93 @@ class TagHistorianClient:
                     message, response.status_code, retry_after, attempt
                 )
 
+            if response.status_code == 503:
+                # Tag Historian briefly unavailable - its write buffer full
+                # for a moment, it could not store writes safely just now, a
+                # restart, or a key it could not check just now (reason
+                # "sign_in_unavailable", Retry-After 30-45 s). Not a rate
+                # limit: waited out at the server's own Retry-After for up to
+                # unavailable_budget seconds in all, so a short outage passes
+                # inside one call.
+                retry_after = self._parse_retry_after(response)
+                if retry_after is not None and retry_after >= _MIN_UNAVAILABLE_WAIT:
+                    delay = retry_after
+                else:
+                    # No header, or one asking for less than a second (a
+                    # proxy's 0): back off, and never under the floor.
+                    delay = max(
+                        self._retry.backoff_delay(unavailable_retries + 1),
+                        _MIN_UNAVAILABLE_WAIT,
+                    )
+                if (
+                    self._retry.max_retries > 0
+                    and unavailable_waited + delay <= self._retry.unavailable_budget
+                ):
+                    unavailable_retries += 1
+                    unavailable_waited += delay
+                    response.close()  # as on the 429 branch above
+                    self._retry.sleep(delay)
+                    continue
+                raise self._unavailable_error(response, retry_after, attempt, unavailable_waited)
+
             # Every other non-2xx is refused on its merits: 400/401/402/403/404,
-            # or a 5xx that isn't the buffer-saturated 503 above. Never retried.
+            # or a 5xx other than the 503 above. Never retried.
             message, violations = self._error_details(response)
             raise TagHistorianAPIError(message, response.status_code, violations)
+
+    @staticmethod
+    def _unavailable_error(
+        response: requests.Response,
+        retry_after: float | None,
+        attempts: int,
+        waited: float,
+    ) -> TagHistorianUnavailableError:
+        """The 503 the retry budget ran out on, saying what it is: not a rate limit.
+
+        The 503s this client meets mostly come in two shapes. When a key
+        could not be checked, it is ``error`` (the title "Service
+        Unavailable"), ``message`` (a sentence for a person), ``reason``
+        ("sign_in_unavailable") and ``retryAfterSeconds``. When the write
+        endpoints cannot take a write just now, it is ``error`` as a code
+        ("ingest_unavailable"), ``reason`` ("buffer_saturated",
+        "wal_unavailable" or "shutting_down") and ``retryAfterSeconds``, with
+        no ``message``. Others have neither a reason nor a sentence, or are
+        not JSON at all (a gateway's page), and say just "temporarily
+        unavailable". Only a sentence is quoted - the ``message``, or an ``error`` that is
+        one; a known ``reason`` is put in words here, and a code or a bare
+        title is never quoted as if it were something said.
+        """
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            body = {}
+        detail = str(body.get("message") or "").strip()
+        if not detail:
+            error = str(body.get("error") or "").strip()
+            if " " in error and error.lower() != "service unavailable":
+                detail = error
+        reason = str(body.get("reason") or "") or None
+        message = "Tag Historian is temporarily unavailable"
+        if reason == "sign_in_unavailable":
+            message += (
+                " and could not check the API key just now - not a rate limit,"
+                " and nothing is known to be wrong with the key"
+            )
+        elif reason in _UNAVAILABLE_BECAUSE:
+            message += f" - {_UNAVAILABLE_BECAUSE[reason]}, not a rate limit"
+        message += f"; gave up after {attempts} attempt(s) and {waited:g}s of waiting"
+        if detail:
+            message += f". It said: {detail}"
+        return TagHistorianUnavailableError(
+            message,
+            response.status_code,
+            retry_after,
+            attempts,
+            reason=reason,
+            waited=waited,
+        )
 
     @staticmethod
     def _parse_retry_after(response: requests.Response) -> float | None:
@@ -567,9 +691,15 @@ class TagHistorianClient:
         if value is None:
             return None
         try:
-            return float(value)
+            seconds = float(value)
         except ValueError:
             return None
+        # delta-seconds is a non-negative number. A negative, NaN or infinite
+        # value is no instruction anyone can follow (and time.sleep() raises
+        # on a negative one), so it is read as no header: the backoff applies.
+        if not math.isfinite(seconds) or seconds < 0:
+            return None
+        return seconds
 
     @staticmethod
     def _error_details(response: requests.Response) -> tuple[str, list | None]:

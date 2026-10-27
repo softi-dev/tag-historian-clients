@@ -150,10 +150,24 @@ refuses a bigger batch whole with a `400`, which comes back to the LLM as a tool
 ## Error handling
 
 This process is meant to stay running for the life of an MCP host session - potentially hours -
-against a real account. A single failed call (a typo'd tag name, a network blip, a rate limit)
-never crashes the whole server or ends your session: it comes back to the LLM as a clear,
-specific tool-level error message (what went wrong, and the relevant HTTP status/retry
-information where applicable), not a stack trace and not a dropped connection.
+against a real account. A single failed call (a typo'd tag name, a network blip, a rate limit,
+Tag Historian briefly unavailable) never crashes the whole server or ends your session: it comes
+back to the LLM as a clear, specific tool-level error message (what went wrong, and the relevant
+HTTP status/retry information where applicable), not a stack trace and not a dropped connection.
+A `503` is told apart from a rate limit: it says Tag Historian is temporarily unavailable - and,
+when the API could not check the key just now, that this says nothing about the key. Within one
+call a `503` is waited out at the API's `Retry-After` for at most 45 seconds of waiting in all - not
+the client library's default of five minutes - because a tool call holds this server while it
+waits, and many MCP hosts give up on a tool call after 60 seconds. When the API could not check the
+key, that is one wait (it asks for 30-45 seconds); a write it could not take just now asks for
+anything from a second to about half a minute, so shorter waits can repeat within the same 45. The
+requests themselves come on top, each given ten seconds to connect and ten to answer, so the
+message usually reaches the LLM rather than the host's own timeout, and it tells it to try again in
+a few minutes. The API can take up to about half a minute to say it could not check the key,
+though. An answer slower than ten seconds is a timeout, retried as a network error: after four
+tries and the pauses between them, about 47 seconds, the LLM is told that Tag Historian did not
+answer in time and may be briefly unavailable - not that it could not be reached - and to try
+again in a few minutes too. A slow answer after a wait can still run past the host's own timeout.
 
 ## Development
 

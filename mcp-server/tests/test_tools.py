@@ -5,6 +5,7 @@ an exception escaping the server process.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 from taghistorian import (
@@ -16,6 +17,7 @@ from taghistorian import (
     TagHistorianAPIError,
     TagHistorianConnectionError,
     TagHistorianRateLimitError,
+    TagHistorianUnavailableError,
     TagListResult,
     WriteResult,
 )
@@ -210,6 +212,30 @@ async def test_rate_limit_error_surfaces_retry_after_in_the_message(mock_client)
     text = result.content[0].text
     assert "7" in text
     assert "4 attempt" in text
+    assert "rate-limiting this account" in text
+    assert "temporarily unavailable" not in text
+
+
+async def test_unavailable_503_is_not_called_a_rate_limit_or_a_bad_key(mock_client):
+    mock_client.read.side_effect = TagHistorianUnavailableError(
+        "Tag Historian is temporarily unavailable",
+        503,
+        retry_after=40.0,
+        attempts=8,
+        reason="sign_in_unavailable",
+        waited=280.0,
+    )
+    mcp = build_server(mock_client, make_config())
+
+    result = await call_tool(mcp, "read_measurements", {"tag_name": "t"})
+
+    assert result.isError is True
+    text = result.content[0].text
+    assert "temporarily unavailable" in text
+    assert "not a rate limit" in text
+    assert "says nothing about the key" in text
+    assert "rate-limiting" not in text
+    assert "8 attempt" in text
 
 
 async def test_connection_error_surfaces_as_clean_tool_error_not_a_crash(mock_client):
@@ -308,6 +334,37 @@ async def test_create_tag_happy_path(mock_client):
     assert result.isError is False
     assert "boiler.temperature" in result.content[0].text
     mock_client.create_tag.assert_called_once()
+
+
+async def test_create_tag_accepts_a_meter_and_says_what_one_is(mock_client):
+    # Tag Historian 1.0.55 has meters (TagType.Counter). The Literal is what
+    # the schema offers an LLM, and the description what it reads.
+    mock_client.create_tag.return_value = Tag(
+        tag_name="sensor.energy",
+        description="",
+        units="kWh",
+        tag_type="Counter",
+        enable_compression=True,
+        compression_deadband=0.001,
+        total_measurements=0,
+        compressed_measurements=0,
+        compression_ratio=0.0,
+    )
+    mcp = build_server(mock_client, make_config(enable_write=True))
+    tools = {t.name: t for t in await mcp.list_tools()}
+
+    schema = tools["create_tag"].inputSchema["properties"]["tag_type"]
+    assert "Counter" in json.dumps(schema)
+    assert "meter" in json.dumps(schema)
+
+    result = await call_tool(
+        mcp,
+        "create_tag",
+        {"tag_name": "sensor.energy", "units": "kWh", "tag_type": "Counter"},
+    )
+
+    assert result.isError is False
+    assert mock_client.create_tag.call_args.kwargs["tag_type"] == "Counter"
 
 
 async def test_create_tag_tells_the_llm_the_deadband_is_a_fraction_not_a_width(mock_client):

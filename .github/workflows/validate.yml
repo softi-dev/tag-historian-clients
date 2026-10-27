@@ -69,9 +69,36 @@ jobs:
       # test nobody fixes.
       - run: python -m pytest
 
+  test-newest:
+    # The same suite on the NEWEST Home Assistant the test package carries,
+    # unpinned, beside the pin above. The pin is the floor hacs.json
+    # promises; this is where a user who updates every month already is - and
+    # where the recorder's statistics API moves (has_mean goes in 2026.11,
+    # mean_type stays). Run nightly by the schedule, it finds the drift before
+    # a user's log does.
+    name: Home Assistant tests (newest)
+    runs-on: ubuntu-latest
+    # Unpinned, so a release that hangs the suite is possible; the nightly
+    # should fail, not hold a runner for the default six hours.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # Newer Home Assistant releases need a newer Python than the pin
+          # does; on an older one pip would quietly settle for an older
+          # package, and this job would test the past.
+          python-version: "3.14"
+      - run: pip install pytest-homeassistant-custom-component
+      - run: pip freeze | grep -i -E "^(homeassistant|pytest-homeassistant-custom-component)=="
+      - run: python -m pytest
+
   python-client:
     name: Python client (${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    # A retry loop that never ends should fail the job, not hold a runner
+    # for the default six hours.
+    timeout-minutes: 15
     strategy:
       matrix:
         # The package's declared floor and the newest release: the floor is
@@ -96,6 +123,9 @@ jobs:
   mcp-server:
     name: MCP server (${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    # A retry loop that never ends should fail the job, not hold a runner
+    # for the default six hours.
+    timeout-minutes: 15
     strategy:
       matrix:
         # 3.10 is this package's own floor (FastMCP introspects PEP 604
@@ -124,6 +154,9 @@ jobs:
   influxdb-migration:
     name: InfluxDB migration (${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    # A retry loop that never ends should fail the job, not hold a runner
+    # for the default six hours.
+    timeout-minutes: 15
     strategy:
       matrix:
         # The package's declared floor and the newest release, as for

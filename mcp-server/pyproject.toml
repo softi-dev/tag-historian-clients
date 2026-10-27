@@ -59,7 +59,12 @@ dependencies = [
   # install sequence.
   #
   # Once python-client/ is on PyPI, replace this comment with:
-  #   "taghistorian>=0.1.0,<0.2"
+  #   "taghistorian>=0.2.0,<0.3"
+  # 0.2.0 is the floor, not 0.1.0: errors.py imports
+  # TagHistorianUnavailableError (a 503 that outlasted its retries), which the
+  # client only has from 0.2.0; on 0.1.x this server stops at startup. Raise
+  # the floor again whenever this package starts importing something newer
+  # from taghistorian.
   #
   # mcp itself IS pinned below to the 1.x line specifically: 2.0.0 (current on
   # PyPI as of this writing) renamed the FastMCP convenience API this server

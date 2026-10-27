@@ -186,13 +186,14 @@ Omit both `from_`/`to` to export everything ever stored for the tag.
 
 ## Error handling
 
-Every non-2xx response raises one of three exception types, all importable from `taghistorian`,
+Every non-2xx response raises one of four exception types, all importable from `taghistorian`,
 so you can handle each the way it actually calls for:
 
 ```python
 from taghistorian import (
     TagHistorianAPIError,  # the server rejected the request - fix the request
-    TagHistorianRateLimitError,  # retries were exhausted on a 429/503 - back off more
+    TagHistorianRateLimitError,  # retries were exhausted on a 429 - send less often, or later
+    TagHistorianUnavailableError,  # a 503 outlasted its retries - try again in a few minutes
     TagHistorianConnectionError,  # never got a response at all - a network/DNS problem
 )
 
@@ -200,6 +201,8 @@ try:
     client.write("boiler.temperature", 84.2)
 except TagHistorianRateLimitError as e:
     print(f"still rate limited after {e.attempts} attempts, last Retry-After was {e.retry_after}s")
+except TagHistorianUnavailableError as e:
+    print(f"try again in a few minutes: {e.message}")  # says why, and how long it waited
 except TagHistorianAPIError as e:
     print(f"rejected: HTTP {e.status_code}: {e.message}")
     if e.violations:
@@ -212,10 +215,22 @@ A call never returns `None` or a half-empty result on failure - it raises one of
 
 ## Retries
 
-A `429` (rate limited) or `503` (write buffer momentarily full) is retried automatically,
-honouring the server's own `Retry-After` header rather than guessing a backoff. A `400`/`401`/
-`403`/`404` is never retried - retrying an unchanged, rejected request cannot succeed. Tune or
-disable this with `RetryConfig`:
+A `429` or a `503` is retried automatically, honouring the server's own `Retry-After` header
+rather than guessing a backoff. They are two different answers and are budgeted differently:
+
+- `429` is a rate limit - the account is sending faster than it may. Retried `max_retries` times
+  (default 3), then `TagHistorianRateLimitError`.
+- `503` is Tag Historian briefly unavailable: its write buffer momentarily full, a restart, or an
+  API key it could not check just now because of a moment's trouble on its side (the body says
+  `"reason": "sign_in_unavailable"`, with a `Retry-After` of 30-45 seconds). None of them is a rate
+  limit, and none says anything about your request or your key - a key that was checked and refused
+  is a `401`. Retried for as long as the waits add up to no more than `unavailable_budget` seconds
+  (default 300; each wait is at least a second, and a `Retry-After` under a second backs off as a
+  missing one does, so the retries end even when a `503` asks for no wait), so an outage of a
+  minute or two passes inside one call; a longer one raises `TagHistorianUnavailableError`.
+
+A `400`/`401`/`403`/`404` is never retried - retrying an unchanged, rejected request cannot
+succeed. Tune or disable this with `RetryConfig`:
 
 ```python
 from taghistorian import RetryConfig, TagHistorianClient
@@ -226,8 +241,18 @@ client = TagHistorianClient(
 )
 ```
 
-See the docstring on `RetryConfig` for the full set of knobs (backoff base/ceiling, and a
-`sleep` override for tests or custom pacing).
+See the docstring on `RetryConfig` for the full set of knobs (backoff base/ceiling, the
+`unavailable_budget` for 503s, and a `sleep` override for tests or custom pacing).
+
+0.2.0 split the `503` out of `TagHistorianRateLimitError`: code that caught that for a `503`
+catches `TagHistorianUnavailableError` now (`TagHistorianAPIError` still catches both). It also
+made the default `timeout` `(10.0, 45.0)`: ten seconds to connect, 45 to answer, because the API
+may take up to about half a minute to answer that `503` when it cannot check a key - waited out as
+a `503` rather than failing as a network error. The cost: a server that accepts the connection and
+then sends nothing now takes 45 seconds per attempt to fail instead of ten, so with the default
+retries `TagHistorianConnectionError` comes after about three minutes instead of under one. A
+caller with its own deadline can pass `timeout=10.0` for the old bound (a `503` slower than ten
+seconds then fails as a network error, as before) or lower `max_retries`.
 
 ## Self-hosted / staging
 

@@ -127,12 +127,13 @@ What this integration has that the built-in one does not:
   what to do — a revoked key, entities beyond your plan's series count, the
   daily reading allowance being spent, or Tag Historian simply being busy. The
   last two are different problems and are never described as the same one.
-- **It brings the history you already have.** The recorder on your Home
-  Assistant box holds days of readings from before you installed this — on an
-  SD card, more often than not, the part most likely to fail. One action
-  copies them into Tag Historian with their original timestamps, and imported
-  history does not count against your daily reading allowance. See
-  [Import your history](#import-your-history).
+- **It brings the history you already have — the years of it.** Home
+  Assistant's long-term statistics hold an hourly summary of every sensor with
+  a state class for as long as its database lives, often years; the recorder
+  holds every reading of the last days. Setup brings both into Tag Historian,
+  the years first — off an SD card, more often than not, the part of a Home
+  Assistant box most likely to fail — and neither counts against your daily
+  reading allowance. See [Import your history](#import-your-history).
 - **A restart or an outage does not cost you your readings.** Readings it
   could not deliver are saved when Home Assistant stops and sent when it
   starts again, and readings it had to let go of during an outage are read
@@ -143,7 +144,8 @@ What this integration has that the built-in one does not:
 What it does **not** do: read data back out of Tag Historian, replace the
 recorder, or keep attributes as history. It is a one-way export of entity
 states - each with the entity's friendly name and unit, so the series is called
-what Home Assistant calls it and its readings carry their unit.
+what Home Assistant calls it and its readings carry their unit, and with its
+state class, so a meter is a meter in Tag Historian too.
 
 ## Install
 
@@ -194,7 +196,7 @@ can be undone in Tag Historian Explorer. The key an account recovery hands you
 is **Admin**, which is the whole account, and Home Assistant has no use for any
 of it.
 
-Three screens:
+Four screens:
 
 1. **Connect.** Host (leave the default alone unless you self-host) and your
    API key. The key is checked against your account before anything is saved,
@@ -208,6 +210,16 @@ Three screens:
    minimum interval, which is how you stop a chatty sensor spending your daily
    reading allowance.
 
+   The same screen has **Use my approximate location (about 10 km) for
+   outdoor weather from SMHI**, off until you tick it. Ticked, this Home
+   Assistant's location is rounded to a tenth of a degree and proposed as your
+   account's place, so Tag Historian can draw the outdoor temperature and
+   precipitation from the Swedish Meteorological and Hydrological Institute's
+   nearest weather stations beside your charts (Sweden only). It is only a
+   proposal: a place already set in Tag Historian's Settings stays, and that is
+   where you change or remove it. Left off, nothing about your location is
+   sent.
+
    A sensor with no device class and no state class is listed but left
    unticked. Home Assistant knows nothing about those either way: most are
    hand-written template sensors reporting a number, and a few report a word
@@ -218,17 +230,59 @@ Three screens:
    series than you have, it says so instead and offers to trim it back for you
    — it removes the lowest-ranked entities that need a *new* series, and never
    one whose series already exists, because that one was costing you nothing.
+4. **Bring the history Home Assistant already has**, ticked. Leave it ticked
+   and, once the integration is set up, the history Home Assistant holds for
+   the entities you chose goes to Tag Historian in the background: the hourly
+   long-term statistics first, then the recorder's readings — see
+   [Import your history](#import-your-history). Untick it to do that later,
+   or never. The screen also says that this Home Assistant's **time zone** is
+   proposed to your account. Your account's days, months and alert times are
+   in the account's time zone, and Tag Historian takes Home Assistant's only if
+   the account has none yet - none chosen in Tag Historian's Settings, none on
+   the account owner's email channel under Alarms, and none proposed earlier.
+   It is changed in Tag Historian, under Settings.
 
 If your account has no free series at all and everything you picked would need
 one, setup stops and says so rather than finishing with an empty selection.
+
+**Already set up before version 2026.12.0?** The update keeps your selection,
+your saved buffer and your import's progress as they were. Like a new setup,
+it proposes this Home Assistant's **time zone** to your account from its first
+start - taken only if the account has none yet, as above, and changed in Tag
+Historian, under Settings. And it puts one card under **Settings → Repairs**:
+*Bring the years Home Assistant already has into Tag Historian*. Submitting it
+starts the same import the fourth screen does; it is asked once, and again if
+that Tag Historian could not take the years yet.
 
 Change any of it later: **Settings → Devices & services → Tag Historian →
 Configure → Change what you keep history for.**
 
 ## Import your history
 
-**Settings → Devices & services → Tag Historian → Configure → Import the
-history Home Assistant has already recorded**, or the action
+Home Assistant keeps two kinds of history, and the import brings both, in this
+order:
+
+1. **Its long-term statistics — the years.** For every sensor with a state
+   class, Home Assistant keeps one row per hour for as long as its database
+   lives: the hour's average, minimum and maximum, or a meter's reading and its
+   use in the hour. That is usually years, from long before you installed this
+   integration. They go into Tag Historian as hourly history — marked there as
+   Home Assistant's statistics, because they are summaries rather than
+   readings — as far back as Home Assistant has them, and at most ten years.
+   Binary sensors, number and counter helpers, and sensors without a
+   state_class have no long-term statistics.
+2. **What the recorder holds — the readings.** Every state change of the last
+   days (10 by default), with its original timestamp, through the same rules
+   as the live readings: the same numbers and on/off words, `unavailable` left
+   as a gap, the same minimum interval, timestamps to the second. Where a
+   reading falls in an hour the statistics brought, Tag Historian keeps the
+   reading's hour.
+
+A new installation does this by itself unless you untick **Bring the history
+Home Assistant already has** on the last setup screen, and one set up before
+2026.12.0 is offered it on a Repairs card (see [Set up](#set-up)). At any
+time: **Settings → Devices & services → Tag Historian → Configure → Import the
+history Home Assistant already has**, or the action
 `tag_historian.import_history` (from **Developer tools → Actions**, a script or
 an automation):
 
@@ -237,53 +291,64 @@ action: tag_historian.import_history
 data:
   entity_id:            # optional: default is every entity you keep history for
     - sensor.house_power
-  days: 30              # optional: default is as far back as your plan's window
+  statistics: true      # optional: false imports the recorder's readings only
+  days: 3650            # optional: how far back; default is as far as each part reaches
 ```
 
-It reads what Home Assistant's recorder holds for those entities and sends it
-to Tag Historian with the original timestamps, through the same rules as the
-live readings — the same numbers and on/off words, `unavailable` left as a
-gap, the same minimum interval, timestamps to the second. It runs in the
-background: the **Tag Historian history import** sensor shows how far it is
-(`idle`, `running`, `finished` or `stopped`, with the counts as attributes),
-and a notification says when it is done and what it did. A restart carries it
-on where it stopped.
+It runs in the background: the **Tag Historian history import** sensor shows
+how far it is (`idle`, `running`, `finished` or `stopped`, with the counts as
+attributes — `hours_stored` and `hours_skipped` for the statistics), and a
+notification says when it is done: which entities brought hourly history and
+since when, which had none and why, and what happened to the readings. A
+restart carries a running import on where it stopped. One that stopped because
+Tag Historian could not be reached, or was too busy to take it for two hours,
+is carried on by the next start too — for up to three starts in a row that get
+it no further. After that, or after an error that could come back at every
+start (one in this integration or in reading Home Assistant's recorder, or Tag
+Historian answering the same batch with a server error ten times), it waits for
+you: the notification says so, and running the import again stores nothing
+twice.
 
-What Tag Historian holds an import to — every number below is read from your
-own account, none of it is written into this integration:
+What Tag Historian holds an import to. The readings' allowance, your plan's
+full-resolution window, the tag limit and the storage cap are your own
+account's, read from Tag Historian and never written into this integration;
+the hourly history's terms are the same on every plan:
 
-- **Your import allowance, instead of the daily one.** Imported readings do not
-  count against your daily reading allowance. Each account has an import
-  allowance instead: your plan's daily reading allowance times its
-  full-resolution window in days — what the plan could have stored in that
-  window — for all imports together. The import screen shows what is left; a
-  larger plan raises it. When it is used up the import stops and says so, and
-  live readings carry on unaffected.
+- **History only.** Hours and readings older than the moment the import
+  started, older than the first reading of the entity Tag Historian received
+  live, and older than the start of the first import of that entity (for a
+  renamed series, under any name it has had). Everything after that is your
+  live data, which this integration sends itself — including readings still
+  waiting to be sent, so nothing arrives twice. Importing the same history
+  again works; feeding an entity fresh readings through imports does not.
+- **An allowance for the hourly history.** Up to ten years of hours per tag
+  of your plan's tag limit, every 30 days, counted on its own: the hours do not
+  count against your daily reading allowance, your import allowance or your
+  storage cap. When it is used up, the statistics stop for now and say from
+  which date the rest can go in; the readings go on.
+- **Your import allowance for the readings, instead of the daily one.**
+  Imported readings do not count against your daily reading allowance. Each
+  account has an import allowance instead: your plan's daily reading allowance
+  times its full-resolution window in days — what the plan could have stored
+  in that window — for all imports together. The import screen shows what is
+  left; a larger plan raises it. When it is used up the readings stop and say
+  so, the statistics are already in, and live readings carry on unaffected.
 - **Your plan's full-resolution window.** Readings older than it are skipped,
-  so the import starts there.
-- **History only.** Readings older than the moment the import started, older
-  than the first reading of the entity Tag Historian received live, and older
-  than the start of the first import of that entity (for a renamed series,
-  under any name it has had). Everything after that is
-  your live data, which this integration sends itself — including readings
-  still waiting to be sent, so nothing arrives twice. Importing the same
-  history again works; feeding an entity fresh readings through imports does
-  not.
+  so the readings start there. The hourly history is kept for ten years on
+  every plan.
 - **The tag limit and the storage cap**, as for live data. An imported entity
   uses a series like a forwarded one, which is why only entities you keep
   history for can be imported. It is imported into the series its live
   readings go to - for an entity you have renamed, the one its history is in
   (see [When you rename an entity](#when-you-rename-an-entity)).
 
-Running an import twice stores nothing twice: Tag Historian skips a reading it
-already has for that series at that timestamp, and a reading it skips costs no
-allowance.
+Running an import twice stores nothing twice: Tag Historian skips an hour or a
+reading it already has for that series, and what it skips costs no allowance.
 
-**Not imported: long-term statistics.** Once the recorder purges its states
-(after 10 days by default), Home Assistant keeps only hourly mean, minimum and
-maximum values. Those are averages, not readings, and Tag Historian stores
-readings — so they are not imported yet, rather than imported as something
-they are not. Import soon after installing to keep the most.
+Reading the statistics uses `statistics_during_period`, Home Assistant's own
+query for them, though not a published API. Should it change, the
+`recorder.get_statistics` action returns the same rows, and the nightly test
+run against the newest Home Assistant is there to notice first.
 
 ## What one entity costs
 
@@ -296,7 +361,13 @@ Only the entity's own state is sent as a reading, never its attributes. Two
 attributes go along to describe it: the friendly name, which becomes the
 series' description, and the unit of measurement, which becomes its unit -
 what Tag Historian Explorer labels the chart with. Rename the entity in Home
-Assistant and the description follows with its next reading. A reading is
+Assistant and the description follows with its next reading. Two more say
+whether it is a meter: its state class, and a `total`'s last reset. A
+`total_increasing` sensor, and a `total` with a last reset, becomes a meter
+in Tag Historian by itself, with its use per hour, day and month; a `total`
+without one may go down as well as up — energy bought less energy sold — and
+stays a level. A meter's last reading before it goes quiet is never one the
+minimum interval skipped: it is sent once the interval is up. A reading is
 therefore a number, or one of a small set of words that *are* a number in
 disguise: `on`/`off` for a light, a switch, a fan, an automation, a helper or a
 binary sensor, `open`/`closed` for a cover, `above_horizon`/`below_horizon` for
@@ -407,7 +478,7 @@ series, use **Merge into...** instead.
 | `sensor.tag_historian_readings_sent` | Readings this integration has delivered |
 | `sensor.tag_historian_readings_queued` | Readings waiting to be sent right now |
 | `sensor.tag_historian_readings_dropped` | Readings that did not arrive, and why, in the attributes |
-| `sensor.tag_historian_history_import` | Where a history import is, with its counts as attributes |
+| `sensor.tag_historian_history_import` | Where a history import is - which phase, statistics or readings - with its counts as attributes |
 
 The last one is there on purpose: nothing is dropped silently, so if data is
 missing there is always a counter that moved. Its state adds up every way a
@@ -415,7 +486,7 @@ reading can fail to become history:
 
 | Attribute | What it counts |
 |---|---|
-| `dropped_over_quota` | Refused because it needed a series your plan has no room for |
+| `dropped_over_quota` | Refused because it needed a series your plan has no room for, or refused for good for another reason that `last_error` names: an account that may not write just now, or a batch Tag Historian could not take (`400`, `413`, `500`) |
 | `dropped_queue_overflow` | Evicted from a full buffer, oldest first. During an outage they are read back from the recorder once Tag Historian answers again, while the recorder still has them; while today's reading allowance is spent they are over the allowance and are not |
 | `dropped_on_shutdown` | Neither delivered nor saved when the integration stopped: handed back too late to requeue, or a save that failed |
 | `dropped_mid_write` | Already in a request that never came back, because Home Assistant stopped or the entry was reloaded underneath it |
@@ -437,14 +508,14 @@ log as well as counted.
 
 ## When something goes wrong
 
-Everything below shows up in **Settings → Repairs**.
+Everything below that needs your attention shows up in **Settings → Repairs**.
 
 | What happened | What the integration does |
 |---|---|
 | Your API key was revoked | Asks for a new one through Home Assistant's normal re-authentication card, and stops retrying the dead key meanwhile |
 | Some readings exceed your plan's series count | Names the series, counts the readings that were lost, keeps sending everything else, and offers to reopen the picker so you can deselect |
 | Today's reading allowance is spent | Holds the newest readings — through a restart too — and waits exactly as long as the API asks; it does not hammer a closed door. What no longer fits in the buffer meanwhile is over the allowance: counted, not sent later |
-| Tag Historian is busy or briefly unreachable | Holds and retries quietly; only raises a card if it lasts, and that card never mentions your plan, because this is not about your plan |
+| Tag Historian is busy, cannot check your key just now, or cannot be reached | Holds the readings and tries again. When Tag Historian answered (busy, or unable to take them just now: `429` or `503`), it waits as long as the API asks (half a minute when the answer names no wait, as a gateway's `503` may not), and raises a card only if that goes on for half an hour; that card never mentions your plan, because this is not about your plan. When nothing answers at all (your network or the host is down), or a gateway in front of Tag Historian answers `502` or `504` in its place, there is no wait to honour: it tries again half a minute after each failed attempt and raises no card; the `last_error` attribute on the **readings dropped** sensor says why. A key Tag Historian could not check (it answers `503` with reason `sign_in_unavailable`) is not a key it refused (`401`), and the integration never asks you for a new one for it |
 | Your account cannot write yet | Shows Tag Historian's own explanation, word for word |
 | An entity you send was renamed | Follows it and keeps its readings arriving in its history; renames the series in Tag Historian if you switched that on, or asks you on a card - see [When you rename an entity](#when-you-rename-an-entity) |
 
@@ -523,7 +594,9 @@ python -m ruff check .
 
 The tests run against the exact Home Assistant version pinned in
 `requirements_test.txt` — the same minor release whose floor `hacs.json`
-claims.
+claims — and CI runs them a second time, nightly too, on the newest
+`pytest-homeassistant-custom-component` and the Home Assistant it carries,
+which needs a newer Python than the pin.
 
 On **Windows** the suite needs the two shims in `tests/conftest.py` — Home
 Assistant's test harness assumes a Linux event loop, and both shims explain

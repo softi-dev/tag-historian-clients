@@ -20,13 +20,15 @@
           "entities": "Entities to historise",
           "min_interval": "Minimum seconds between readings",
           "show_all": "Show every entity",
-          "follow_renames": "Rename tags when entities are renamed"
+          "follow_renames": "Rename tags when entities are renamed",
+          "share_approximate_location": "Use my approximate location (about 10 km) for outdoor weather from SMHI"
         },
         "data_description": {
           "entities": "One entity costs one tag. Sensors with no device class and no state class are listed but left unticked, because Home Assistant knows nothing about them either way: most are hand-written template sensors reporting a number, but a few report a word - a house mode sitting at \"away\", a status sitting at \"idle\" - and those store nothing at all. Whatever stores nothing is counted on the \"readings dropped\" sensor and the entity is named there, so a series that stays empty says why. Anything you have already ticked stays in the list whatever else changes.",
           "min_interval": "Readings arriving sooner than this after the previous one for the same entity are skipped. Your daily reading allowance is spent on everything sent, so this is the setting that keeps a chatty sensor from using it up.",
           "show_all": "Puts every entity in the install in the list, unfiltered. Some of them store a 1 or a 0 - a light, a switch, a cover, an automation. The rest store nothing: a lock, a person, a climate mode and a media player all report words, and only entities whose state is a number or a plain on/off can become a reading.",
-          "follow_renames": "When you rename an entity in Home Assistant, rename its tag in Tag Historian too, so its history goes on under the new name. Nothing is copied: the readings from before stay where they are and read under the new name. Off: the readings go on into the old tag, and a repair card asks whether to rename it."
+          "follow_renames": "When you rename an entity in Home Assistant, rename its tag in Tag Historian too, so its history goes on under the new name. Nothing is copied: the readings from before stay where they are and read under the new name. Off: the readings go on into the old tag, and a repair card asks whether to rename it.",
+          "share_approximate_location": "Tells Tag Historian where this Home Assistant is, rounded to about 10 km before it is sent, so your charts can show the outdoor temperature and precipitation from the Swedish Meteorological and Hydrological Institute's nearest weather stations. Sweden only. It is only a proposal: a place already set in Tag Historian's Settings stays as it is, and that is where you change or remove it. Off: nothing about your location is sent."
         }
       },
       "review": {
@@ -43,6 +45,16 @@
           "trim_to_fit": "Removes the lowest-ranked entities that need a new tag, and only those - an entity whose tag already exists costs nothing and is never removed to make room. Turn it off to keep your selection and accept that the extras will be refused."
         }
       },
+      "history": {
+        "title": "Bring the history Home Assistant already has",
+        "description": "Home Assistant already holds history of the {selected} entities you chose, and it can come along:\n\n- its long-term statistics: each sensor's average, minimum and maximum for every hour, or a meter's reading and use, kept for as long as Home Assistant's database lives - often years;\n- what the recorder holds: every reading of the last {recorder_days} days.\n\nTicked, both go to Tag Historian in the background once you submit, the hourly history first. Neither counts against your daily reading allowance, and the \"Tag Historian history import\" sensor shows how far it is. Binary sensors, number and counter helpers, and sensors without a state_class have no long-term statistics. Their recorded readings still come.\n\nTag Historian is also told this Home Assistant's time zone, {time_zone}. Your account's days, months and alert times are in the account's time zone, and Tag Historian takes {time_zone} as that zone only if the account has none yet: none chosen in Tag Historian's Settings, none given to the account owner's email channel under Alarms, and none proposed earlier by a Home Assistant. It is changed in Tag Historian, under Settings.",
+        "data": {
+          "import_on_setup": "Bring the history Home Assistant already has"
+        },
+        "data_description": {
+          "import_on_setup": "The hourly history as far back as Home Assistant has it, up to ten years, then the recorder's readings. What Tag Historian already has is not stored twice. Unticked, nothing is imported now: Configure, Import the history Home Assistant already has, does it whenever you like."
+        }
+      },
       "reauth_confirm": {
         "title": "Tag Historian needs a new API key",
         "description": "The key this integration was using is no longer accepted. Create a new one in the Tag Historian dashboard - Create New Key, with Scope set to Write - and paste it here.",
@@ -53,6 +65,10 @@
     },
     "error": {
       "cannot_connect": "Could not reach that host. Check the address and that Home Assistant can get out to the internet.",
+      "key_not_checked": "Tag Historian could not check the key just now. It answered, so the address is right, and this says nothing about the key itself. Try again in a minute.",
+      "unavailable": "That address answered, but said it cannot serve this just now. Try again in a minute; if it keeps saying so, check the address.",
+      "unavailable_known_host": "Tag Historian answered, but could not do this just now. Try again in a minute.",
+      "cannot_connect_known_host": "Could not get through to Tag Historian just now. Check that Home Assistant can get out to the internet, and try again in a minute.",
       "invalid_auth": "Tag Historian did not accept that key. Check you copied all of it, and that it has not been revoked.",
       "read_only_key": "That key's scope is Read. It can look at your data but not add to it - create a key with Scope set to Write instead.",
       "account_inactive": "That key belongs to an account that is not active. Sign in to the Tag Historian dashboard to see why.",
@@ -73,7 +89,7 @@
         "title": "Tag Historian",
         "menu_options": {
           "choose": "Change what you keep history for",
-          "import_history": "Import the history Home Assistant has already recorded"
+          "import_history": "Import the history Home Assistant already has"
         }
       },
       "select": {
@@ -83,13 +99,15 @@
           "entities": "Entities to historise",
           "min_interval": "Minimum seconds between readings",
           "show_all": "Show every entity",
-          "follow_renames": "Rename tags when entities are renamed"
+          "follow_renames": "Rename tags when entities are renamed",
+          "share_approximate_location": "Use my approximate location (about 10 km) for outdoor weather from SMHI"
         },
         "data_description": {
           "entities": "One entity costs one tag. An entity that is currently unavailable or unknown stays in this list and stays selected - it is only the readings that pause, not the choice. An entity whose state is a word rather than a number stores nothing at all; those are counted and named on the \"readings dropped\" sensor.",
           "min_interval": "Readings arriving sooner than this after the previous one for the same entity are skipped.",
           "show_all": "Puts every entity in the install in the list, unfiltered - including ones that can store nothing.",
-          "follow_renames": "When you rename an entity in Home Assistant, rename its tag in Tag Historian too, so its history goes on under the new name. Nothing is copied: the readings from before stay where they are and read under the new name. Off: the readings go on into the old tag, and a repair card asks whether to rename it."
+          "follow_renames": "When you rename an entity in Home Assistant, rename its tag in Tag Historian too, so its history goes on under the new name. Nothing is copied: the readings from before stay where they are and read under the new name. Off: the readings go on into the old tag, and a repair card asks whether to rename it.",
+          "share_approximate_location": "Tells Tag Historian where this Home Assistant is, rounded to about 10 km before it is sent, so your charts can show the outdoor temperature and precipitation from the Swedish Meteorological and Hydrological Institute's nearest weather stations. Sweden only. It is only a proposal: a place already set in Tag Historian's Settings stays as it is, and that is where you change or remove it. Off: nothing about your location is sent."
         }
       },
       "review": {
@@ -107,15 +125,17 @@
         }
       },
       "import_history": {
-        "title": "Import recorded history",
-        "description": "Sends what Home Assistant's recorder holds for the entities below to Tag Historian, with the original timestamps, so the history on this box is kept even if the box is not.\n\nImported readings do not count against your daily reading allowance. They count against your import allowance instead: {remaining} of {total} readings left - {readings_per_day} a day times your plan's {window_days}-day full-resolution window, for all imports together. Readings older than that window are skipped, and so is anything Tag Historian already has, so running an import twice stores nothing twice.\n\nOnly history is imported: readings older than the moment the import starts, older than the first reading of the entity Tag Historian received live, and older than the start of the first import of it. Everything after that is your live data, which this integration sends itself - including what is still waiting to be sent. A renamed entity whose card you answered with \"Start a new tag instead\" or \"Keep them apart\" is left out: its history stays in the old tag.\n\nThe recorder here keeps {recorder_days} days of states. The hourly long-term statistics Home Assistant keeps after that are not imported: they are averages, not readings.\n\nThe import runs in the background. The \"Tag Historian history import\" sensor shows how far it is, a notification says when it is done, and a restart carries on where it stopped.",
+        "title": "Import the history Home Assistant has",
+        "description": "Sends the history Home Assistant holds for the entities below to Tag Historian, in two parts, so the history on this box is kept even if the box is not.\n\nFirst its hourly long-term statistics: a measurement's average, minimum and maximum for every hour, or a meter's reading and use, as far back as Home Assistant has them and up to ten years. In Tag Historian they are hourly history, marked as Home Assistant's statistics, and they have an allowance of their own: up to ten years per tag every thirty days. Binary sensors, number and counter helpers, and sensors without a state_class have no long-term statistics.\n\nThen what the recorder holds, with the original timestamps; the recorder here keeps {recorder_days} days of states. Imported readings do not count against your daily reading allowance. They count against your import allowance instead: {remaining} of {total} readings left - {readings_per_day} a day times your plan's {window_days}-day full-resolution window, for all imports together. Readings older than that window are skipped, and so is anything Tag Historian already has, so running an import twice stores nothing twice.\n\nOnly history is imported: readings older than the moment the import starts, older than the first reading of the entity Tag Historian received live, and older than the start of the first import of it. Everything after that is your live data, which this integration sends itself - including what is still waiting to be sent. Where a recorded reading falls in an hour the statistics brought, Tag Historian keeps the reading's hour. A renamed entity whose card you answered with \"Start a new tag instead\" or \"Keep them apart\" is left out: its history stays in the old tag.\n\nThe import runs in the background. The \"Tag Historian history import\" sensor shows how far it is, a notification says when it is done, and a restart carries on where it stopped.",
         "data": {
           "entities": "Entities to import",
+          "statistics": "Hourly history from Home Assistant's long-term statistics",
           "days": "How far back"
         },
         "data_description": {
           "entities": "Only entities you keep history for are listed: an imported entity uses a tag like a forwarded one.",
-          "days": "Days before today. The import starts no earlier than your plan's full-resolution window, whatever this says."
+          "statistics": "Untick to import only the readings the recorder holds.",
+          "days": "Days before today, at most ten years. Readings go back no further than your plan's full-resolution window, whatever this says."
         }
       }
     },
@@ -125,14 +145,18 @@
     },
     "abort": {
       "cannot_connect": "Could not reach Tag Historian, so this screen cannot show you how much of your allowance is left. Try again in a moment.",
+      "key_not_checked": "Tag Historian could not check this integration's key just now, so this screen cannot show you how much of your allowance is left. This says nothing about the key itself. Try again in a minute.",
+      "unavailable": "Tag Historian answered, but could not do this just now, so this screen cannot show you how much of your allowance is left. Try again in a minute.",
       "no_tags_available": "Your account has no free tags, and every entity you chose would need one, so trimming the selection to fit leaves nothing to historise. Your existing selection has been left alone. Free a tag in the Tag Historian dashboard or move to a larger plan.",
-      "import_started": "Importing the recorded history of {entities} entities into Tag Historian. Follow it on the \"Tag Historian history import\" sensor; a notification says when it is done.",
+      "import_started": "Importing the history of {entities} entities into Tag Historian. Follow it on the \"Tag Historian history import\" sensor; a notification says when it is done.",
       "import_running": "A history import is already running for this account. Wait for it to finish - the \"Tag Historian history import\" sensor shows how far it is.",
       "import_refused": "Tag Historian did not start the import and said:\n\n{message}",
       "no_recorder": "Home Assistant's recorder is not running, so there is no recorded history to import.",
       "not_loaded": "This Tag Historian entry is not running right now. Wait until it is, then try again.",
       "key_rejected": "Tag Historian no longer accepts this integration's API key. Enter a new one through the re-authentication card, then try again.",
-      "import_cannot_connect": "Could not reach Tag Historian to start the import. Try again in a moment."
+      "import_cannot_connect": "Could not reach Tag Historian to start the import. Try again in a moment.",
+      "import_key_not_checked": "Tag Historian could not check this integration's key just now, so the import did not start. This says nothing about the key itself. Try again in a minute.",
+      "import_unavailable": "Tag Historian answered, but could not start the import just now. Try again in a minute."
     }
   },
   "issues": {
@@ -160,7 +184,7 @@
     },
     "service_unavailable": {
       "title": "Tag Historian has not been accepting data",
-      "description": "Writes have been failing for {minutes} minutes - Tag Historian is either unreachable or too busy to take them. Nothing about your account has changed. Readings are being held, through a restart too, and will be sent when it accepts them again; if this goes on, the oldest are let go and read back from Home Assistant's recorder afterwards. Nothing needs doing at your end."
+      "description": "Writes have been failing for {minutes} minutes - Tag Historian has been answering that it cannot take them just now: it is too busy, or it cannot check this integration's key for the moment. Nothing about your account or the key has changed. Readings are being held, through a restart too, and will be sent when it accepts them again; if this goes on, the oldest are let go and read back from Home Assistant's recorder afterwards. Nothing needs doing at your end."
     },
     "entity_renamed": {
       "title": "{old} was renamed to {new} in Home Assistant",
@@ -184,8 +208,29 @@
           }
         },
         "abort": {
-          "carry_unavailable": "Tag Historian could not be reached, so nothing was changed. The readings go on into the old tag meanwhile, so nothing is lost. Try again from this card later.",
+          "carry_unavailable": "Tag Historian could not do this just now, so nothing was changed - it could not be reached or did not take the request. If Home Assistant has also asked for this integration's key again, the key was refused - give it a new one first. The readings go on into the old tag meanwhile, so nothing is lost. Try again from this card later.",
           "carry_refused": "Tag Historian refused, and nothing was changed. It said:\n\n{message}"
+        }
+      }
+    },
+    "bring_years": {
+      "title": "Bring the years Home Assistant already has into Tag Historian",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Bring the years Home Assistant already has",
+            "description": "This version of the integration can bring the history Home Assistant already holds for every entity {account} keeps history for: first its hourly long-term statistics, as far back as Home Assistant has them and up to ten years, then the readings the recorder holds. In Tag Historian they become the history from before this integration was installed, marked as Home Assistant's statistics. Binary sensors, number and counter helpers, and sensors without a state_class have no long-term statistics.\n\nSubmit to start. It runs in the background - the \"Tag Historian history import\" sensor shows how far it is, and a notification says what it did - and it does not count against your daily reading allowance. What Tag Historian already has is not stored twice.\n\nThis integration also tells Tag Historian this Home Assistant's time zone each time it starts. Tag Historian takes it only if the account has no time zone yet: none chosen in Tag Historian's Settings, none given to the account owner's email channel under Alarms, and none proposed earlier. The account's days, months and alert times are in the account's time zone, which is changed in Tag Historian, under Settings."
+          }
+        },
+        "abort": {
+          "not_loaded": "This Tag Historian entry is not running right now. Wait until it is, then try again from this card.",
+          "import_running": "A history import is already running for this account. Try again from this card once it has finished.",
+          "no_recorder": "Home Assistant's recorder is not running, so there is no history to bring.",
+          "import_refused": "Tag Historian did not start the import and said:\n\n{message}",
+          "key_rejected": "Tag Historian no longer accepts this integration's API key. Enter a new one through the re-authentication card, then try again from this card.",
+          "import_cannot_connect": "Could not reach Tag Historian to start the import. Try again from this card in a moment.",
+          "import_key_not_checked": "Tag Historian could not check this integration's key just now, so the import did not start. This says nothing about the key itself. Try again from this card in a minute.",
+          "import_unavailable": "Tag Historian answered, but could not start the import just now. Try again from this card in a minute."
         }
       }
     }
@@ -217,12 +262,18 @@
     },
     "import_cannot_connect": {
       "message": "Could not reach Tag Historian to start the import."
+    },
+    "import_key_not_checked": {
+      "message": "Tag Historian could not check this integration's key just now, so the import did not start. Try again in a minute."
+    },
+    "import_unavailable": {
+      "message": "Tag Historian answered, but could not start the import just now. Try again in a minute."
     }
   },
   "services": {
     "import_history": {
       "name": "Import history",
-      "description": "Sends the history Home Assistant's recorder holds for entities you keep history for to Tag Historian, with the original timestamps. Imported readings count against the account's import allowance, not the daily one, and only history is imported: nothing this integration sends live, or still has to.",
+      "description": "Sends the history Home Assistant holds for entities you keep history for to Tag Historian: its hourly long-term statistics first, unless statistics is off, then the recorder's readings with their original timestamps. Imported readings count against the account's import allowance, not the daily one, and only history is imported: nothing this integration sends live, or still has to.",
       "fields": {
         "config_entry_id": {
           "name": "Account",
@@ -232,9 +283,13 @@
           "name": "Entities",
           "description": "Entities to import. Leave empty for every entity this entry keeps history for."
         },
+        "statistics": {
+          "name": "Hourly statistics",
+          "description": "Bring Home Assistant's long-term statistics first: hourly history as far back as it has it, up to ten years. On unless turned off."
+        },
         "days": {
           "name": "Days back",
-          "description": "How far back to import. Leave empty to import as far as your plan's full-resolution window reaches."
+          "description": "How far back to import, at most ten years. Readings go back no further than your plan's full-resolution window. Leave empty to go as far back as each can."
         }
       }
     }

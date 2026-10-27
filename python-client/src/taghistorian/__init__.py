@@ -14,6 +14,7 @@ from .exceptions import (
     TagHistorianConnectionError,
     TagHistorianError,
     TagHistorianRateLimitError,
+    TagHistorianUnavailableError,
 )
 from .models import (
     AggregatedMeasurement,
@@ -31,7 +32,7 @@ from .models import (
 )
 from .retry import RetryConfig
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "AggregatedMeasurement",
@@ -50,6 +51,7 @@ __all__ = [
     "TagHistorianConnectionError",
     "TagHistorianError",
     "TagHistorianRateLimitError",
+    "TagHistorianUnavailableError",
     "TagListResult",
     "WriteResult",
 ]
