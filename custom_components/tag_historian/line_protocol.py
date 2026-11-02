@@ -160,6 +160,20 @@ def state_to_value(state: str | None, domain: str | None = None) -> float | None
     return value
 
 
+def recorded_state_value(entity_id: str, state: str | None) -> float | None:
+    """``state_to_value`` for a state read back from the recorder.
+
+    The domain comes from the entity id, not from the state object: the
+    recorder hands back its own ``LazyState``, which skips ``State.__init__``
+    and so never has the ``domain`` a live state carries. Reading
+    ``state.domain`` there raised ``AttributeError`` on every real
+    installation, and stopped every import and every backfill on its first
+    recorded state.
+    """
+    domain, _, _ = entity_id.partition(".")
+    return state_to_value(state, domain)
+
+
 def sanitize_tag_name(raw_name: str) -> str:
     """Mirror of ``InfluxWriteController.SanitizeTagName``.
 

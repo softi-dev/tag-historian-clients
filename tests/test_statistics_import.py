@@ -78,7 +78,7 @@ from custom_components.tag_historian.importer import (
 )
 from custom_components.tag_historian.statistics import month_start
 
-from .conftest import make_client
+from .conftest import RecordedState, make_client
 
 POWER = "sensor.house_power"
 ENERGY = "sensor.energy_meter"
@@ -99,7 +99,7 @@ class FakeRecorder:
 
     def record(self, entity_id: str, value: str, when: datetime) -> None:
         self.states.setdefault(entity_id, []).append(
-            State(entity_id, value, {}, last_changed=when, last_updated=when)
+            RecordedState(entity_id, value, {}, last_changed=when, last_updated=when)
         )
 
     async def read(self, hass, entity_id, start, end) -> list[State]:

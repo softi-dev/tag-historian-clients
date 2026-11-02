@@ -154,7 +154,7 @@ from .line_protocol import (
     MAX_FRIENDLY_NAME_LENGTH,
     MAX_UNIT_LENGTH,
     _attribute_text,
-    state_to_value,
+    recorded_state_value,
     tag_name_for_entity,
 )
 from .renames import own_tag_since as own_tag_since_of
@@ -1058,7 +1058,7 @@ class HistoryImporter:
                 epoch = stamp.timestamp()
                 if stamp < cursor or stamp >= end or (answered is not None and epoch <= answered):
                     continue
-                value = state_to_value(state.state, state.domain)
+                value = recorded_state_value(state.entity_id, state.state)
                 if value is None:
                     continue
                 if last_kept is not None and epoch - last_kept < self._min_interval:

@@ -20,6 +20,7 @@ from pytest_homeassistant_custom_component.components.recorder.common import (
 )
 
 from custom_components.tag_historian import history
+from custom_components.tag_historian.line_protocol import recorded_state_value
 
 
 @pytest.fixture(autouse=True)
@@ -31,6 +32,36 @@ def auto_enable_custom_integrations(recorder_db_url, enable_custom_integrations)
     for. Naming the database here, ahead of it, is the order they need.
     """
     yield
+
+
+async def test_a_recorded_state_is_a_reading_without_the_domain_a_live_one_has(
+    recorder_mock, hass: HomeAssistant, freezer
+) -> None:
+    # The import and the backfill turn what this module returns into
+    # readings. The recorder's states have no .domain - reading it stopped
+    # every import on a real installation - so the domain comes from the id,
+    # and a binary sensor's words are readings as they are when live.
+    start = dt_util.utcnow()
+
+    freezer.tick(timedelta(seconds=10))
+    hass.states.async_set("binary_sensor.front_door", "on")
+    hass.states.async_set("sensor.house_power", "1500")
+    hass.states.async_set("sensor.house_mode", "away")
+    freezer.tick(timedelta(seconds=10))
+    hass.states.async_set("binary_sensor.front_door", "off")
+    freezer.tick(timedelta(seconds=10))
+    end = dt_util.utcnow()
+    await async_wait_recording_done(hass)
+
+    door = await history.async_recorded_states(hass, "binary_sensor.front_door", start, end)
+    power = await history.async_recorded_states(hass, "sensor.house_power", start, end)
+    mode = await history.async_recorded_states(hass, "sensor.house_mode", start, end)
+
+    assert [recorded_state_value(s.entity_id, s.state) for s in door] == [1.0, 0.0]
+    assert [recorded_state_value(s.entity_id, s.state) for s in power] == [1500.0]
+    assert [recorded_state_value(s.entity_id, s.state) for s in mode] == [None], (
+        "a sensor's word is no reading, recorded or live"
+    )
 
 
 async def test_the_recorder_is_read_for_state_changes_inside_the_window_only(

@@ -111,6 +111,7 @@ from .line_protocol import (
     encode_point,
     is_boolean_domain,
     is_missing_state,
+    recorded_state_value,
     retag_line,
     state_to_value,
 )
@@ -1174,7 +1175,7 @@ class StateForwarder:
                 stamp = state.last_updated.timestamp()
                 if stamp <= start or stamp >= end or stamp < cursor.timestamp():
                     continue
-                value = state_to_value(state.state, state.domain)
+                value = recorded_state_value(state.entity_id, state.state)
                 if value is None:
                     continue
                 if last is not None and stamp - last < self._min_interval:
