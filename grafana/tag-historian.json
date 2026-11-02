@@ -1,0 +1,200 @@
+{
+  "__comment": "Tag Historian starter dashboard for the Grafana Infinity data source: a tag dropdown and a row of panels per tag, rather than typing twelve panels by hand. The URLs here are RELATIVE: the data source's Base URL supplies the host. Every url, root_selector and column selector below is run against a real Tag Historian API on every build of the product, and the copy published as grafana/tag-historian.json in github.com/softi-dev/tag-historian-clients is kept identical to the one that is tested.",
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 1,
+      "panels": [],
+      "repeat": "tag",
+      "repeatDirection": "h",
+      "title": "$tag",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "${datasource}" },
+      "description": "One request per refresh. maxPoints is a fixed 800 and does NOT follow the panel width: Infinity has no maxDataPoints macro, so the panel cannot tell the server how wide it is. 800 is a sensible width for any panel and the server clamps the value anyway. decimation=lttb is not optional - without it a fast tag over a long window returns every stored sample, which is megabytes per panel per refresh.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": { "type": "linear" },
+            "showPoints": "auto",
+            "spanNulls": true,
+            "stacking": { "group": "A", "mode": "none" },
+            "thresholdsStyle": { "mode": "off" }
+          },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 9, "w": 18, "x": 0, "y": 1 },
+      "id": 2,
+      "options": {
+        "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "targets": [
+        {
+          "columns": [
+            { "selector": "timestamp", "text": "Time", "type": "timestamp" },
+            { "selector": "value", "text": "$tag", "type": "number" }
+          ],
+          "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "${datasource}" },
+          "filters": [],
+          "format": "timeseries",
+          "global_query_id": "",
+          "parser": "backend",
+          "refId": "A",
+          "root_selector": "measurements",
+          "source": "url",
+          "type": "json",
+          "url": "/api/measurements/$customerId/$tag?from=${__timeFrom:date}&to=${__timeTo:date}&maxPoints=800&decimation=lttb",
+          "url_options": { "method": "GET" }
+        }
+      ],
+      "title": "$tag",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "${datasource}" },
+      "description": "The chart next to this panel is not always made of measurements. Over a long window the server answers from the hour or the day roll-up, and every point is then an AVERAGE of that interval - a two-minute excursion inside an hour whose mean is normal is not in the picture. The line looks identical either way, so this panel says which it was. Raw means stored samples. Hour and Day mean averages. truncated=true means the series does not reach the end of the time range.",
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "auto", "cellOptions": { "type": "auto" } }, "mappings": [] },
+        "overrides": []
+      },
+      "gridPos": { "h": 9, "w": 6, "x": 18, "y": 1 },
+      "id": 3,
+      "options": { "cellHeight": "sm", "footer": { "show": false }, "showHeader": true },
+      "targets": [
+        {
+          "columns": [
+            { "selector": "resolution", "text": "Answered from", "type": "string" },
+            { "selector": "decimation", "text": "Thinned by", "type": "string" },
+            { "selector": "count", "text": "Points drawn", "type": "number" },
+            { "selector": "pointsBeforeDecimation", "text": "Points read", "type": "number" },
+            { "selector": "truncated", "text": "Cut short", "type": "boolean" }
+          ],
+          "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "${datasource}" },
+          "filters": [],
+          "format": "table",
+          "global_query_id": "",
+          "parser": "backend",
+          "refId": "A",
+          "root_selector": "",
+          "source": "url",
+          "type": "json",
+          "url": "/api/measurements/$customerId/$tag?from=${__timeFrom:date}&to=${__timeTo:date}&maxPoints=800&decimation=lttb",
+          "url_options": { "method": "GET" }
+        }
+      ],
+      "title": "What answered this chart",
+      "type": "table"
+    }
+  ],
+  "preload": false,
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": ["tag-historian"],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "label": "Data source",
+        "multi": false,
+        "name": "datasource",
+        "options": [],
+        "query": "yesoreyeram-infinity-datasource",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "current": { "text": "", "value": "" },
+        "description": "Your account id. GET /api/customers/me returns it as customerId, or read it off the Settings page in the Tag Historian app. It is in the URL path of every measurement query, so nothing on this dashboard draws until it is filled in.",
+        "hide": 0,
+        "label": "Customer ID",
+        "name": "customerId",
+        "options": [{ "selected": true, "text": "", "value": "" }],
+        "query": "",
+        "skipUrlSync": false,
+        "type": "textbox"
+      },
+      {
+        "current": {},
+        "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "${datasource}" },
+        "definition": "GET /api/tags",
+        "description": "Every tag on the account. One row of panels is drawn per selected tag. This list refreshes on dashboard load only - it is deliberately NOT on the query path, because /api/tags is rate limited far more tightly than the measurement reads are.",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Tag",
+        "multi": true,
+        "name": "tag",
+        "options": [],
+        "query": {
+          "infinityQuery": {
+            "columns": [{ "selector": "tagName", "text": "tag", "type": "string" }],
+            "filters": [],
+            "format": "table",
+            "parser": "backend",
+            "refId": "variable",
+            "root_selector": "tags",
+            "source": "url",
+            "type": "json",
+            "url": "/api/tags?take=1000",
+            "url_options": { "method": "GET" }
+          },
+          "query": "",
+          "queryType": "infinity"
+        },
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "utc",
+  "title": "Tag Historian",
+  "uid": "tag-historian-starter",
+  "version": 1,
+  "weekStart": ""
+}

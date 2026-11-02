@@ -33,3 +33,15 @@ the sums again with the `X-RateLimit-Limit` header the API sends.
 
 Moving off InfluxDB? See [`../influxdb-migration/`](../influxdb-migration/) for
 copying your history across first.
+
+**`tag-historian.json`** — the starter dashboard for any tag, not only Home
+Assistant's: a **Tag** dropdown and a row of panels per tag, each beside a small
+panel saying whether the line is stored readings or averages. Import it the same
+way and fill in **Customer ID**.
+
+**`tag-historian-datasource.yaml`** — the same Infinity data source as a
+provisioning file, for a self-hosted Grafana (Grafana Cloud has no provisioning
+directory; set the fields in its data source screen instead). Put it in
+`/etc/grafana/provisioning/datasources/`, install the Infinity plugin first, and
+set `TAG_HISTORIAN_API_KEY` on the Grafana service: the key is read from the
+server's environment and never belongs in the file.

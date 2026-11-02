@@ -1,0 +1,66 @@
+# Tag Historian as an Infinity data source, provisioned.
+#
+# For SELF-HOSTED Grafana only. Grafana Cloud has no provisioning directory —
+# set the same six fields through Connections > Data sources > Infinity there,
+# which the Grafana guide walks through: https://taghistorian.com/docs/grafana
+#
+# Published as grafana/tag-historian-datasource.yaml in
+# github.com/softi-dev/tag-historian-clients; keep the two identical.
+#
+# Drop this in /etc/grafana/provisioning/datasources/ (or mount it there in
+# Docker) and restart Grafana. The Infinity plugin has to be installed first:
+#
+#   grafana-cli plugins install yesoreyeram-infinity-datasource
+#
+# THE KEY IS NOT IN THIS FILE AND MUST NOT BE PUT IN IT. Grafana expands $VAR
+# from its own process environment when it reads a provisioning file, so set
+# TAG_HISTORIAN_API_KEY on the Grafana service and leave the line below alone.
+# A key committed to a provisioning file is a key in your git history.
+#
+# Make it a READ-scoped key: Settings > API keys in the app, Create New Key,
+# and set the Scope control to Read. The dialog opens on Write, which is what
+# sending data needs and more than this server should hold. A Grafana
+# server is shared with everyone who can log into it, nothing on a dashboard
+# needs to write, and a Read key is refused the ingest, tag-editing and
+# billing endpoints outright. Check the scope beside an existing key in that
+# list before reusing one; the key an account recovery issues is Admin.
+
+apiVersion: 1
+
+datasources:
+  - name: Tag Historian
+    type: yesoreyeram-infinity-datasource
+    uid: tag-historian
+    # No browser ever talks to the API. Infinity always calls out from the
+    # Grafana SERVER, which is why the key stays server-side and why the API's
+    # CORS allow-list — which does not include your Grafana origin — is not a
+    # problem to be solved.
+    access: proxy
+    # Base URL. The shipped dashboards' queries are relative paths, so this is
+    # the one place the host is written down.
+    #
+    # It is the data source's own url, beside type and access - NOT a key under
+    # jsonData, where this file used to put it. Infinity reads its base URL
+    # from here only; under jsonData it was silently ignored, every relative
+    # query went out without a host, and Infinity refused each one with
+    # "requested URL not allowed". Found by provisioning this file into a
+    # fresh Grafana 12.2.5 with Infinity 4.1.1 (2026-10-17). Applied over a
+    # data source that already had its base URL set, the old file kept
+    # working - the stored url survived - which is how the fault hides.
+    url: https://api.taghistorian.com
+    isDefault: false
+    editable: true
+    jsonData:
+      # Required whenever authentication is configured: Infinity refuses to send
+      # the credential to a host that is not on this list.
+      allowedHosts:
+        - https://api.taghistorian.com
+      auth_method: apiKey
+      apiKeyKey: Authorization
+      apiKeyType: header
+    secureJsonData:
+      # The literal word "Token", a space, then the key. Tag Historian's
+      # authentication handler parses that exact prefix — it is the header
+      # InfluxDB v2 clients send, which is why it exists. "Bearer" is a
+      # different scheme and will not authenticate.
+      apiKeyValue: Token $TAG_HISTORIAN_API_KEY
