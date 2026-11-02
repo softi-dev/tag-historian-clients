@@ -9,11 +9,13 @@ rather than a missing fixture.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import sys
 from unittest.mock import AsyncMock
 
 import pytest
 import pytest_socket
+from homeassistant.core import State
 
 from custom_components.tag_historian.api import (
     ImportAllowance,
@@ -86,6 +88,23 @@ STUB_ACCOUNT = {
 def auto_enable_custom_integrations(enable_custom_integrations):
     """Load custom_components/ for every test in this suite."""
     yield
+
+
+class RecordedState(State):
+    """A state as the recorder hands it back, for the stand-ins of history.py.
+
+    The recorder's ``LazyState`` is a ``State`` whose ``__init__`` never runs
+    ``State.__init__``, so it has no ``domain`` or ``object_id``. A stand-in
+    built from plain ``State`` objects let the import and the backfill read
+    ``state.domain`` for months, and both stopped on the first recorded state
+    of every real installation (tests/test_history.py holds the real one).
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        for name in ("domain", "object_id"):
+            with contextlib.suppress(AttributeError):
+                delattr(self, name)
 
 
 def without_statistics(monkeypatch) -> None:

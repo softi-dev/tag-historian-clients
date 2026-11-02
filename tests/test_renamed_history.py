@@ -112,7 +112,7 @@ from custom_components.tag_historian.repairs import (
     async_create_fix_flow,
 )
 
-from .conftest import make_client, without_statistics
+from .conftest import RecordedState, make_client, without_statistics
 
 COMPONENT = Path(tag_historian.__file__).parent
 CLIENT_PATHS = (
@@ -161,7 +161,7 @@ class Recorder:
 
     def record(self, entity_id: str, value: str, when: datetime) -> None:
         self.states.setdefault(entity_id, []).append(
-            State(entity_id, value, {}, last_changed=when, last_updated=when)
+            RecordedState(entity_id, value, {}, last_changed=when, last_updated=when)
         )
 
     @callback
@@ -170,7 +170,7 @@ class Recorder:
         if self.states.get(new):
             return  # "the new entity_id is already in use": the history stays put
         self.states[new] = [
-            State(new, s.state, s.attributes, s.last_changed, last_updated=s.last_updated)
+            RecordedState(new, s.state, s.attributes, s.last_changed, last_updated=s.last_updated)
             for s in self.states.pop(old, [])
         ]
 

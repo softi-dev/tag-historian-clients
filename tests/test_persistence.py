@@ -46,7 +46,7 @@ from custom_components.tag_historian.forwarder import (
     StateForwarder,
 )
 
-from .conftest import make_client
+from .conftest import RecordedState, make_client
 
 KEY = "tag_historian.test_entry.forwarder"
 POWER = "sensor.house_power"
@@ -100,7 +100,7 @@ class FakeRecorder:
 
     def record(self, entity_id: str, value: str, when: datetime, **attributes: Any) -> None:
         self.states.setdefault(entity_id, []).append(
-            State(entity_id, value, attributes, last_changed=when, last_updated=when)
+            RecordedState(entity_id, value, attributes, last_changed=when, last_updated=when)
         )
 
     async def read(self, hass, entity_id, start, end) -> list[State]:
