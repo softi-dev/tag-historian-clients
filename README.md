@@ -153,16 +153,12 @@ state class, so a meter is a meter in Tag Historian too.
 
 [![Open your Home Assistant instance and open the Tag Historian repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=softi-dev&repository=tag-historian-clients&category=integration)
 
-The button opens this repository in HACS on your own Home Assistant, through
-My Home Assistant, which asks for your Home Assistant's address the first time.
-HACS asks whether to add it as a custom repository: press **Add**, then
-**Download**, and restart Home Assistant.
+Tag Historian is in the HACS default list. In HACS, search for **Tag Historian**,
+press **Download**, and restart Home Assistant.
 
-Without the button:
-
-1. HACS → three-dot menu → **Custom repositories**
-2. Repository: the URL of this repository. Category: **Integration**.
-3. Install **Tag Historian**, then restart Home Assistant.
+The button above is the shortcut: it opens the integration in HACS on your own
+Home Assistant, through My Home Assistant, which asks for your Home Assistant's
+address the first time.
 
 ### By hand
 
