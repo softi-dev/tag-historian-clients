@@ -88,13 +88,16 @@ def make_forwarder(hass: HomeAssistant, entry: MockConfigEntry):
     """
     built: list[StateForwarder] = []
 
-    def _build(_hass, _entry, client, entities=None, min_interval=0) -> StateForwarder:
+    def _build(
+        _hass, _entry, client, entities=None, min_interval=0, power_interval=None
+    ) -> StateForwarder:
         forwarder = StateForwarder(
             _hass,
             _entry,
             client,
             entities if entities is not None else WATCHED,
             min_interval,
+            power_interval=power_interval,
         )
         forwarder.async_start()
         built.append(forwarder)
@@ -1100,3 +1103,108 @@ async def test_a_meters_held_reading_goes_with_the_last_flush_on_shutdown(
 
     assert [value for value, _ in _sent(client)] == ["10.0", "10.1"]
     assert forwarder.stats.dropped_throttled == 0
+
+
+# --------------------------------------------------------------------------
+# Power sensors more often (const.CONF_FAST_POWER)
+# --------------------------------------------------------------------------
+
+POWER_ATTRIBUTES = {"device_class": "power", "state_class": "measurement", "unit_of_measurement": "W"}
+TEMPERATURE_ATTRIBUTES = {"device_class": "temperature", "state_class": "measurement"}
+
+
+def _values_of(client: StubClient, entity: str) -> list[str]:
+    """The values sent for one entity, in order, as the wire carries them."""
+    name = entity.split(".", 1)[1]
+    return [
+        line.split(" value=")[1].split(" ")[0].split(",")[0]
+        for line in client.lines
+        if f"entity_id={name}" in line
+    ]
+
+
+async def test_a_power_sensor_is_sent_more_often_when_asked_and_nothing_else_is(
+    hass: HomeAssistant, entry, make_forwarder, freezer
+) -> None:
+    """Two seconds for a sensor Home Assistant says measures power in W; the minimum for the rest."""
+    client = StubClient()
+    forwarder = make_forwarder(hass, entry, client, min_interval=10, power_interval=2)
+
+    for second, watts in enumerate(["1500", "1510", "4500", "4510", "4520", "4530", "1500"]):
+        hass.states.async_set("sensor.house_power", watts, POWER_ATTRIBUTES)
+        hass.states.async_set("sensor.outdoor_temperature", f"21.{second}", TEMPERATURE_ATTRIBUTES)
+        freezer.tick(timedelta(seconds=1))
+    await hass.async_block_till_done()
+    await _tick(hass, 2)
+
+    # Readings a second apart: every other one of the power sensor's, one of the temperature's.
+    assert _values_of(client, "sensor.house_power") == ["1500.0", "4500.0", "4520.0", "1500.0"]
+    assert _values_of(client, "sensor.outdoor_temperature") == ["21.0"]
+    assert forwarder.stats.dropped_throttled == 3 + 6
+
+
+async def test_without_the_option_a_power_sensor_keeps_the_minimum_interval(
+    hass: HomeAssistant, entry, make_forwarder, freezer
+) -> None:
+    """Off by default: an entry from before the option sends exactly what it sent."""
+    client = StubClient()
+    make_forwarder(hass, entry, client, min_interval=10)
+
+    for watts in ["1500", "4500", "4510", "1500"]:
+        hass.states.async_set("sensor.house_power", watts, POWER_ATTRIBUTES)
+        freezer.tick(timedelta(seconds=3))
+    await hass.async_block_till_done()
+    await _tick(hass, 2)
+
+    assert _values_of(client, "sensor.house_power") == ["1500.0"]
+
+
+@pytest.mark.parametrize(
+    "attributes",
+    [
+        {"device_class": "power", "unit_of_measurement": "VA"},
+        {"device_class": "energy", "unit_of_measurement": "kWh", "state_class": "measurement"},
+        {"unit_of_measurement": "W"},
+        {},
+    ],
+)
+async def test_only_what_home_assistant_calls_power_in_watts_is_sent_more_often(
+    hass: HomeAssistant, entry, make_forwarder, freezer, attributes
+) -> None:
+    """By device class AND unit, never by the entity's name."""
+    client = StubClient()
+    make_forwarder(hass, entry, client, min_interval=10, power_interval=2)
+
+    for value in ["1", "2", "3", "4"]:
+        hass.states.async_set("sensor.house_power", value, attributes)
+        freezer.tick(timedelta(seconds=3))
+    await hass.async_block_till_done()
+    await _tick(hass, 2)
+
+    assert _values_of(client, "sensor.house_power") == ["1.0"]
+
+
+async def test_a_minimum_interval_shorter_than_the_power_interval_is_kept_for_power_sensors(
+    hass: HomeAssistant, entry, make_forwarder, freezer
+) -> None:
+    """The option never makes anything slower."""
+    client = StubClient()
+    make_forwarder(hass, entry, client, min_interval=1, power_interval=2)
+
+    for watts in ["1500", "4500", "4510"]:
+        hass.states.async_set("sensor.house_power", watts, POWER_ATTRIBUTES)
+        freezer.tick(timedelta(seconds=1))
+    await hass.async_block_till_done()
+    await _tick(hass, 2)
+
+    assert _values_of(client, "sensor.house_power") == ["1500.0", "4500.0", "4510.0"]
+
+
+def test_kilowatts_count_as_power_too() -> None:
+    from custom_components.tag_historian.selection import is_power_sensor
+
+    assert is_power_sensor({"device_class": "power", "unit_of_measurement": "kW"})
+    assert is_power_sensor({"device_class": "power", "unit_of_measurement": "W"})
+    assert not is_power_sensor({"device_class": "power", "unit_of_measurement": "BTU/h"})
+    assert not is_power_sensor({"device_class": "power"})
+    assert not is_power_sensor(None)

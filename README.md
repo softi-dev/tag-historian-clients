@@ -204,7 +204,8 @@ Four screens:
    the sun — are not in the list until you tick **Show every entity**, which
    puts every entity in the install back in it, unfiltered. There is also a
    minimum interval, which is how you stop a chatty sensor spending your daily
-   reading allowance.
+   reading allowance, and **Send power sensors more often**, which is off
+   until you tick it ([what it does and costs](#power-sensors-more-often)).
 
    The same screen has **Use my approximate location (about 10 km) for
    outdoor weather from SMHI**, off until you tick it. Ticked, this Home
@@ -400,6 +401,35 @@ choose it.
 `unknown` and `unavailable` are never sent, and never counted as dropped
 either: they are Home Assistant saying it has nothing to report. A gap in the
 chart means exactly that — Tag Historian never stores an invented zero.
+
+### Power sensors more often
+
+**Send power sensors more often** is a box on the Choose screen, off until
+you tick it. Ticked, every selected entity whose device class is `power` and
+whose unit is W or kW is sent at most once every 2 seconds instead of once per
+minimum interval. Everything else keeps the minimum interval. It goes by what
+Home Assistant says the entity is, never by its name: a sensor in VA, an
+energy meter in kWh and a template sensor with no device class are not power
+sensors here. If you have set the minimum interval to 2 seconds or less, the
+box changes nothing, and the review screen says so.
+
+It is for [Loads](https://taghistorian.com/docs/loads) in Tag Historian, which
+finds an appliance - a spa heater, a car charger, a water heater - by the step
+it makes in your house's total power. With a reading every 10 seconds, two
+appliances that draw nearly the same are sometimes taken for each other; with
+one every 2 seconds they are told apart far better. A Tibber Pulse and most
+P1 readers report every second or two, so 2 seconds keeps nearly all of it.
+
+It costs readings, and the review screen does the sum with your own plan's
+numbers before anything is sent. One sensor at one reading every 2 seconds is
+at most 43 200 readings a day; at the default 10 seconds it is at most 8 640.
+The review screen's line reads, for ten entities of which one is a power
+sensor: 9 x 8 640 + 43 200 = 120 960 readings a day at most, and what share of
+your plan's daily allowance that is. "At most" assumes every entity changes
+as often as it is allowed to be sent; a sensor that changes less costs less.
+
+The catch-up after an outage reads a power sensor back at the same 2 seconds.
+The history import does not: it keeps the minimum interval for every entity.
 
 ## When you rename an entity
 

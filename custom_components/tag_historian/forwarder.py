@@ -116,6 +116,7 @@ from .line_protocol import (
     state_to_value,
 )
 from .renames import registry_ids, removed_since, renamed_since
+from .selection import is_power_sensor
 
 # How long to wait after a connection error before trying again. Shorter than
 # any Retry-After the API sends, because a socket error is usually a blip. The
@@ -262,6 +263,7 @@ class StateForwarder:
         stats: ForwarderStats | None = None,
         store: Store[dict[str, Any]] | None = None,
         send_as: dict[str, str] | None = None,
+        power_interval: int | None = None,
     ) -> None:
         self.hass = hass
         self.entry = entry
@@ -273,6 +275,10 @@ class StateForwarder:
         # they belong to instead of starting a second tag (renames.py).
         self._send_as = dict(send_as or {})
         self._min_interval = min_interval
+        # The interval of a power sensor (device class power, W or kW) when
+        # the user asked for those to be sent more often (CONF_FAST_POWER);
+        # None when they did not. Never longer than the minimum interval.
+        self._power_interval = power_interval
         # Where the buffer goes when the forwarder stops, and where the
         # acknowledged watermark is kept across a restart. None only in tests
         # that are about something else; Home Assistant always gets one.
@@ -784,6 +790,23 @@ class StateForwarder:
     # Live readings
     # ------------------------------------------------------------------
 
+    def _interval_for(self, entity_id: str, state: State | None = None) -> float:
+        """The fewest seconds between two readings of this entity.
+
+        The minimum interval - or, for a power sensor when the user ticked
+        "send power sensors more often", the shorter of it and the power
+        interval. ``state`` is the reading being judged; without one (the
+        backfill, whose recorded states may carry no attributes) the entity is
+        judged by what Home Assistant says of it now.
+        """
+        if self._power_interval is None or self._power_interval >= self._min_interval:
+            return self._min_interval
+        if state is None:
+            state = self.hass.states.get(entity_id)
+        if state is not None and is_power_sensor(state.attributes):
+            return self._power_interval
+        return self._min_interval
+
     @callback
     def _handle_state_change(self, event: Event[EventStateChangedData]) -> None:
         """Encode one state change, or decide not to."""
@@ -812,7 +835,7 @@ class StateForwarder:
         last = self._last_sent.get(entity_id)
         if (
             last is not None
-            and (stamp - last).total_seconds() < self._min_interval
+            and (stamp - last).total_seconds() < self._interval_for(entity_id, new_state)
         ):
             # Deliberate. The daily quota counts every point SENT, including
             # ones deadband compression later discards server-side, so the only
@@ -1157,6 +1180,9 @@ class StateForwarder:
         # against, and neither has its first recorded one here.
         last = throttle_from
         found = 0
+        # A power sensor sent more often live is caught up at the same pace,
+        # so a gap an outage left has the readings Loads looks for.
+        interval = self._interval_for(entity_id)
         # Where the recorder keeps this entity's history: its id - or, for one
         # renamed onto an id that had a history of its own while the rename
         # waits to be settled, its old id up to the rename (history.py).
@@ -1178,9 +1204,9 @@ class StateForwarder:
                 value = recorded_state_value(state.entity_id, state.state)
                 if value is None:
                     continue
-                if last is not None and stamp - last < self._min_interval:
+                if last is not None and stamp - last < interval:
                     continue
-                if end_is_held and end - stamp < self._min_interval:
+                if end_is_held and end - stamp < interval:
                     continue
                 last = stamp
 

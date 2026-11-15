@@ -54,12 +54,14 @@ from .const import (
     ATTR_STATISTICS,
     CONF_API_KEY,
     CONF_ENTITIES,
+    CONF_FAST_POWER,
     CONF_HOST,
     CONF_IMPORT_ON_SETUP,
     CONF_MIN_INTERVAL,
     CONF_SHARE_LOCATION,
     DEFAULT_MIN_INTERVAL_SECONDS,
     DOMAIN,
+    FAST_POWER_INTERVAL_SECONDS,
     LOGGER,
     MAX_IMPORT_DAYS,
     SERVICE_IMPORT_HISTORY,
@@ -290,6 +292,11 @@ async def async_setup_entry(
         async_get_stats(hass, entry.entry_id),
         store=_store(hass, STORAGE_KEY_FORWARDER, entry),
         send_as=renamed,
+        # Power sensors more often, when asked for. An entry from before the
+        # option has no such key and keeps one interval for everything.
+        power_interval=(
+            FAST_POWER_INTERVAL_SECONDS if options.get(CONF_FAST_POWER, False) else None
+        ),
     )
     # What the last run saved - its undelivered readings and how far Tag
     # Historian had acknowledged each entity - goes back in before anything

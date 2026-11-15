@@ -1353,3 +1353,29 @@ def test_which_entities_have_no_statistics_is_one_sentence_wherever_it_is_said()
     }
     for where, text in surfaces.items():
         assert NO_STATISTICS_SENTENCE in text, f"{where} says it some other way"
+
+
+def test_the_readme_says_what_sending_power_sensors_more_often_does_and_costs() -> None:
+    """The README's numbers of the option are the code's, and its label is the screen's."""
+    from custom_components.tag_historian.config_flow import readings_per_day
+    from custom_components.tag_historian.const import (
+        DEFAULT_MIN_INTERVAL_SECONDS,
+        FAST_POWER_INTERVAL_SECONDS,
+    )
+
+    readme = " ".join(README.split())
+    label = TRANSLATIONS["config"]["step"]["select"]["data"]["fast_power"]
+    assert label == TRANSLATIONS["options"]["step"]["select"]["data"]["fast_power"]
+    assert f"**{label}** is a box on the Choose screen, off until you tick it." in readme
+
+    fast, usual = FAST_POWER_INTERVAL_SECONDS, DEFAULT_MIN_INTERVAL_SECONDS
+    assert f"at most once every {fast} seconds instead of once per minimum interval" in readme
+    spaced = lambda n: f"{n:,}".replace(",", " ")  # noqa: E731 - one line, used four times below
+    one_fast = readings_per_day(1, fast)
+    one_usual = readings_per_day(1, usual)
+    assert f"One sensor at one reading every {fast} seconds is at most {spaced(one_fast)} readings a day" in readme
+    assert f"at the default {usual} seconds it is at most {spaced(one_usual)}" in readme
+    ten = readings_per_day(10, usual, power_count=1, power_interval=fast)
+    assert f"9 x {spaced(one_usual)} + {spaced(one_fast)} = {spaced(ten)} readings a day at most" in readme
+    # What it does not cover is said too.
+    assert "The history import does not: it keeps the minimum interval for every entity." in readme

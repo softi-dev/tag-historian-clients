@@ -23,6 +23,17 @@ CONF_API_KEY: Final = "api_key"
 CONF_ENTITIES: Final = "entities"
 CONF_MIN_INTERVAL: Final = "min_interval"
 
+# Whether power sensors are sent more often than the minimum interval: an
+# entity whose device class is power and whose unit is W or kW gets
+# FAST_POWER_INTERVAL_SECONDS between its readings instead (when that is
+# shorter). OFF by default, because it spends more of the daily reading
+# allowance - the review screen shows how much, with the account's own
+# numbers. It is for Tag Historian's Loads, which finds an appliance by the
+# step it makes in the house's total power, and tells two appliances of
+# nearly the same size apart far better from a reading every two seconds than
+# from one every ten.
+CONF_FAST_POWER: Final = "fast_power"
+
 # Whether renaming an entity in Home Assistant renames its tag in Tag Historian
 # too, so the history goes on under the new name (renames.py). Off by default:
 # the user is asked through a repair card instead.
@@ -194,6 +205,14 @@ SIGNAL_IMPORT_UPDATED: Final = "tag_historian_import_updated_{entry_id}"
 # computed from their own MeasurementsPerDayLimit and their own selection size,
 # not from this constant.
 DEFAULT_MIN_INTERVAL_SECONDS: Final = 10
+
+# Seconds between two readings of the same POWER sensor when the user has
+# ticked CONF_FAST_POWER. A mechanic, not a plan number: a Tibber Pulse and
+# most P1 readers report every one to two seconds, so two seconds keeps
+# nearly every reading they make, and the cost is shown before it is taken
+# (config_flow.readings_per_day). Never longer than the minimum interval: a
+# user who set that below two seconds keeps it for power sensors too.
+FAST_POWER_INTERVAL_SECONDS: Final = 2
 
 # Quota is a billing surface, not a live metric. Fifteen minutes is often
 # enough to catch "you are at your limit" long before the user goes looking.

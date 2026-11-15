@@ -41,8 +41,9 @@ so the ranking can be tested without a running Home Assistant.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
+from typing import Any
 
 from .line_protocol import tag_name_for_entity
 
@@ -234,6 +235,27 @@ class Proposal:
             f"{count} {CATEGORY_LABELS.get(category, category)}"
             for category, count in ordered
         )
+
+
+# The units a power sensor's shorter interval applies to (const.CONF_FAST_POWER).
+# Watts and kilowatts only: a sensor in VA, var or BTU/h has the device class
+# of something else, or a unit Tag Historian's Loads does not turn into kWh.
+POWER_UNITS = frozenset({"W", "kW"})
+
+
+def is_power_sensor(attributes: Mapping[str, Any] | None) -> bool:
+    """Whether a state's attributes say it measures power in W or kW.
+
+    By what Home Assistant says the entity IS - its device class and unit -
+    never by its name: "sensor.house_power" in kWh is a meter, and
+    "sensor.pulse" in W is a power sensor.
+    """
+    if not attributes:
+        return False
+    return (
+        str(attributes.get("device_class") or "") == "power"
+        and str(attributes.get("unit_of_measurement") or "") in POWER_UNITS
+    )
 
 
 def _classify(facts: EntityFacts) -> tuple[int, str]:

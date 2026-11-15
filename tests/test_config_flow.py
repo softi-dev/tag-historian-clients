@@ -24,6 +24,7 @@ from custom_components.tag_historian.config_flow import CONF_SHOW_ALL
 from custom_components.tag_historian.const import (
     CONF_API_KEY,
     CONF_ENTITIES,
+    CONF_FAST_POWER,
     CONF_FOLLOW_RENAMES,
     CONF_HOST,
     CONF_IMPORT_ON_SETUP,
@@ -154,6 +155,9 @@ async def test_happy_path_creates_an_entry(hass: HomeAssistant, house) -> None:
         # Off unless asked for: renaming a tag is a decision about the
         # customer's data, offered on a repair card instead (renames.py).
         CONF_FOLLOW_RENAMES: False,
+        # Off unless ticked: more readings of the power sensors spend more of
+        # the daily allowance.
+        CONF_FAST_POWER: False,
         # Off unless ticked: the location is the user's to give (place.py).
         CONF_SHARE_LOCATION: False,
         # On unless unticked: the entry's first setup brings the history
@@ -628,6 +632,7 @@ async def test_options_flow_changes_the_selection(hass: HomeAssistant, house) ->
         CONF_ENTITIES: ["sensor.outdoor_temperature", "binary_sensor.heat_pump_running"],
         CONF_MIN_INTERVAL: 30,
         CONF_FOLLOW_RENAMES: False,
+        CONF_FAST_POWER: False,
         CONF_SHARE_LOCATION: False,
         CONF_SEND_AS: {},
     }
@@ -1323,3 +1328,83 @@ async def test_the_options_flow_shows_the_location_choice_as_it_is_and_can_untic
         await hass.async_block_till_done()
 
     assert entry.options[CONF_SHARE_LOCATION] is False
+
+
+# --------------------------------------------------------------------------
+# Power sensors more often (const.CONF_FAST_POWER)
+# --------------------------------------------------------------------------
+
+
+def test_the_sum_counts_power_sensors_at_their_own_pace() -> None:
+    """The review screen's arithmetic, by itself."""
+    from custom_components.tag_historian.config_flow import power_clause, readings_per_day
+
+    # Ten entities at ten seconds: 8 640 readings a day each.
+    assert readings_per_day(10, 10) == 86_400
+    # One of them a power sensor at two seconds: 43 200 for it, 8 640 for the other nine.
+    assert readings_per_day(10, 10, power_count=1, power_interval=2) == 9 * 8_640 + 43_200
+    # A minimum interval already as short changes nothing, and nothing is ever counted slower.
+    assert readings_per_day(10, 2, power_count=1, power_interval=2) == 10 * 43_200
+    assert readings_per_day(10, 1, power_count=1, power_interval=2) == 10 * 86_400
+    assert readings_per_day(3, 10, power_count=5, power_interval=2) == 3 * 43_200
+
+    assert power_clause(0, asked=False) == ""
+    assert power_clause(1, asked=True) == ", and one every 2 seconds for the 1 power sensor,"
+    assert power_clause(3, asked=True) == ", and one every 2 seconds for each of the 3 power sensors,"
+    assert "changes nothing here" in power_clause(0, asked=True)
+
+
+async def test_review_shows_what_sending_power_sensors_more_often_costs(
+    hass: HomeAssistant, house
+) -> None:
+    """The cost is on the screen, in the account's own numbers, before anything is sent."""
+    result = await _start(hass, make_client())
+    assert result["description_placeholders"]["power_interval"] == "2"
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {
+            CONF_ENTITIES: ["sensor.house_power", "sensor.phone_battery"],
+            CONF_MIN_INTERVAL: 10,
+            CONF_FAST_POWER: True,
+        },
+    )
+
+    placeholders = result["description_placeholders"]
+    # sensor.house_power is power in W: 43 200 a day at two seconds. The battery: 8 640.
+    assert placeholders["readings_per_day"] == "51 840"
+    assert placeholders["power_clause"] == ", and one every 2 seconds for the 1 power sensor,"
+    assert placeholders["daily_limit"] == "120 000"
+    assert placeholders["percent"] == "43"
+
+
+async def test_the_option_is_kept_and_reaches_the_forwarder(hass: HomeAssistant, house) -> None:
+    """Ticked on the way in, it is an option of the entry, and the forwarder is built with it."""
+    result = await _start(hass, make_client())
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {
+            CONF_ENTITIES: ["sensor.house_power", "sensor.outdoor_temperature"],
+            CONF_MIN_INTERVAL: 10,
+            CONF_FAST_POWER: True,
+        },
+    )
+    with patch(SETUP_PATH, return_value=True):
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+        result = await _bring_history(hass, result)
+        await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["options"][CONF_FAST_POWER] is True
+
+    # And the options flow opens with it ticked.
+    entry = hass.config_entries.async_entries(DOMAIN)[0]
+    with patch(CLIENT_PATH, return_value=make_client()), patch(SETUP_PATH, return_value=True):
+        result = await _open_choose(hass, entry)
+        defaults = {
+            str(key): key.default()
+            for key in result["data_schema"].schema
+            if hasattr(key, "default") and callable(key.default)
+        }
+        assert defaults[CONF_FAST_POWER] is True
+        hass.config_entries.options.async_abort(result["flow_id"])
