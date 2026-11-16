@@ -23,6 +23,19 @@ CONF_API_KEY: Final = "api_key"
 CONF_ENTITIES: Final = "entities"
 CONF_MIN_INTERVAL: Final = "min_interval"
 
+# Whether power sensors are sent more often than the minimum interval: an
+# entity whose device class is power and whose unit is W or kW gets
+# FAST_POWER_INTERVAL_SECONDS between its readings instead (when that is
+# shorter). OFF by default, because it spends more of the daily reading
+# allowance - the review screen shows how much, with the account's own
+# numbers - and it never takes effect where its worst case would be above the
+# plan's daily allowance: not on the review screen, and not later at runtime
+# (fast_power.py). It is for Tag Historian's Loads, which finds an appliance by the
+# step it makes in the house's total power, and tells two appliances of
+# nearly the same size apart far better from a reading every two seconds than
+# from one every ten.
+CONF_FAST_POWER: Final = "fast_power"
+
 # Whether renaming an entity in Home Assistant renames its tag in Tag Historian
 # too, so the history goes on under the new name (renames.py). Off by default:
 # the user is asked through a repair card instead.
@@ -195,6 +208,14 @@ SIGNAL_IMPORT_UPDATED: Final = "tag_historian_import_updated_{entry_id}"
 # not from this constant.
 DEFAULT_MIN_INTERVAL_SECONDS: Final = 10
 
+# Seconds between two readings of the same POWER sensor when the user has
+# ticked CONF_FAST_POWER. A mechanic, not a plan number: a Tibber Pulse and
+# most P1 readers report every one to two seconds, so two seconds keeps
+# nearly every reading they make, and the cost is shown before it is taken
+# (fast_power.readings_per_day). Never longer than the minimum interval: a
+# user who set that below two seconds keeps it for power sensors too.
+FAST_POWER_INTERVAL_SECONDS: Final = 2
+
 # Quota is a billing surface, not a live metric. Fifteen minutes is often
 # enough to catch "you are at your limit" long before the user goes looking.
 QUOTA_UPDATE_INTERVAL_MINUTES: Final = 15
@@ -219,6 +240,10 @@ ISSUE_WRITE_FORBIDDEN: Final = "write_forbidden"
 ISSUE_SERVICE_UNAVAILABLE: Final = "service_unavailable"
 ISSUE_ENTITY_RENAMED: Final = "entity_renamed"
 ISSUE_BRING_YEARS: Final = "bring_years"
+# "Send power sensors more often" is ticked, and no longer fits the plan's daily
+# readings allowance, so the power sensors are held at the minimum interval
+# (fast_power.py).
+ISSUE_FAST_POWER: Final = "fast_power_does_not_fit"
 
 # How long to wait before asking Tag Historian again to rename a tag after it
 # could not be reached or could not take the request. A rename that waits

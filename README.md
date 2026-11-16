@@ -204,7 +204,8 @@ Four screens:
    the sun — are not in the list until you tick **Show every entity**, which
    puts every entity in the install back in it, unfiltered. There is also a
    minimum interval, which is how you stop a chatty sensor spending your daily
-   reading allowance.
+   reading allowance, and **Send power sensors more often**, which is off
+   until you tick it ([what it does and costs](#power-sensors-more-often)).
 
    The same screen has **Use my approximate location (about 10 km) for
    outdoor weather from SMHI**, off until you tick it. Ticked, this Home
@@ -401,6 +402,53 @@ choose it.
 either: they are Home Assistant saying it has nothing to report. A gap in the
 chart means exactly that — Tag Historian never stores an invented zero.
 
+### Power sensors more often
+
+**Send power sensors more often** is a box on the Choose screen, off until
+you tick it. Ticked, every selected entity whose device class is `power` and
+whose unit is W or kW is sent at most once every 2 seconds instead of once per
+minimum interval. Everything else keeps the minimum interval. It goes by what
+Home Assistant says the entity is, never by its name: a sensor in VA, an
+energy meter in kWh and a template sensor with no device class are not power
+sensors here. If you have set the minimum interval to 2 seconds or less, the
+box changes nothing, and the review screen says so.
+
+It is for [Loads](https://taghistorian.com/docs/loads) in Tag Historian, which
+finds an appliance - a spa heater, a car charger, a water heater - by the step
+it makes in your house's total power. With a reading every 10 seconds, two
+appliances that draw nearly the same are sometimes taken for each other; with
+one every 2 seconds they are told apart far better. A Tibber Pulse and most
+P1 readers report every second or two, so 2 seconds keeps nearly all of it.
+
+It costs readings, and the review screen does the sum with your own plan's
+numbers before anything is sent. One sensor at one reading every 2 seconds is
+at most 43 200 readings a day; at the default 10 seconds it is at most 8 640.
+The review screen's line reads, for ten entities of which one is a power
+sensor: 9 x 8 640 + 43 200 = 120 960 readings a day at most, and what share of
+your plan's daily allowance that is. "At most" assumes every entity changes
+as often as it is allowed to be sent; a sensor that changes less costs less.
+
+The box never takes your selection past your plan's daily reading allowance.
+When that sum is more than your plan allows a day, the box does not take
+effect, and the review screen says so in numbers - for example "At 2 seconds
+these sensors could send up to 60 480 readings a day; your plan allows
+55 000." The line above it is then the sum at the minimum interval, which is
+what will be sent, and the box is saved unticked. Unticking entities later does
+not bring 2 seconds back by itself: to use it, untick some entities under
+Configure and tick the box again.
+
+The same sum is done again while the integration runs - when it starts, once
+Home Assistant has finished starting, and every time it reads your plan's
+numbers (every 15 minutes) - because the selection and the plan can change
+after the screen: your plan's allowance goes down, or a selected entity
+becomes a power sensor. When the sum no longer fits, every entity is sent at
+the minimum interval, power sensors too; the log says so once and a card in
+**Settings → Repairs** says why, with the numbers. When it fits again, the
+power sensors go back to every 2 seconds by themselves and the card goes away.
+
+The catch-up after an outage reads a power sensor back at the same 2 seconds.
+The history import does not: it keeps the minimum interval for every entity.
+
 ## When you rename an entity
 
 A series is named after its entity's id: `sensor.energy_meter` is stored as the
@@ -513,6 +561,7 @@ Everything below that needs your attention shows up in **Settings → Repairs**.
 | Today's reading allowance is spent | Holds the newest readings — through a restart too — and waits exactly as long as the API asks; it does not hammer a closed door. What no longer fits in the buffer meanwhile is over the allowance: counted, not sent later |
 | Tag Historian is busy, cannot check your key just now, or cannot be reached | Holds the readings and tries again. When Tag Historian answered (busy, or unable to take them just now: `429` or `503`), it waits as long as the API asks (half a minute when the answer names no wait, as a gateway's `503` may not), and raises a card only if that goes on for half an hour; that card never mentions your plan, because this is not about your plan. When nothing answers at all (your network or the host is down), or a gateway in front of Tag Historian answers `502` or `504` in its place, there is no wait to honour: it tries again half a minute after each failed attempt and raises no card; the `last_error` attribute on the **readings dropped** sensor says why. A key Tag Historian could not check (it answers `503` with reason `sign_in_unavailable`) is not a key it refused (`401`), and the integration never asks you for a new one for it |
 | Your account cannot write yet | Shows Tag Historian's own explanation, word for word |
+| **Send power sensors more often** no longer fits your plan's daily reading allowance | Sends every entity at the minimum interval, power sensors too, and says why on a card with the numbers; goes back to every 2 seconds by itself when the sum fits again - see [Power sensors more often](#power-sensors-more-often) |
 | An entity you send was renamed | Follows it and keeps its readings arriving in its history; renames the series in Tag Historian if you switched that on, or asks you on a card - see [When you rename an entity](#when-you-rename-an-entity) |
 
 ## When the connection or Home Assistant goes away

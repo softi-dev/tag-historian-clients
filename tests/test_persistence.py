@@ -137,7 +137,7 @@ def started(hass: HomeAssistant, entry: MockConfigEntry):
     """Build, restore and start forwarders on the entry's store; stop them all after."""
     built: list[StateForwarder] = []
 
-    async def _start(client, entities=None, min_interval=0) -> StateForwarder:
+    async def _start(client, entities=None, min_interval=0, power_interval=None) -> StateForwarder:
         forwarder = StateForwarder(
             hass,
             entry,
@@ -145,6 +145,7 @@ def started(hass: HomeAssistant, entry: MockConfigEntry):
             entities if entities is not None else [POWER],
             min_interval,
             store=Store(hass, STORAGE_VERSION, KEY),
+            power_interval=power_interval,
         )
         await forwarder.async_restore()
         forwarder.async_start()
@@ -272,6 +273,28 @@ async def test_after_a_crash_during_an_outage_the_outage_is_read_back(
     )
     assert forwarder.stats.backfilled == 2
     assert forwarder.stats.sent == 2
+
+
+async def test_a_gap_is_read_back_at_the_power_sensors_own_pace(
+    hass: HomeAssistant, started, hass_storage, recorder
+) -> None:
+    """A power sensor sent every two seconds live is caught up every two seconds too."""
+    _seed(hass_storage, clean=False, sending_ok=False, acked={POWER: T0.timestamp()}, queue=[])
+    hass.states.async_set(POWER, "1400", {"device_class": "power", "unit_of_measurement": "W"})
+    recorder.record(POWER, "1400", T0)  # the acknowledged reading itself
+    recorder.record(POWER, "1500", T0 + timedelta(seconds=1))  # inside two seconds
+    recorder.record(POWER, "4500", T0 + timedelta(seconds=3))
+    recorder.record(POWER, "4510", T0 + timedelta(seconds=5))
+    recorder.record(POWER, "1500", T0 + timedelta(seconds=6))  # inside two seconds of the last
+
+    client = StubClient()
+    await started(client, min_interval=10, power_interval=2)
+    await hass.async_block_till_done()
+    await _tick(hass, 2)
+
+    assert client.values[:2] == ["4500.0", "4510.0"], (
+        "with one interval for everything only a reading ten seconds on would have been read back"
+    )
 
 
 async def test_a_gap_that_only_held_throttled_readings_stays_empty(

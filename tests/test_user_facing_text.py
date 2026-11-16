@@ -27,6 +27,7 @@ driven here too - the real flow, the real placeholders, the real schema.
 from __future__ import annotations
 
 import ast
+import dataclasses
 import inspect
 import json
 import re
@@ -45,7 +46,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components import tag_historian
-from custom_components.tag_historian import config_flow, renames, repairs
+from custom_components.tag_historian import config_flow, fast_power, renames, repairs
 from custom_components.tag_historian.api import (
     QuotaSnapshot,
     TagHistorianClient,
@@ -56,6 +57,7 @@ from custom_components.tag_historian.config_flow import CONF_SHOW_ALL, CONF_TRIM
 from custom_components.tag_historian.const import (
     CONF_API_KEY,
     CONF_ENTITIES,
+    CONF_FAST_POWER,
     CONF_HOST,
     CONF_MIN_INTERVAL,
     DOCS_URL,
@@ -70,7 +72,7 @@ from custom_components.tag_historian.const import (
 from custom_components.tag_historian.forwarder import INFLIGHT_WAIT_SECONDS
 from custom_components.tag_historian.importer import NO_STATISTICS_SENTENCE
 
-from .conftest import STUB_ACCOUNT, make_client
+from .conftest import STUB_ACCOUNT, STUB_QUOTA, make_client
 
 TRANSLATIONS = json.loads(
     (
@@ -263,6 +265,9 @@ async def test_every_issue_string_gets_the_placeholders_it_asks_for(
     repairs.async_maybe_raise_unavailable_issue(hass, entry, 3600)
     renames.async_raise_renamed_issue(hass, entry, "sensor.energy", "sensor.energy_2", merge=False)
     repairs.async_raise_bring_years_issue(hass, entry)
+    fast_power.async_raise_fast_power_issue(
+        hass, entry, fast_power.FastPowerSum(3, 10, 1, 55_000)
+    )
 
     registry = ir.async_get(hass)
     raised = [
@@ -270,7 +275,7 @@ async def test_every_issue_string_gets_the_placeholders_it_asks_for(
         for issue in registry.issues.values()
         if issue.domain == DOMAIN
     ]
-    assert len(raised) == 6, "every card this integration can show"
+    assert len(raised) == 7, "every card this integration can show"
 
     for issue in raised:
         supplied = set(issue.translation_placeholders or {})
@@ -289,7 +294,11 @@ async def test_every_issue_string_gets_the_placeholders_it_asks_for(
             f"{issue.translation_key} is handed {supplied - wanted} that nothing prints"
         )
         # And it renders.
-        render_issue(issue)
+        text = render_issue(issue)
+        # The usual house has one power sensor: no count before a plural noun
+        # ("the 1 power sensors") on this card.
+        if issue.translation_key == fast_power.ISSUE_FAST_POWER:
+            assert not re.search(r"\d+ (power sensors|selected entities)", text), text
 
 
 def _strings_in(node: ast.AST) -> set[str]:
@@ -734,6 +743,49 @@ async def test_the_screen_that_does_have_something_to_lose_still_says_so(
     text = audit_step(section, review).casefold()
     assert "do not fit" in text
     assert "refused and lost" in text
+
+
+async def test_the_review_says_in_numbers_when_power_sensors_more_often_does_not_fit(
+    hass: HomeAssistant, house
+) -> None:
+    """The owner's sentence, with the account's numbers, on the screen as rendered.
+
+    sensor.house_power at two seconds and sensor.outdoor_temperature at ten:
+    43 200 + 8 640 = 51 840 at most, against a plan that allows 45 000.
+    """
+    hass.states.async_set(
+        "sensor.house_power",
+        "1500",
+        {"device_class": "power", "state_class": "measurement", "unit_of_measurement": "W"},
+    )
+    quota = dataclasses.replace(STUB_QUOTA, measurements_per_day_limit=45_000)
+    with patch(FLOW_CLIENT_PATH, return_value=make_client(quota=quota)), patch(
+        SETUP_PATH, return_value=True
+    ):
+        result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": SOURCE_USER})
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], CREDENTIALS)
+        review = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {
+                CONF_ENTITIES: ["sensor.house_power", "sensor.outdoor_temperature"],
+                CONF_MIN_INTERVAL: 10,
+                CONF_FAST_POWER: True,
+            },
+        )
+        hass.config_entries.flow.async_abort(result["flow_id"])
+
+    assert review["step_id"] == "review"
+    text = " ".join(audit_step("config", review).split())
+    assert (
+        "At one reading every 10 seconds that is at most 17 280 readings a day, about 38% of your"
+        " plan's 45 000." in text
+    )
+    assert (
+        "At 2 seconds these sensors could send up to 51 840 readings a day; your plan allows"
+        " 45 000." in text
+    )
+    assert "To use it, untick some entities under Configure and tick the box again." in text
+    assert "{" not in text
 
 
 async def test_the_picker_describes_the_list_it_actually_offers(
@@ -1353,3 +1405,39 @@ def test_which_entities_have_no_statistics_is_one_sentence_wherever_it_is_said()
     }
     for where, text in surfaces.items():
         assert NO_STATISTICS_SENTENCE in text, f"{where} says it some other way"
+
+
+def test_the_readme_says_what_sending_power_sensors_more_often_does_and_costs() -> None:
+    """The README's numbers of the option are the code's, and its label is the screen's."""
+    from custom_components.tag_historian.const import (
+        DEFAULT_MIN_INTERVAL_SECONDS,
+        FAST_POWER_INTERVAL_SECONDS,
+    )
+    from custom_components.tag_historian.fast_power import readings_per_day
+
+    readme = " ".join(README.split())
+    label = TRANSLATIONS["config"]["step"]["select"]["data"]["fast_power"]
+    assert label == TRANSLATIONS["options"]["step"]["select"]["data"]["fast_power"]
+    assert f"**{label}** is a box on the Choose screen, off until you tick it." in readme
+
+    fast, usual = FAST_POWER_INTERVAL_SECONDS, DEFAULT_MIN_INTERVAL_SECONDS
+    assert f"at most once every {fast} seconds instead of once per minimum interval" in readme
+    spaced = lambda n: f"{n:,}".replace(",", " ")  # noqa: E731 - one line, used four times below
+    one_fast = readings_per_day(1, fast)
+    one_usual = readings_per_day(1, usual)
+    assert f"One sensor at one reading every {fast} seconds is at most {spaced(one_fast)} readings a day" in readme
+    assert f"at the default {usual} seconds it is at most {spaced(one_usual)}" in readme
+    ten = readings_per_day(10, usual, power_count=1, power_interval=fast)
+    assert f"9 x {spaced(one_usual)} + {spaced(one_fast)} = {spaced(ten)} readings a day at most" in readme
+    # What it does not cover is said too.
+    assert "The history import does not: it keeps the minimum interval for every entity." in readme
+    # And the rule it keeps, in the review screen's own words: three entities,
+    # one of them a power sensor, is the README's example.
+    three = readings_per_day(3, usual, power_count=1, power_interval=fast)
+    assert (
+        f"At {fast} seconds these sensors could send up to {spaced(three)} readings a day; "
+        f"your plan allows" in readme
+    )
+    assert "to use it, untick some entities under Configure and tick the box again." in readme
+    assert "the box does not take effect" in readme
+    assert "the power sensors go back to every 2 seconds by themselves" in readme

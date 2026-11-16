@@ -39,7 +39,7 @@ PLAN_LIMIT_IN_PROSE = re.compile(r"(?<![\d/.])\b\d+\s+(?:tags?|series)\b", re.IG
 # Any numeric literal long enough to be a reading allowance or a storage
 # quota. The two below are mechanics, not plan values, and each earns its
 # place here or the test fails:
-#   86400 - seconds in a day, config_flow's readings-per-day arithmetic;
+#   86400 - seconds in a day, fast_power's readings-per-day arithmetic;
 #   10000 - MAX_QUEUE_LENGTH, the buffer bound during an outage, and so
 #           the bound on what is saved to .storage across a restart.
 # Adding a number to this allowlist is the review surface: if it came out of

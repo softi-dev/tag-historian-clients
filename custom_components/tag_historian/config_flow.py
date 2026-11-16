@@ -89,6 +89,7 @@ from .const import (
     ATTR_STATISTICS,
     CONF_API_KEY,
     CONF_ENTITIES,
+    CONF_FAST_POWER,
     CONF_FOLLOW_RENAMES,
     CONF_HOST,
     CONF_IMPORT_ON_SETUP,
@@ -100,8 +101,10 @@ from .const import (
     DEFAULT_MIN_INTERVAL_SECONDS,
     DIALOG_TIMEOUT_SECONDS,
     DOMAIN,
+    FAST_POWER_INTERVAL_SECONDS,
     MAX_IMPORT_DAYS,
 )
+from .fast_power import FastPowerSum, fast_power_sum
 from .line_protocol import tag_name_for_entity
 from .renames import own_tag_since, send_as
 from .selection import (
@@ -170,17 +173,43 @@ def collect_entity_facts(hass: HomeAssistant) -> list[EntityFacts]:
     return facts
 
 
-def readings_per_day(entity_count: int, min_interval: int) -> int:
-    """Worst-case readings a selection can produce in a day.
+def power_clause(power_count: int, asked: bool) -> str:
+    """What the review screens say of the power sensors, between "every N seconds" and "that is at most".
 
-    Worst case, not typical: it assumes every selected entity changes at least
-    as often as the minimum interval allows. Understating this number would
-    turn the review screen into false reassurance, which is the one thing a
-    quota screen must not be.
+    Empty when the option is off, or when it does not fit (``fast_power_note``
+    says that instead). When it is on and nothing selected is a power sensor,
+    or the minimum interval is already as short, that is said too: a ticked
+    box that changes nothing should not look as if it did.
     """
-    if min_interval <= 0:
-        return 0
-    return entity_count * (86400 // min_interval)
+    if not asked:
+        return ""
+    if power_count == 0:
+        return (
+            " (\"Send power sensors more often\" is ticked, and changes nothing here: nothing"
+            " selected is a power sensor in W or kW with a longer interval than that)"
+        )
+    which = "the 1 power sensor" if power_count == 1 else f"each of the {power_count} power sensors"
+    return f", and one every {FAST_POWER_INTERVAL_SECONDS} seconds for {which},"
+
+
+def fast_power_note(total: FastPowerSum, asked: bool) -> str:
+    """The paragraph the review screens add when the option does not fit the plan.
+
+    Empty unless it was ticked and its sum is above the daily allowance - then
+    the box cannot take effect, and the screen says so in the account's own
+    numbers (fast_power.py). The line above it is the sum at the minimum
+    interval, which is what will be sent.
+    """
+    if not asked or total.fits:
+        return ""
+    return (
+        f"\n\n\"Send power sensors more often\" does not fit your plan. At"
+        f" {FAST_POWER_INTERVAL_SECONDS} seconds these sensors could send up to"
+        f" {_spaced(total.fast)} readings a day; your plan allows {_spaced(total.daily_limit)}."
+        f" Submitted as it is, the box is saved unticked and every entity, power sensors too, is"
+        f" sent at most once every {total.min_interval} seconds. To use it, untick some entities"
+        f" under Configure and tick the box again."
+    )
 
 
 class SelectionStepsMixin:
@@ -202,6 +231,13 @@ class SelectionStepsMixin:
     _show_everything: bool = False
     _selection_touched: bool = False
     _follow_renames: bool = False
+    # Off until the user ticks it: more readings of the power sensors spend
+    # more of the daily allowance (const.CONF_FAST_POWER).
+    _fast_power: bool = False
+    # Whether that fits the plan's daily allowance, as the review screen last
+    # said (fast_power.FastPowerSum.fits). What is saved is what that screen
+    # said would happen: the box, only when it fits.
+    _fast_power_fits: bool = True
     # Off until the user ticks it: a location is theirs to give (place.py).
     _share_location: bool = False
     # Entities renamed in Home Assistant whose readings still go under their
@@ -236,6 +272,7 @@ class SelectionStepsMixin:
             self._selected = list(user_input[CONF_ENTITIES])
             self._min_interval = int(user_input[CONF_MIN_INTERVAL])
             self._follow_renames = bool(user_input.get(CONF_FOLLOW_RENAMES, False))
+            self._fast_power = bool(user_input.get(CONF_FAST_POWER, False))
             self._share_location = bool(user_input.get(CONF_SHARE_LOCATION, False))
             self._selection_touched = True
             asked_for_everything = bool(user_input.get(CONF_SHOW_ALL, False))
@@ -293,6 +330,9 @@ class SelectionStepsMixin:
                     CONF_FOLLOW_RENAMES, default=self._follow_renames
                 ): bool,
                 vol.Required(
+                    CONF_FAST_POWER, default=self._fast_power
+                ): bool,
+                vol.Required(
                     CONF_SHARE_LOCATION, default=self._share_location
                 ): bool,
             }
@@ -312,6 +352,7 @@ class SelectionStepsMixin:
                 "preselected": str(len(default)),
                 "breakdown": self._proposal.breakdown(default) or "nothing yet",
                 "did_not_fit": str(self._proposal.did_not_fit),
+                "power_interval": str(FAST_POWER_INTERVAL_SECONDS),
             },
         )
 
@@ -321,14 +362,27 @@ class SelectionStepsMixin:
 
     def _review_placeholders(self) -> dict[str, str]:
         """The sums both review screens print, recomputed from the submission."""
-        per_day = readings_per_day(len(self._selected), self._min_interval)
         daily_limit = self._quota.measurements_per_day_limit
+        # The power sensors among what was submitted, when they are to be
+        # sent more often and that is in fact more often than the rest - and
+        # whether that fits the plan's daily allowance. When it does not, the
+        # box cannot take effect: the sum shown is the one at the minimum
+        # interval, and the entry is saved with the box off (fast_power.py).
+        total = (
+            fast_power_sum(self.hass, self._selected, self._min_interval, daily_limit)
+            if self._fast_power
+            else FastPowerSum(len(self._selected), self._min_interval, 0, daily_limit)
+        )
+        self._fast_power_fits = total.fits
+        per_day = total.fast if total.fits else total.normal
         percent = round(per_day * 100 / daily_limit) if daily_limit else 0
         return {
             "selected": str(len(self._selected)),
             "new_tags": str(self._new_tag_count(self._selected)),
             "tags_available": str(self._quota.tags_available),
             "min_interval": str(self._min_interval),
+            "power_clause": power_clause(total.power_count, self._fast_power and total.fits),
+            "fast_power_note": fast_power_note(total, self._fast_power),
             "readings_per_day": f"{per_day:,}".replace(",", " "),
             "daily_limit": f"{daily_limit:,}".replace(",", " "),
             "percent": str(percent),
@@ -565,6 +619,7 @@ class TagHistorianConfigFlow(SelectionStepsMixin, ConfigFlow, domain=DOMAIN):
                     CONF_ENTITIES: self._selected,
                     CONF_MIN_INTERVAL: self._min_interval,
                     CONF_FOLLOW_RENAMES: self._follow_renames,
+                    CONF_FAST_POWER: self._fast_power and self._fast_power_fits,
                     CONF_SHARE_LOCATION: self._share_location,
                     CONF_IMPORT_ON_SETUP: bool(user_input.get(CONF_IMPORT_ON_SETUP, True)),
                 },
@@ -678,6 +733,7 @@ class TagHistorianOptionsFlow(SelectionStepsMixin, OptionsFlow):
             entry.options.get(CONF_MIN_INTERVAL, DEFAULT_MIN_INTERVAL_SECONDS)
         )
         self._follow_renames = bool(entry.options.get(CONF_FOLLOW_RENAMES, False))
+        self._fast_power = bool(entry.options.get(CONF_FAST_POWER, False))
         self._share_location = bool(entry.options.get(CONF_SHARE_LOCATION, False))
         self._send_as = send_as(entry.options)
 
@@ -710,6 +766,7 @@ class TagHistorianOptionsFlow(SelectionStepsMixin, OptionsFlow):
             CONF_ENTITIES: self._selected,
             CONF_MIN_INTERVAL: self._min_interval,
             CONF_FOLLOW_RENAMES: self._follow_renames,
+            CONF_FAST_POWER: self._fast_power and self._fast_power_fits,
             CONF_SHARE_LOCATION: self._share_location,
             # Kept for the entities still selected: a rename waiting to be
             # confirmed is not undone by changing something else. An
