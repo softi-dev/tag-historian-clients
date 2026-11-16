@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -1337,7 +1338,8 @@ async def test_the_options_flow_shows_the_location_choice_as_it_is_and_can_untic
 
 def test_the_sum_counts_power_sensors_at_their_own_pace() -> None:
     """The review screen's arithmetic, by itself."""
-    from custom_components.tag_historian.config_flow import power_clause, readings_per_day
+    from custom_components.tag_historian.config_flow import power_clause
+    from custom_components.tag_historian.fast_power import readings_per_day
 
     # Ten entities at ten seconds: 8 640 readings a day each.
     assert readings_per_day(10, 10) == 86_400
@@ -1408,3 +1410,129 @@ async def test_the_option_is_kept_and_reaches_the_forwarder(hass: HomeAssistant,
         }
         assert defaults[CONF_FAST_POWER] is True
         hass.config_entries.options.async_abort(result["flow_id"])
+
+
+def _quota_allowing(per_day: int) -> QuotaSnapshot:
+    """STUB_QUOTA with another daily readings allowance."""
+    return dataclasses.replace(STUB_QUOTA, measurements_per_day_limit=per_day)
+
+
+async def test_review_says_plainly_when_power_sensors_more_often_does_not_fit(
+    hass: HomeAssistant, house
+) -> None:
+    """Above the plan's daily allowance the box cannot take effect, and the screen says so.
+
+    sensor.house_power at two seconds is 43 200 a day, the other two at ten
+    seconds 8 640 each: 60 480 at most, against a plan that allows 55 000.
+    """
+    result = await _start(hass, make_client(quota=_quota_allowing(55_000)))
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {
+            CONF_ENTITIES: [
+                "sensor.house_power",
+                "sensor.phone_battery",
+                "sensor.outdoor_temperature",
+            ],
+            CONF_MIN_INTERVAL: 10,
+            CONF_FAST_POWER: True,
+        },
+    )
+
+    assert result["step_id"] == "review"
+    placeholders = result["description_placeholders"]
+    # The sum shown is the one that will be sent: everything at ten seconds.
+    assert placeholders["readings_per_day"] == "25 920"
+    assert placeholders["percent"] == "47"
+    assert placeholders["power_clause"] == ""
+    note = placeholders["fast_power_note"]
+    assert (
+        "At 2 seconds these sensors could send up to 60 480 readings a day; "
+        "your plan allows 55 000. Untick some entities or keep 10 seconds." in note
+    )
+    assert "the box is saved unticked" in note
+
+    with patch(SETUP_PATH, return_value=True):
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+        result = await _bring_history(hass, result)
+        await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    # What is saved is what the screen said would happen.
+    assert result["options"][CONF_FAST_POWER] is False
+
+
+async def test_review_counts_the_power_sensors_when_they_fit_exactly(
+    hass: HomeAssistant, house
+) -> None:
+    """At the allowance to the reading it fits, and the share is shown as before."""
+    result = await _start(hass, make_client(quota=_quota_allowing(43_200 + 8_640)))
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {
+            CONF_ENTITIES: ["sensor.house_power", "sensor.phone_battery"],
+            CONF_MIN_INTERVAL: 10,
+            CONF_FAST_POWER: True,
+        },
+    )
+
+    placeholders = result["description_placeholders"]
+    assert placeholders["readings_per_day"] == "51 840"
+    assert placeholders["percent"] == "100"
+    assert placeholders["power_clause"] == ", and one every 2 seconds for the 1 power sensor,"
+    assert placeholders["fast_power_note"] == ""
+
+    with patch(SETUP_PATH, return_value=True):
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+        result = await _bring_history(hass, result)
+        await hass.async_block_till_done()
+    assert result["options"][CONF_FAST_POWER] is True
+
+
+async def test_the_options_flow_keeps_the_rule_too(hass: HomeAssistant, house) -> None:
+    """Configure does the same sum: a selection grown past the allowance saves the box off."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data=CREDENTIALS,
+        options={
+            CONF_ENTITIES: ["sensor.house_power"],
+            CONF_MIN_INTERVAL: 10,
+            CONF_FAST_POWER: True,
+        },
+    )
+    entry.add_to_hass(hass)
+    client = make_client(quota=_quota_allowing(55_000))
+    with patch(CLIENT_PATH, return_value=client), patch(SETUP_PATH, return_value=True):
+        result = await _open_choose(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {
+                CONF_ENTITIES: [
+                    "sensor.house_power",
+                    "sensor.phone_battery",
+                    "sensor.outdoor_temperature",
+                ],
+                CONF_MIN_INTERVAL: 10,
+                CONF_FAST_POWER: True,
+            },
+        )
+        assert "60 480" in result["description_placeholders"]["fast_power_note"]
+        result = await hass.config_entries.options.async_configure(result["flow_id"], {})
+        await hass.async_block_till_done()
+
+    assert entry.options[CONF_FAST_POWER] is False
+
+
+def test_the_sum_fits_only_inside_the_allowance() -> None:
+    """FastPowerSum.fits, by itself: the boundary, a box that changes nothing, a missing limit."""
+    from custom_components.tag_historian.fast_power import FastPowerSum
+
+    # One power sensor and nine others at ten seconds: 120 960 at most.
+    assert FastPowerSum(10, 10, 1, 120_960).fits
+    assert not FastPowerSum(10, 10, 1, 120_959).fits
+    # Nothing it would send faster: nothing about it can fail to fit, even over the limit.
+    assert FastPowerSum(10, 10, 0, 1).fits
+    # A limit the account did not state is not a plan to fit in.
+    assert not FastPowerSum(1, 10, 1, 0).fits
+    assert FastPowerSum(10, 10, 1, 1).normal == 86_400
+    assert FastPowerSum(10, 10, 1, 1).fast == 120_960

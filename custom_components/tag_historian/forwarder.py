@@ -277,7 +277,9 @@ class StateForwarder:
         self._min_interval = min_interval
         # The interval of a power sensor (device class power, W or kW) when
         # the user asked for those to be sent more often (CONF_FAST_POWER);
-        # None when they did not. Never longer than the minimum interval.
+        # None when they did not, or while their sum does not fit the plan's
+        # daily allowance (fast_power.FastPowerGuard, through
+        # set_power_interval). Never longer than the minimum interval.
         self._power_interval = power_interval
         # Where the buffer goes when the forwarder stops, and where the
         # acknowledged watermark is kept across a restart. None only in tests
@@ -789,6 +791,16 @@ class StateForwarder:
     # ------------------------------------------------------------------
     # Live readings
     # ------------------------------------------------------------------
+
+    @callback
+    def set_power_interval(self, power_interval: int | None) -> None:
+        """Send power sensors every ``power_interval`` seconds from now on, or at the minimum interval (None).
+
+        For fast_power.FastPowerGuard, which keeps the option inside the plan's
+        daily allowance. A reading already held is sent as it is; only what
+        arrives from now on, and the next catch-up, is judged by the new pace.
+        """
+        self._power_interval = power_interval
 
     def _interval_for(self, entity_id: str, state: State | None = None) -> float:
         """The fewest seconds between two readings of this entity.

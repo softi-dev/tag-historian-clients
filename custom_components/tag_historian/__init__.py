@@ -61,7 +61,6 @@ from .const import (
     CONF_SHARE_LOCATION,
     DEFAULT_MIN_INTERVAL_SECONDS,
     DOMAIN,
-    FAST_POWER_INTERVAL_SECONDS,
     LOGGER,
     MAX_IMPORT_DAYS,
     SERVICE_IMPORT_HISTORY,
@@ -70,6 +69,7 @@ from .const import (
     STORAGE_VERSION,
 )
 from .coordinator import QuotaCoordinator
+from .fast_power import FastPowerGuard, async_clear_fast_power_issue
 from .forwarder import ForwarderStats, StateForwarder
 from .importer import STOP_HOURS_UNSUPPORTED, HistoryImporter, ImportAlreadyRunning
 from .place import async_propose_place, async_propose_time_zone
@@ -292,12 +292,17 @@ async def async_setup_entry(
         async_get_stats(hass, entry.entry_id),
         store=_store(hass, STORAGE_KEY_FORWARDER, entry),
         send_as=renamed,
-        # Power sensors more often, when asked for. An entry from before the
-        # option has no such key and keeps one interval for everything.
-        power_interval=(
-            FAST_POWER_INTERVAL_SECONDS if options.get(CONF_FAST_POWER, False) else None
-        ),
     )
+    # Power sensors more often, when asked for and only while the sum fits the
+    # plan's daily readings allowance (fast_power.py): the guard sets the
+    # forwarder's power interval now, before the catch-up is read back, and
+    # again whenever the plan or the states change. An entry from before the
+    # option has no such key and keeps one interval for everything.
+    if options.get(CONF_FAST_POWER, False):
+        guard = FastPowerGuard(hass, entry, forwarder, coordinator, selected, min_interval)
+        entry.async_on_unload(guard.async_start())
+    else:
+        async_clear_fast_power_issue(hass, entry)
     # What the last run saved - its undelivered readings and how far Tag
     # Historian had acknowledged each entity - goes back in before anything
     # new arrives: under each entity's id as it is now, for one renamed since,
@@ -469,6 +474,7 @@ async def async_remove_entry(
     async_clear_write_issues(hass, entry)
     async_clear_renamed_issues(hass, entry)
     async_clear_bring_years_issue(hass, entry)
+    async_clear_fast_power_issue(hass, entry)
     # The counters survive a reload on purpose; they must not survive the
     # account being removed and re-added, which is a different account's worth
     # of history as far as anybody reading them is concerned.
