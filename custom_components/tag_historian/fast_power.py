@@ -162,8 +162,6 @@ def async_raise_fast_power_issue(
         translation_key=ISSUE_FAST_POWER,
         translation_placeholders={
             "power_interval": str(FAST_POWER_INTERVAL_SECONDS),
-            "selected": str(total.selected),
-            "power_count": str(total.power_count),
             "readings_per_day": _spaced(total.fast),
             "daily_limit": _spaced(total.daily_limit),
             "min_interval": str(total.min_interval),

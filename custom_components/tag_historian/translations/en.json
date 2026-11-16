@@ -240,7 +240,7 @@
     },
     "fast_power_does_not_fit": {
       "title": "Sending power sensors more often no longer fits your plan",
-      "description": "\"Send power sensors more often\" is ticked, but at {power_interval} seconds the {selected} selected entities could send up to {readings_per_day} readings a day, and your plan allows {daily_limit}. So for now every entity, the {power_count} power sensors too, is sent at most once every {min_interval} seconds.\n\nThis happens when the plan's allowance goes down or a selected entity becomes a power sensor after you chose. The power sensors go back to every {power_interval} seconds by themselves, and this card goes away, as soon as the sum fits again. To make it fit, untick some entities under Configure; to stop it, untick \"Send power sensors more often\" there and keep {min_interval} seconds."
+      "description": "\"Send power sensors more often\" is ticked, but at {power_interval} seconds your selected entities could send up to {readings_per_day} readings a day, and your plan allows {daily_limit}. So for now every entity, power sensors too, is sent at most once every {min_interval} seconds.\n\nThis happens when the plan's allowance goes down or a selected entity becomes a power sensor after you chose. The power sensors go back to every {power_interval} seconds by themselves, and this card goes away, as soon as the sum fits again. To make it fit, untick some entities under Configure; to stop it, untick \"Send power sensors more often\" there and keep {min_interval} seconds."
     }
   },
   "exceptions": {

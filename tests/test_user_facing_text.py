@@ -294,7 +294,11 @@ async def test_every_issue_string_gets_the_placeholders_it_asks_for(
             f"{issue.translation_key} is handed {supplied - wanted} that nothing prints"
         )
         # And it renders.
-        render_issue(issue)
+        text = render_issue(issue)
+        # The usual house has one power sensor: no count before a plural noun
+        # ("the 1 power sensors") on this card.
+        if issue.translation_key == fast_power.ISSUE_FAST_POWER:
+            assert not re.search(r"\d+ (power sensors|selected entities)", text), text
 
 
 def _strings_in(node: ast.AST) -> set[str]:
@@ -778,8 +782,9 @@ async def test_the_review_says_in_numbers_when_power_sensors_more_often_does_not
     )
     assert (
         "At 2 seconds these sensors could send up to 51 840 readings a day; your plan allows"
-        " 45 000. Untick some entities or keep 10 seconds." in text
+        " 45 000." in text
     )
+    assert "To use it, untick some entities under Configure and tick the box again." in text
     assert "{" not in text
 
 
@@ -1433,6 +1438,6 @@ def test_the_readme_says_what_sending_power_sensors_more_often_does_and_costs() 
         f"At {fast} seconds these sensors could send up to {spaced(three)} readings a day; "
         f"your plan allows" in readme
     )
-    assert f"Untick some entities or keep {usual} seconds." in readme
+    assert "to use it, untick some entities under Configure and tick the box again." in readme
     assert "the box does not take effect" in readme
     assert "the power sensors go back to every 2 seconds by themselves" in readme

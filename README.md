@@ -432,9 +432,10 @@ The box never takes your selection past your plan's daily reading allowance.
 When that sum is more than your plan allows a day, the box does not take
 effect, and the review screen says so in numbers - for example "At 2 seconds
 these sensors could send up to 60 480 readings a day; your plan allows
-55 000. Untick some entities or keep 10 seconds." The line above it is then
-the sum at the minimum interval, which is what will be sent, and the box is
-saved unticked.
+55 000." The line above it is then the sum at the minimum interval, which is
+what will be sent, and the box is saved unticked. Unticking entities later does
+not bring 2 seconds back by itself: to use it, untick some entities under
+Configure and tick the box again.
 
 The same sum is done again while the integration runs - when it starts, once
 Home Assistant has finished starting, and every time it reads your plan's

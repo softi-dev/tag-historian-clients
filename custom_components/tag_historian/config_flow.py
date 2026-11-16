@@ -206,9 +206,9 @@ def fast_power_note(total: FastPowerSum, asked: bool) -> str:
         f"\n\n\"Send power sensors more often\" does not fit your plan. At"
         f" {FAST_POWER_INTERVAL_SECONDS} seconds these sensors could send up to"
         f" {_spaced(total.fast)} readings a day; your plan allows {_spaced(total.daily_limit)}."
-        f" Untick some entities or keep {total.min_interval} seconds. Submitted as it is, the box"
-        f" is saved unticked and every entity, power sensors too, is sent at most once every"
-        f" {total.min_interval} seconds."
+        f" Submitted as it is, the box is saved unticked and every entity, power sensors too, is"
+        f" sent at most once every {total.min_interval} seconds. To use it, untick some entities"
+        f" under Configure and tick the box again."
     )
 
 

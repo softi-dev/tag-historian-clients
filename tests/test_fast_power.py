@@ -105,8 +105,6 @@ async def test_a_plan_that_no_longer_fits_holds_the_power_sensors_and_says_so_on
         assert issue.translation_key == ISSUE_FAST_POWER
         assert issue.translation_placeholders == {
             "power_interval": "2",
-            "selected": "3",
-            "power_count": "1",
             "readings_per_day": "60 480",
             "daily_limit": "55 000",
             "min_interval": "10",

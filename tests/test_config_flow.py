@@ -1448,9 +1448,10 @@ async def test_review_says_plainly_when_power_sensors_more_often_does_not_fit(
     note = placeholders["fast_power_note"]
     assert (
         "At 2 seconds these sensors could send up to 60 480 readings a day; "
-        "your plan allows 55 000. Untick some entities or keep 10 seconds." in note
+        "your plan allows 55 000." in note
     )
     assert "the box is saved unticked" in note
+    assert "untick some entities under Configure and tick the box again." in note
 
     with patch(SETUP_PATH, return_value=True):
         result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
