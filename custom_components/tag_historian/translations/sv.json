@@ -335,6 +335,7 @@
     "wait_hours_one": "om ungefär en timme",
     "wait_hours_other": "om ungefär {count} timmar",
     "refusal_said": "Tag Historian svarade på frågan: {refusal}",
-    "no_reason_given": "ingen orsak angavs"
+    "no_reason_given": "ingen orsak angavs",
+    "refused_tags_unnamed": "(API:et namngav dem inte)"
   }
 }

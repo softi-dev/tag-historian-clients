@@ -247,7 +247,7 @@
     "sensor": {
       "history_import": {
         "state": {
-          "idle": "En attente",
+          "idle": "Inactif",
           "running": "En cours",
           "finished": "Terminé",
           "stopped": "Arrêté"
@@ -335,6 +335,7 @@
     "wait_hours_one": "dans une heure environ",
     "wait_hours_other": "dans {count} heures environ",
     "refusal_said": "Interrogé, Tag Historian a répondu : {refusal}",
-    "no_reason_given": "aucune raison donnée"
+    "no_reason_given": "aucune raison donnée",
+    "refused_tags_unnamed": "(l’API ne les a pas nommés)"
   }
 }

@@ -218,7 +218,7 @@
       }
     },
     "bring_years": {
-      "title": "Trae a Tag Historian los años que Home Assistant ya tiene",
+      "title": "Traer a Tag Historian los años que Home Assistant ya tiene",
       "fix_flow": {
         "step": {
           "confirm": {
@@ -335,6 +335,7 @@
     "wait_hours_one": "dentro de una hora, más o menos",
     "wait_hours_other": "dentro de unas {count} horas",
     "refusal_said": "Al preguntarle, Tag Historian respondió: {refusal}",
-    "no_reason_given": "no dio ningún motivo"
+    "no_reason_given": "no dio ningún motivo",
+    "refused_tags_unnamed": "(la API no dijo cuáles)"
   }
 }

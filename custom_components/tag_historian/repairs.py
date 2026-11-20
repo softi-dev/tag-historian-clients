@@ -134,7 +134,7 @@ def async_raise_tag_quota_issue(
     # Prose-scraped from the 422 body, so it can legitimately be empty. Say so
     # rather than rendering an empty bullet list.
     placeholders["refused_tags"] = (
-        ", ".join(refused_tags) if refused_tags else "(the API did not name them)"
+        ", ".join(refused_tags) if refused_tags else words(hass).say("refused_tags_unnamed")
     )
     # Readings, not tags. The card used to describe the tag names as though
     # they were the things that were lost, which understates it by however many

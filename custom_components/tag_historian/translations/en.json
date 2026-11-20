@@ -335,6 +335,7 @@
     "wait_hours_one": "in about an hour",
     "wait_hours_other": "in about {count} hours",
     "refusal_said": "Tag Historian said, when asked: {refusal}",
-    "no_reason_given": "no reason given"
+    "no_reason_given": "no reason given",
+    "refused_tags_unnamed": "(the API did not name them)"
   }
 }

@@ -21,6 +21,7 @@ import ast
 import json
 import re
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from homeassistant.core import HomeAssistant
@@ -29,12 +30,13 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.tag_historian import repairs
 from custom_components.tag_historian.config_flow import power_clause
-from custom_components.tag_historian.const import DOMAIN, ISSUE_DAILY_QUOTA
+from custom_components.tag_historian.const import DOMAIN, ISSUE_DAILY_QUOTA, ISSUE_TAG_QUOTA
 from custom_components.tag_historian.importer import STATUSES
 from custom_components.tag_historian.selection import CATEGORIES, EntityFacts, propose
 from custom_components.tag_historian.words import CATEGORY, async_load_words
 
-from .conftest import TRANSLATIONS_DIR, words_in
+from .conftest import TRANSLATIONS_DIR, make_client, words_in
+from .test_init import CLIENT_PATH, make_entry
 
 COMPONENT = TRANSLATIONS_DIR.parent
 
@@ -212,6 +214,52 @@ def test_the_words_the_code_asks_for_are_the_words_there_are() -> None:
     assert there - wanted == set(), "words nothing says"
 
 
+_TWO_WORDS_RE = re.compile(r"[A-Za-z]{2,} [A-Za-z]{2,}")
+
+
+def _prose_handed_over_as_a_placeholder() -> list[str]:
+    """Every string literal with words in it that the code puts in a placeholder.
+
+    ``say`` and ``counted`` are how words get there; a literal is a sentence
+    in English on a card that is otherwise in the reader's language, and the
+    test above cannot see it because it names no key.
+    """
+
+    def is_placeholders(name: str) -> bool:
+        return name.endswith("placeholders")
+
+    found: list[str] = []
+    for source in COMPONENT.glob("*.py"):
+        handed_over: list[ast.AST] = []
+        for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
+            keyword = isinstance(node, ast.keyword) and is_placeholders(node.arg or "")
+            assigned = isinstance(node, ast.Assign) and any(
+                is_placeholders(getattr(getattr(target, "value", target), "id", ""))
+                for target in node.targets
+            )
+            if keyword or assigned:
+                handed_over.append(node.value)
+            elif isinstance(node, ast.FunctionDef) and is_placeholders(node.name):
+                handed_over += [
+                    inner.value
+                    for inner in ast.walk(node)
+                    if isinstance(inner, ast.Return) and inner.value is not None
+                ]
+        for expression in handed_over:
+            for inner in ast.walk(expression):
+                if (
+                    isinstance(inner, ast.Constant)
+                    and isinstance(inner.value, str)
+                    and _TWO_WORDS_RE.search(inner.value)
+                ):
+                    found.append(f"{source.name}:{inner.lineno} {inner.value!r}")
+    return found
+
+
+def test_no_placeholder_is_a_sentence_written_in_the_code() -> None:
+    assert _prose_handed_over_as_a_placeholder() == []
+
+
 def test_the_states_of_the_import_sensor_are_the_ones_it_can_be_in() -> None:
     states = _load("en")["entity"]["sensor"]["history_import"]["state"]
     assert set(states) == set(STATUSES)
@@ -306,6 +354,43 @@ async def test_home_assistant_serves_the_words_in_the_language_it_is_set_to(
 
     hass.config.language = "pt-BR"
     assert (await async_load_words(hass)).say("wait_minutes_other", count=4) == "em cerca de 4 minutos"
+
+
+async def test_a_card_for_tags_the_api_did_not_name_says_so_in_that_language(
+    hass: HomeAssistant, entry
+) -> None:
+    hass.config.language = "de"
+    await async_load_words(hass)
+
+    repairs.async_raise_tag_quota_issue(hass, entry, [], 60)
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, repairs.issue_id(entry, ISSUE_TAG_QUOTA))
+    assert issue.translation_placeholders["refused_tags"] == "(die API hat sie nicht genannt)"
+
+    repairs.async_raise_tag_quota_issue(hass, entry, ["sensor.a", "sensor.b"], 60)
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, repairs.issue_id(entry, ISSUE_TAG_QUOTA))
+    assert issue.translation_placeholders["refused_tags"] == "sensor.a, sensor.b"
+
+
+async def test_setting_up_an_entry_loads_the_words_a_card_needs(hass: HomeAssistant) -> None:
+    """Nothing here asks for the words: setting the entry up has to have.
+
+    A card is raised from a callback, where the file cannot be read; without
+    the words loaded its sentence would end "which is .".
+    """
+    hass.config.language = "sv"
+    entry = make_entry(hass, ["sensor.house_power"])
+    with patch(CLIENT_PATH, return_value=make_client()):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        repairs.async_raise_daily_quota_issue(hass, entry, 240)
+        issue = ir.async_get(hass).async_get_issue(
+            DOMAIN, repairs.issue_id(entry, ISSUE_DAILY_QUOTA)
+        )
+        assert issue.translation_placeholders == {"when": "om ungefär 4 minuter"}
+
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
 
 
 async def test_a_language_the_integration_does_not_speak_gets_english(hass: HomeAssistant) -> None:
