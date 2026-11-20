@@ -1,0 +1,340 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Se connecter à Tag Historian",
+        "description": "Collez une clé API avec la portée Write. Créez-la dans Tag Historian Explorer, sous Clés API : cliquez sur Créer une clé, donnez-lui un nom et laissez Portée sur Write, valeur avec laquelle la boîte de dialogue s’ouvre. Une clé Read ne peut rien envoyer. La clé est vérifiée auprès de votre compte maintenant ; aucune mesure n’est envoyée tant que vous n’avez pas choisi les entités dont conserver l’historique.",
+        "data": {
+          "host": "Hôte",
+          "api_key": "Clé API"
+        },
+        "data_description": {
+          "host": "N’y touchez pas, sauf si vous faites tourner Tag Historian ailleurs.",
+          "api_key": "La portée doit être Write. Une clé Read peut consulter votre historique, mais elle est refusée quand cette intégration essaie d’y ajouter quelque chose."
+        }
+      },
+      "select": {
+        "title": "Choisir ce dont conserver l’historique",
+        "description": "Votre formule autorise {tag_limit} tags. {tags_in_use} sont déjà utilisés, il en reste {tags_available}.\n\nSur les {entity_count} entités activées dans ce Home Assistant, les {offered_count} de la liste ci-dessous sont celles dont le rôle est de rapporter quelque chose : capteurs, capteurs binaires, nombres, entrées nombre et compteurs, moins celles que Home Assistant marque comme configuration et celles dont la device class fait de leur état une date, une heure ou un nom de catégorie. Les {hidden_count} autres sont des choses que vous commutez, lancez ou consultez, pas des choses qui mesurent. Cochez « Afficher toutes les entités » pour lister les {entity_count} à la place : cette liste-là n’est pas filtrée du tout.\n\nLa liste est établie d’après ce que chaque entité EST, pas d’après ce qu’elle indique à cet instant ; une entité indisponible en ce moment y figure donc quand même.\n\n{preselected} sont cochées au départ : {breakdown}. {did_not_fit} autres méritaient de l’être, mais le quota n’allait pas jusque-là.\n\nRien n’est envoyé avant que vous ayez terminé.\n\nUn capteur de puissance (device class power, en W ou kW) peut être envoyé toutes les {power_interval} secondes au lieu de l’intervalle minimal : cochez « Envoyer les capteurs de puissance plus souvent » ci-dessous.",
+        "data": {
+          "entities": "Entités dont conserver l’historique",
+          "min_interval": "Nombre minimal de secondes entre deux mesures",
+          "show_all": "Afficher toutes les entités",
+          "follow_renames": "Renommer les tags quand les entités sont renommées",
+          "fast_power": "Envoyer les capteurs de puissance plus souvent",
+          "share_approximate_location": "Utiliser ma position approximative (env. 10 km) pour la météo extérieure du SMHI"
+        },
+        "data_description": {
+          "entities": "Une entité coûte un tag. Les capteurs sans device class ni state class sont listés mais laissés décochés, car Home Assistant ne sait rien d’eux, ni dans un sens ni dans l’autre : la plupart sont des capteurs template écrits à la main qui rapportent un nombre, mais quelques-uns rapportent un mot (un mode de la maison resté sur « away », un statut resté sur « idle ») et ceux-là ne stockent rien du tout. Ce qui ne stocke rien est compté sur le capteur « readings dropped » et l’entité y est nommée, si bien qu’une série qui reste vide dit pourquoi. Tout ce que vous avez déjà coché reste dans la liste, quoi qu’il change par ailleurs.",
+          "min_interval": "Les mesures qui arrivent plus tôt que cela après la précédente de la même entité sont ignorées. Votre quota quotidien de mesures est consommé par tout ce qui est envoyé : c’est donc ce réglage qui empêche un capteur bavard de l’épuiser.",
+          "show_all": "Met toutes les entités de l’installation dans la liste, sans filtre. Certaines stockent un 1 ou un 0 : une lumière, un interrupteur, un volet, une automatisation. Les autres ne stockent rien : une serrure, une personne, un mode de climatisation et un lecteur multimédia rapportent tous des mots, et seules les entités dont l’état est un nombre ou un simple marche/arrêt peuvent devenir une mesure.",
+          "follow_renames": "Quand vous renommez une entité dans Home Assistant, son tag est renommé aussi dans Tag Historian, pour que son historique continue sous le nouveau nom. Rien n’est copié : les mesures d’avant restent où elles sont et se lisent sous le nouveau nom. Désactivé : les mesures continuent d’aller dans l’ancien tag, et une carte dans Réparations demande s’il faut le renommer.",
+          "fast_power": "Envoie chaque entité dont la device class est power et dont l’unité est W ou kW plus souvent que l’intervalle minimal ci-dessus ; à quelle fréquence, c’est indiqué en haut de cet écran. C’est fait pour Appareils dans Tag Historian, qui repère un appareil à la marche qu’il produit dans votre puissance totale et distingue bien mieux deux appareils de taille voisine avec davantage de mesures. Cela consomme davantage de votre quota quotidien de mesures : l’écran suivant affiche le total avec vos propres chiffres avant tout envoi, et quand ce total dépasse ce que votre formule autorise par jour, la case reste sans effet. Les autres capteurs gardent l’intervalle minimal, et l’import de l’historique aussi.",
+          "share_approximate_location": "Indique à Tag Historian où se trouve ce Home Assistant, arrondi à environ 10 km avant l’envoi, pour que vos graphiques puissent afficher la température extérieure et les précipitations des stations météo les plus proches du SMHI, l’institut météorologique et hydrologique suédois. Suède uniquement. Ce n’est qu’une proposition : un lieu déjà défini dans les Paramètres de Tag Historian reste tel quel, et c’est là que vous le modifiez ou le supprimez. Désactivé : rien n’est envoyé sur votre position."
+        }
+      },
+      "review": {
+        "title": "Vérifier",
+        "description": "{selected} entités sélectionnées. {new_tags} d’entre elles ont besoin d’un nouveau tag, et votre formule en a {tags_available} de libres : toute la sélection tient.\n\nÀ raison d’une mesure toutes les {min_interval} secondes{power_clause} cela fait au plus {readings_per_day} mesures par jour, soit environ {percent} % des {daily_limit} de votre formule.{fast_power_note}\n\nPlus rien à décider : validez pour terminer."
+      },
+      "review_trim": {
+        "title": "Vérifier : il faut plus de tags que vous n’en avez",
+        "description": "{selected} entités sélectionnées. {new_tags} d’entre elles ont besoin d’un nouveau tag et votre formule en a {tags_available} de libres : {overflow} ne tiennent pas.\n\nÀ raison d’une mesure toutes les {min_interval} secondes{power_clause} cela fait au plus {readings_per_day} mesures par jour, soit environ {percent} % des {daily_limit} de votre formule.{fast_power_note}\n\nSi vous continuez sans réduire la sélection, les mesures des entités qui ont besoin de ces {overflow} tags seront refusées et perdues ; tout le reste continue d’arriver.",
+        "data": {
+          "trim_to_fit": "Réduire la sélection à ce qui tient"
+        },
+        "data_description": {
+          "trim_to_fit": "Retire les entités les moins bien classées qui ont besoin d’un nouveau tag, et seulement celles-là : une entité dont le tag existe déjà ne coûte rien et n’est jamais retirée pour faire de la place. Désactivez pour garder votre sélection et accepter que le surplus soit refusé."
+        }
+      },
+      "history": {
+        "title": "Reprendre l’historique que Home Assistant contient déjà",
+        "description": "Home Assistant contient déjà l’historique des {selected} entités que vous avez choisies, et il peut suivre :\n\n- ses statistiques à long terme : la moyenne, le minimum et le maximum de chaque capteur pour chaque heure, ou l’index et la consommation d’un compteur, conservés aussi longtemps que vit la base de données de Home Assistant, souvent des années ;\n- ce que contient l’enregistreur : chaque mesure des {recorder_days} derniers jours.\n\nCase cochée, les deux partent vers Tag Historian en arrière-plan dès que vous validez, l’historique horaire d’abord. Aucun des deux ne compte dans votre quota quotidien de mesures, et le capteur « Tag Historian history import » montre où il en est. Les capteurs binaires, les entrées nombre et compteur, et les capteurs sans state_class n’ont pas de statistiques à long terme. Leurs mesures enregistrées viennent quand même.\n\nTag Historian reçoit aussi le fuseau horaire de ce Home Assistant, {time_zone}. Les jours, les mois et les heures des alarmes de votre compte sont dans le fuseau horaire du compte, et Tag Historian ne prend {time_zone} pour ce fuseau que si le compte n’en a pas encore : aucun choisi dans les Paramètres de Tag Historian, aucun donné au canal e-mail du titulaire du compte sous Alarmes, et aucun proposé auparavant par un Home Assistant. Il se modifie dans Tag Historian, sous Paramètres.",
+        "data": {
+          "import_on_setup": "Reprendre l’historique que Home Assistant contient déjà"
+        },
+        "data_description": {
+          "import_on_setup": "L’historique horaire aussi loin que Home Assistant le possède, jusqu’à dix ans, puis les mesures de l’enregistreur. Ce que Tag Historian a déjà n’est pas stocké deux fois. Décochée, rien n’est importé maintenant : Configurer, Importer l’historique que Home Assistant contient déjà, le fait quand vous voulez."
+        }
+      },
+      "reauth_confirm": {
+        "title": "Tag Historian a besoin d’une nouvelle clé API",
+        "description": "La clé que cette intégration utilisait n’est plus acceptée. Créez-en une nouvelle dans Tag Historian Explorer (Créer une clé, avec Portée sur Write) et collez-la ici.",
+        "data": {
+          "api_key": "Clé API"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cet hôte n’a pas pu être joint. Vérifiez l’adresse et que Home Assistant peut accéder à Internet.",
+      "key_not_checked": "Tag Historian n’a pas pu vérifier la clé pour l’instant. Il a répondu, l’adresse est donc la bonne, et cela ne dit rien de la clé elle-même. Réessayez dans une minute.",
+      "unavailable": "Cette adresse a répondu, mais a indiqué qu’elle ne peut pas traiter cela pour l’instant. Réessayez dans une minute ; si elle continue de le dire, vérifiez l’adresse.",
+      "unavailable_known_host": "Tag Historian a répondu, mais n’a pas pu le faire pour l’instant. Réessayez dans une minute.",
+      "cannot_connect_known_host": "Tag Historian n’a pas pu être joint pour l’instant. Vérifiez que Home Assistant peut accéder à Internet, puis réessayez dans une minute.",
+      "invalid_auth": "Tag Historian n’a pas accepté cette clé. Vérifiez que vous l’avez copiée en entier et qu’elle n’a pas été révoquée.",
+      "read_only_key": "La portée de cette clé est Read. Elle peut consulter vos données mais pas en ajouter : créez plutôt une clé avec Portée sur Write.",
+      "account_inactive": "Cette clé appartient à un compte qui n’est pas actif. Connectez-vous à Tag Historian Explorer pour voir pourquoi.",
+      "account_blocked": "Tag Historian a refusé la demande pour ce compte. Connectez-vous à Tag Historian Explorer pour voir ce qu’il faut faire.",
+      "email_not_verified": "L’adresse e-mail de ce compte n’a pas été confirmée et le délai de grâce est écoulé : Tag Historian refuse donc les nouvelles données. Confirmez l’adresse depuis l’e-mail d’inscription, puis réessayez.",
+      "select_at_least_one": "Choisissez au moins une entité. Une intégration configurée avec une sélection vide resterait là sans rien stocker et ressemblerait exactement à une intégration qui fonctionne."
+    },
+    "abort": {
+      "already_configured": "Ce compte Tag Historian est déjà configuré. L’ajouter deux fois enverrait chaque mesure deux fois et consommerait deux fois votre quota.",
+      "wrong_account": "Cette clé appartient à un autre compte Tag Historian. Utilisez une clé du compte avec lequel cette intégration a été configurée, ou ajoutez l’autre compte séparément.",
+      "reauth_successful": "Tag Historian a accepté la nouvelle clé.",
+      "no_tags_available": "Votre compte n’a aucun tag libre, et chaque entité choisie en demanderait un : réduire la sélection à ce qui tient ne laisse donc rien dont conserver l’historique. Rien n’a été configuré. Libérez un tag dans Tag Historian Explorer ou passez à une formule supérieure, puis ajoutez de nouveau cette intégration."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Tag Historian",
+        "menu_options": {
+          "choose": "Modifier ce dont vous conservez l’historique",
+          "import_history": "Importer l’historique que Home Assistant contient déjà"
+        }
+      },
+      "select": {
+        "title": "Modifier ce dont vous conservez l’historique",
+        "description": "Votre formule autorise {tag_limit} tags. {tags_in_use} sont déjà utilisés, il en reste {tags_available}.\n\nSur les {entity_count} entités activées dans ce Home Assistant, les {offered_count} de la liste ci-dessous sont celles dont le rôle est de rapporter quelque chose (capteurs, capteurs binaires, nombres, entrées nombre et compteurs), plus tout ce que vous aviez déjà sélectionné. Les {hidden_count} autres sont des choses que vous commutez, lancez ou consultez, pas des choses qui mesurent ; cochez « Afficher toutes les entités » pour lister les {entity_count} à la place, sans filtre.\n\n{preselected} sont cochées en ce moment : {breakdown}. {did_not_fit} autres mériteraient de l’être si le quota allait jusque-là.\n\nDécocher une entité arrête ses nouvelles mesures. L’historique déjà stocké dans Tag Historian n’est pas touché, et le tag non plus : supprimez-le dans Tag Historian Explorer pour libérer la place.\n\nUn capteur de puissance (device class power, en W ou kW) peut être envoyé toutes les {power_interval} secondes au lieu de l’intervalle minimal : cochez « Envoyer les capteurs de puissance plus souvent » ci-dessous.",
+        "data": {
+          "entities": "Entités dont conserver l’historique",
+          "min_interval": "Nombre minimal de secondes entre deux mesures",
+          "show_all": "Afficher toutes les entités",
+          "follow_renames": "Renommer les tags quand les entités sont renommées",
+          "fast_power": "Envoyer les capteurs de puissance plus souvent",
+          "share_approximate_location": "Utiliser ma position approximative (env. 10 km) pour la météo extérieure du SMHI"
+        },
+        "data_description": {
+          "entities": "Une entité coûte un tag. Une entité actuellement indisponible ou inconnue reste dans cette liste et reste sélectionnée : ce sont seulement les mesures qui s’interrompent, pas le choix. Une entité dont l’état est un mot plutôt qu’un nombre ne stocke rien du tout ; celles-là sont comptées et nommées sur le capteur « readings dropped ».",
+          "min_interval": "Les mesures qui arrivent plus tôt que cela après la précédente de la même entité sont ignorées.",
+          "show_all": "Met toutes les entités de l’installation dans la liste, sans filtre, y compris celles qui ne peuvent rien stocker.",
+          "follow_renames": "Quand vous renommez une entité dans Home Assistant, son tag est renommé aussi dans Tag Historian, pour que son historique continue sous le nouveau nom. Rien n’est copié : les mesures d’avant restent où elles sont et se lisent sous le nouveau nom. Désactivé : les mesures continuent d’aller dans l’ancien tag, et une carte dans Réparations demande s’il faut le renommer.",
+          "fast_power": "Envoie chaque entité dont la device class est power et dont l’unité est W ou kW plus souvent que l’intervalle minimal ci-dessus ; à quelle fréquence, c’est indiqué en haut de cet écran. C’est fait pour Appareils dans Tag Historian, qui repère un appareil à la marche qu’il produit dans votre puissance totale et distingue bien mieux deux appareils de taille voisine avec davantage de mesures. Cela consomme davantage de votre quota quotidien de mesures : l’écran suivant affiche le total avec vos propres chiffres avant tout envoi, et quand ce total dépasse ce que votre formule autorise par jour, la case reste sans effet. Les autres capteurs gardent l’intervalle minimal, et l’import de l’historique aussi.",
+          "share_approximate_location": "Indique à Tag Historian où se trouve ce Home Assistant, arrondi à environ 10 km avant l’envoi, pour que vos graphiques puissent afficher la température extérieure et les précipitations des stations météo les plus proches du SMHI, l’institut météorologique et hydrologique suédois. Suède uniquement. Ce n’est qu’une proposition : un lieu déjà défini dans les Paramètres de Tag Historian reste tel quel, et c’est là que vous le modifiez ou le supprimez. Désactivé : rien n’est envoyé sur votre position."
+        }
+      },
+      "review": {
+        "title": "Vérifier",
+        "description": "{selected} entités sélectionnées. {new_tags} d’entre elles ont besoin d’un nouveau tag, et votre formule en a {tags_available} de libres : toute la sélection tient.\n\nÀ raison d’une mesure toutes les {min_interval} secondes{power_clause} cela fait au plus {readings_per_day} mesures par jour, soit environ {percent} % des {daily_limit} de votre formule.{fast_power_note}\n\nPlus rien à décider : validez pour enregistrer."
+      },
+      "review_trim": {
+        "title": "Vérifier : il faut plus de tags que vous n’en avez",
+        "description": "{selected} entités sélectionnées. {new_tags} d’entre elles ont besoin d’un nouveau tag et votre formule en a {tags_available} de libres : {overflow} ne tiennent pas.\n\nÀ raison d’une mesure toutes les {min_interval} secondes{power_clause} cela fait au plus {readings_per_day} mesures par jour, soit environ {percent} % des {daily_limit} de votre formule.{fast_power_note}\n\nSi vous continuez sans réduire la sélection, les mesures des entités qui ont besoin de ces {overflow} tags seront refusées et perdues ; tout le reste continue d’arriver.",
+        "data": {
+          "trim_to_fit": "Réduire la sélection à ce qui tient"
+        },
+        "data_description": {
+          "trim_to_fit": "Retire les entités les moins bien classées qui ont besoin d’un nouveau tag, et seulement celles-là."
+        }
+      },
+      "import_history": {
+        "title": "Importer l’historique que Home Assistant contient",
+        "description": "Envoie à Tag Historian l’historique que Home Assistant contient pour les entités ci-dessous, en deux parties, pour que l’historique de cette machine soit conservé même si la machine ne l’est pas.\n\nD’abord ses statistiques à long terme horaires : la moyenne, le minimum et le maximum d’une grandeur pour chaque heure, ou l’index et la consommation d’un compteur, aussi loin que Home Assistant les possède et jusqu’à dix ans. Dans Tag Historian, c’est de l’historique horaire, marqué comme statistiques de Home Assistant, avec un quota propre : jusqu’à dix ans par tag tous les trente jours. Les capteurs binaires, les entrées nombre et compteur, et les capteurs sans state_class n’ont pas de statistiques à long terme.\n\nEnsuite ce que contient l’enregistreur, avec les horodatages d’origine ; l’enregistreur conserve ici {recorder_days} jours d’états. Les mesures importées ne comptent pas dans votre quota quotidien de mesures. Elles comptent dans votre quota d’import : il reste {remaining} mesures sur {total}, soit {readings_per_day} par jour multipliées par la période de pleine résolution de votre formule, de {window_days} jours, pour tous les imports réunis. Les mesures plus anciennes que cette période sont ignorées, comme tout ce que Tag Historian a déjà : lancer un import deux fois ne stocke donc rien deux fois.\n\nSeul l’historique est importé : les mesures antérieures au moment où l’import commence, antérieures à la première mesure de l’entité que Tag Historian a reçue en direct, et antérieures au début de son premier import. Tout ce qui vient après, ce sont vos données en direct, que cette intégration envoie elle-même, y compris ce qui attend encore d’être envoyé. Quand une mesure enregistrée tombe dans une heure apportée par les statistiques, Tag Historian garde l’heure de la mesure. Une entité renommée dont vous avez traité la carte par « Commencer plutôt un nouveau tag » ou « Les garder séparés » est laissée de côté : son historique reste dans l’ancien tag.\n\nL’import tourne en arrière-plan. Le capteur « Tag Historian history import » montre où il en est, une notification signale quand il est terminé, et après un redémarrage il reprend là où il s’était arrêté.",
+        "data": {
+          "entities": "Entités à importer",
+          "statistics": "Historique horaire issu des statistiques à long terme de Home Assistant",
+          "days": "Jusqu’où remonter"
+        },
+        "data_description": {
+          "entities": "Seules les entités dont vous conservez l’historique sont listées : une entité importée utilise un tag comme une entité envoyée en direct.",
+          "statistics": "Décochez pour n’importer que les mesures que contient l’enregistreur.",
+          "days": "Jours avant aujourd’hui, dix ans au plus. Les mesures ne remontent pas plus loin que la période de pleine résolution de votre formule, quoi qu’indique ce champ."
+        }
+      }
+    },
+    "error": {
+      "select_at_least_one": "Choisissez au moins une entité. Pour arrêter complètement l’envoi, désactivez cette intégration plutôt que de vider la liste : une entrée chargée qui ne stocke rien ressemble exactement à une entrée qui fonctionne.",
+      "import_nothing_selected": "Choisissez au moins une entité à importer."
+    },
+    "abort": {
+      "cannot_connect": "Tag Historian n’a pas pu être joint, cet écran ne peut donc pas vous montrer ce qu’il reste de votre quota. Réessayez dans un instant.",
+      "key_not_checked": "Tag Historian n’a pas pu vérifier la clé de cette intégration pour l’instant, cet écran ne peut donc pas vous montrer ce qu’il reste de votre quota. Cela ne dit rien de la clé elle-même. Réessayez dans une minute.",
+      "unavailable": "Tag Historian a répondu, mais n’a pas pu le faire pour l’instant, cet écran ne peut donc pas vous montrer ce qu’il reste de votre quota. Réessayez dans une minute.",
+      "no_tags_available": "Votre compte n’a aucun tag libre, et chaque entité choisie en demanderait un : réduire la sélection à ce qui tient ne laisse donc rien dont conserver l’historique. Votre sélection actuelle n’a pas été modifiée. Libérez un tag dans Tag Historian Explorer ou passez à une formule supérieure.",
+      "import_started": "Import de l’historique de {entities} entités dans Tag Historian en cours. Suivez-le sur le capteur « Tag Historian history import » ; une notification signale quand il est terminé.",
+      "import_running": "Un import d’historique est déjà en cours pour ce compte. Attendez qu’il se termine : le capteur « Tag Historian history import » montre où il en est.",
+      "import_refused": "Tag Historian n’a pas lancé l’import et a répondu :\n\n{message}",
+      "no_recorder": "L’enregistreur de Home Assistant ne tourne pas, il n’y a donc aucun historique enregistré à importer.",
+      "not_loaded": "Cette entrée Tag Historian ne tourne pas pour l’instant. Attendez qu’elle tourne, puis réessayez.",
+      "key_rejected": "Tag Historian n’accepte plus la clé API de cette intégration. Saisissez-en une nouvelle sur la carte où Home Assistant redemande la clé, puis réessayez.",
+      "import_cannot_connect": "Tag Historian n’a pas pu être joint pour lancer l’import. Réessayez dans un instant.",
+      "import_key_not_checked": "Tag Historian n’a pas pu vérifier la clé de cette intégration pour l’instant, l’import n’a donc pas été lancé. Cela ne dit rien de la clé elle-même. Réessayez dans une minute.",
+      "import_unavailable": "Tag Historian a répondu, mais n’a pas pu lancer l’import pour l’instant. Réessayez dans une minute."
+    }
+  },
+  "issues": {
+    "tag_quota_exceeded": {
+      "title": "Tag Historian a refusé des mesures",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Désélectionner jusqu’à tenir dans votre quota",
+            "description": "Votre compte utilise {tag_count} tags sur {tag_limit} : {dropped_points} mesures ont donc été refusées et perdues. Elles avaient besoin de ces tags, pour lesquels votre formule n’a pas de place : {refused_tags}\n\nTout le reste continue d’être stocké. Décochez des entités ci-dessous jusqu’à ce que la sélection tienne, ou passez à une formule supérieure et laissez-la telle quelle.",
+            "data": {
+              "entities": "Entités dont continuer à conserver l’historique"
+            }
+          }
+        }
+      }
+    },
+    "daily_quota_exceeded": {
+      "title": "Limite quotidienne de mesures de Tag Historian atteinte",
+      "description": "Votre compte a utilisé son quota de mesures pour aujourd’hui : Tag Historian refuse donc les nouvelles données jusqu’à la remise à zéro de la limite, qui aura lieu {when}. Les mesures sont retenues jusque-là, y compris pendant un redémarrage. Si l’attente est longue, les plus anciennes sont abandonnées puis relues dans l’enregistreur de Home Assistant dès que Tag Historian accepte de nouveau les données : elles arrivent donc quand même, et comptent dans le quota du lendemain.\n\nDeux issues : augmentez l’intervalle minimal dans les options de cette intégration pour envoyer moins de mesures, ou passez à une formule au quota plus élevé."
+    },
+    "write_forbidden": {
+      "title": "Tag Historian n’accepte pas les données de ce compte",
+      "description": "Tag Historian a refusé l’écriture et a répondu :\n\n{message}"
+    },
+    "service_unavailable": {
+      "title": "Tag Historian n’accepte pas les données en ce moment",
+      "description": "Les écritures échouent depuis {minutes} minutes : Tag Historian répond qu’il ne peut pas les prendre pour l’instant, parce qu’il est trop occupé ou qu’il ne peut momentanément pas vérifier la clé de cette intégration. Rien n’a changé dans votre compte ni dans la clé. Les mesures sont retenues, y compris pendant un redémarrage, et seront envoyées dès qu’il les acceptera de nouveau ; si cela dure, les plus anciennes sont abandonnées puis relues ensuite dans l’enregistreur de Home Assistant. Vous n’avez rien à faire."
+    },
+    "entity_renamed": {
+      "title": "{old} a été renommée en {new} dans Home Assistant",
+      "fix_flow": {
+        "step": {
+          "rename_choice": {
+            "title": "Garder l’historique de {old} sous son nouveau nom ?",
+            "description": "Home Assistant a renommé {old} en {new}. En attendant, Tag Historian continue de stocker ses mesures dans le tag {old_tag} : l’historique continue et rien n’est perdu.{refusal}\n\nRenommez le tag, et tout son historique, mesures d’avant comprises, se lit désormais comme {new_tag}, et les nouvelles mesures sont stockées sous ce nom. Rien n’est copié : c’est le même historique sous un nouveau nom, et il peut être renommé dans l’autre sens dans Tag Historian Explorer.\n\nOu commencez un nouveau tag, {new_tag}, pour les mesures à partir de maintenant, et laissez l’historique où il est, sous {old_tag}. Cela prend un tag de plus sur votre formule.",
+            "menu_options": {
+              "rename_tag": "Renommer le tag et garder son historique",
+              "new_tag": "Commencer plutôt un nouveau tag"
+            }
+          },
+          "merge_choice": {
+            "title": "Fusionner l’historique de {old} avec {new} ?",
+            "description": "Home Assistant a renommé {old} en {new}, un nom qui a déjà un tag dans Tag Historian : {new_tag}. L’historique de l’entité renommée, d’avant le changement de nom, est dans {old_tag}, et ses mesures continuent d’aller dans {old_tag} jusqu’à ce que vous choisissiez : rien n’est perdu.{refusal}\n\nFusionnez-les, et les deux se lisent comme un seul historique sous {new_tag}, où les nouvelles mesures sont stockées. Quand les deux ont des mesures dans la même heure, les chiffres de cette heure sont calculés à partir des deux, et {old_tag} cesse de compter comme un tag. Rien n’est copié, et la fusion peut être annulée dans Tag Historian Explorer.\n\nOu gardez-les séparés : {old_tag} garde son historique comme un tag à part, et les mesures à partir de maintenant vont dans {new_tag}.",
+            "menu_options": {
+              "merge_tags": "Les fusionner en un seul historique",
+              "keep_apart": "Les garder séparés"
+            }
+          }
+        },
+        "abort": {
+          "carry_unavailable": "Tag Historian n’a pas pu le faire pour l’instant, rien n’a donc été modifié : il n’a pas pu être joint ou n’a pas pris la demande. Si Home Assistant a aussi redemandé la clé de cette intégration, c’est que la clé a été refusée : donnez-lui-en d’abord une nouvelle. En attendant, les mesures continuent d’aller dans l’ancien tag, rien n’est donc perdu. Réessayez plus tard depuis cette carte.",
+          "carry_refused": "Tag Historian a refusé, et rien n’a été modifié. Il a répondu :\n\n{message}"
+        }
+      }
+    },
+    "bring_years": {
+      "title": "Reprendre dans Tag Historian les années que Home Assistant contient déjà",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Reprendre les années que Home Assistant contient déjà",
+            "description": "Cette version de l’intégration peut reprendre l’historique que Home Assistant contient déjà pour chaque entité dont {account} conserve l’historique : d’abord ses statistiques à long terme horaires, aussi loin que Home Assistant les possède et jusqu’à dix ans, puis les mesures que contient l’enregistreur. Dans Tag Historian, elles deviennent l’historique d’avant l’installation de cette intégration, marqué comme statistiques de Home Assistant. Les capteurs binaires, les entrées nombre et compteur, et les capteurs sans state_class n’ont pas de statistiques à long terme.\n\nValidez pour commencer. Cela tourne en arrière-plan (le capteur « Tag Historian history import » montre où il en est, et une notification dit ce qui a été fait) et ne compte pas dans votre quota quotidien de mesures. Ce que Tag Historian a déjà n’est pas stocké deux fois.\n\nCette intégration indique aussi à Tag Historian le fuseau horaire de ce Home Assistant à chaque démarrage. Tag Historian ne le prend que si le compte n’a pas encore de fuseau horaire : aucun choisi dans les Paramètres de Tag Historian, aucun donné au canal e-mail du titulaire du compte sous Alarmes, et aucun proposé auparavant. Les jours, les mois et les heures des alarmes du compte sont dans le fuseau horaire du compte, qui se modifie dans Tag Historian, sous Paramètres."
+          }
+        },
+        "abort": {
+          "not_loaded": "Cette entrée Tag Historian ne tourne pas pour l’instant. Attendez qu’elle tourne, puis réessayez depuis cette carte.",
+          "import_running": "Un import d’historique est déjà en cours pour ce compte. Réessayez depuis cette carte une fois qu’il sera terminé.",
+          "no_recorder": "L’enregistreur de Home Assistant ne tourne pas, il n’y a donc aucun historique à reprendre.",
+          "import_refused": "Tag Historian n’a pas lancé l’import et a répondu :\n\n{message}",
+          "key_rejected": "Tag Historian n’accepte plus la clé API de cette intégration. Saisissez-en une nouvelle sur la carte où Home Assistant redemande la clé, puis réessayez depuis cette carte.",
+          "import_cannot_connect": "Tag Historian n’a pas pu être joint pour lancer l’import. Réessayez depuis cette carte dans un instant.",
+          "import_key_not_checked": "Tag Historian n’a pas pu vérifier la clé de cette intégration pour l’instant, l’import n’a donc pas été lancé. Cela ne dit rien de la clé elle-même. Réessayez depuis cette carte dans une minute.",
+          "import_unavailable": "Tag Historian a répondu, mais n’a pas pu lancer l’import pour l’instant. Réessayez depuis cette carte dans une minute."
+        }
+      }
+    },
+    "fast_power_does_not_fit": {
+      "title": "L’envoi plus fréquent des capteurs de puissance ne tient plus dans votre formule",
+      "description": "« Envoyer les capteurs de puissance plus souvent » est cochée, mais à {power_interval} secondes vos entités sélectionnées pourraient envoyer jusqu’à {readings_per_day} mesures par jour, et votre formule en autorise {daily_limit}. Pour l’instant, chaque entité, capteurs de puissance compris, est donc envoyée au plus une fois toutes les {min_interval} secondes.\n\nCela arrive quand le quota de la formule baisse ou qu’une entité sélectionnée devient un capteur de puissance après votre choix. Les capteurs de puissance reviennent d’eux-mêmes à {power_interval} secondes, et cette carte disparaît, dès que le total tient de nouveau. Pour qu’il tienne, décochez quelques entités sous Configurer ; pour arrêter, décochez-y « Envoyer les capteurs de puissance plus souvent » et gardez {min_interval} secondes."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "history_import": {
+        "state": {
+          "idle": "En attente",
+          "running": "En cours",
+          "finished": "Terminé",
+          "stopped": "Arrêté"
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "not_selected": {
+      "message": "Non sélectionnées pour Tag Historian : {entities}. Ajoutez-les d’abord sous Configurer, Modifier ce dont vous conservez l’historique : une entité importée utilise un tag comme une entité envoyée en direct."
+    },
+    "nothing_selected": {
+      "message": "Cette entrée Tag Historian ne conserve l’historique d’aucune entité, il n’y a donc rien à importer."
+    },
+    "entry_not_loaded": {
+      "message": "Cette entrée Tag Historian ne tourne pas."
+    },
+    "entry_ambiguous": {
+      "message": "Plusieurs comptes Tag Historian sont configurés ici. Indiquez lequel avec config_entry_id."
+    },
+    "no_recorder": {
+      "message": "L’enregistreur de Home Assistant ne tourne pas, il n’y a donc aucun historique enregistré à importer."
+    },
+    "import_running": {
+      "message": "Un import d’historique est déjà en cours pour ce compte."
+    },
+    "import_refused": {
+      "message": "Tag Historian n’a pas lancé l’import : {message}"
+    },
+    "key_rejected": {
+      "message": "Tag Historian n’accepte plus la clé API de cette intégration."
+    },
+    "import_cannot_connect": {
+      "message": "Tag Historian n’a pas pu être joint pour lancer l’import."
+    },
+    "import_key_not_checked": {
+      "message": "Tag Historian n’a pas pu vérifier la clé de cette intégration pour l’instant, l’import n’a donc pas été lancé. Réessayez dans une minute."
+    },
+    "import_unavailable": {
+      "message": "Tag Historian a répondu, mais n’a pas pu lancer l’import pour l’instant. Réessayez dans une minute."
+    }
+  },
+  "services": {
+    "import_history": {
+      "name": "Importer l’historique",
+      "description": "Envoie à Tag Historian l’historique que Home Assistant contient pour des entités dont vous conservez l’historique : d’abord ses statistiques à long terme horaires, sauf si statistics est désactivé, puis les mesures de l’enregistreur avec leurs horodatages d’origine. Les mesures importées comptent dans le quota d’import du compte, pas dans le quota quotidien, et seul l’historique est importé : rien de ce que cette intégration envoie en direct, ou doit encore envoyer.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Compte",
+          "description": "Dans quelle entrée Tag Historian importer. Nécessaire seulement quand plusieurs sont configurées."
+        },
+        "entity_id": {
+          "name": "Entités",
+          "description": "Entités à importer. Laissez vide pour toutes les entités dont cette entrée conserve l’historique."
+        },
+        "statistics": {
+          "name": "Statistiques horaires",
+          "description": "Reprendre d’abord les statistiques à long terme de Home Assistant : l’historique horaire aussi loin qu’il existe, jusqu’à dix ans. Activé sauf si on le désactive."
+        },
+        "days": {
+          "name": "Jours en arrière",
+          "description": "Jusqu’où remonter, dix ans au plus. Les mesures ne remontent pas plus loin que la période de pleine résolution de votre formule. Laissez vide pour remonter aussi loin que chacune le permet."
+        }
+      }
+    }
+  },
+  "common": {
+    "category_energy": "énergie et puissance",
+    "category_climate": "température et humidité",
+    "category_meter": "compteurs et totaux",
+    "category_measurement": "autres mesures",
+    "category_numeric": "autres capteurs numériques",
+    "category_onoff": "états marche/arrêt",
+    "category_helper": "entrées",
+    "category_other": "non présélectionnées",
+    "category_hidden": "affichées seulement avec toutes",
+    "breakdown_nothing": "aucune pour l’instant",
+    "power_clause_none": "(« Envoyer les capteurs de puissance plus souvent » est cochée et ne change rien ici : rien dans la sélection n’est un capteur de puissance en W ou kW avec un intervalle plus long que celui-là)",
+    "power_clause_one": ", et d’une toutes les {seconds} secondes pour {count} capteur de puissance,",
+    "power_clause_other": ", et d’une toutes les {seconds} secondes pour chacun des {count} capteurs de puissance,",
+    "fast_power_note": "« Envoyer les capteurs de puissance plus souvent » ne tient pas dans votre formule. À {seconds} secondes, ces capteurs pourraient envoyer jusqu’à {readings_per_day} mesures par jour ; votre formule en autorise {daily_limit}. Validée telle quelle, la case est enregistrée décochée et chaque entité, capteurs de puissance compris, est envoyée au plus une fois toutes les {min_interval} secondes. Pour l’utiliser, décochez quelques entités sous Configurer, puis cochez de nouveau la case.",
+    "wait_under_a_minute": "dans moins d’une minute",
+    "wait_minutes_one": "dans une minute environ",
+    "wait_minutes_other": "dans {count} minutes environ",
+    "wait_hours_one": "dans une heure environ",
+    "wait_hours_other": "dans {count} heures environ",
+    "refusal_said": "Interrogé, Tag Historian a répondu : {refusal}",
+    "no_reason_given": "aucune raison donnée"
+  }
+}

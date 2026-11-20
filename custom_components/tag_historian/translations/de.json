@@ -1,0 +1,340 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Mit Tag Historian verbinden",
+        "description": "Fügen Sie einen API-Schlüssel mit der Berechtigung Write ein. Erstellen Sie ihn in Tag Historian Explorer unter API-Schlüssel: Klicken Sie auf Neuen Schlüssel erstellen, geben Sie ihm einen Namen und lassen Sie die Berechtigung auf Write, womit sich der Dialog öffnet. Ein Read-Schlüssel kann nichts senden. Der Schlüssel wird jetzt gegen Ihr Konto geprüft; Messwerte werden erst gesendet, wenn Sie gewählt haben, für welche Entitäten die Historie gespeichert werden soll.",
+        "data": {
+          "host": "Host",
+          "api_key": "API-Schlüssel"
+        },
+        "data_description": {
+          "host": "Lassen Sie das, wie es ist, außer Sie betreiben Tag Historian woanders.",
+          "api_key": "Die Berechtigung muss Write sein. Ein Read-Schlüssel kann Ihre Historie lesen, wird aber abgelehnt, wenn diese Integration etwas hinzufügen will."
+        }
+      },
+      "select": {
+        "title": "Wählen, wofür Historie gespeichert wird",
+        "description": "Ihr Plan erlaubt {tag_limit} Tags. {tags_in_use} sind schon belegt, {tags_available} sind frei.\n\nVon den {entity_count} Entitäten, die in diesem Home Assistant aktiviert sind, stehen unten die {offered_count}, deren Aufgabe es ist, etwas zu melden: Sensoren, Binärsensoren, Zahlen, Zahlen-Helfer und Zähler, ohne die, die Home Assistant als Konfiguration kennzeichnet, und ohne die, deren Geräteklasse ihren Zustand zu einem Datum, einer Uhrzeit oder einem Kategorienamen macht. Die übrigen {hidden_count} sind Dinge, die Sie schalten, ausführen oder nachschlagen, nicht Dinge, die messen. Haken Sie „Alle Entitäten anzeigen“ an, um stattdessen alle {entity_count} aufzulisten – diese Liste ist überhaupt nicht gefiltert.\n\nDie Liste richtet sich danach, was jede Entität IST, nicht danach, was sie in diesem Moment gerade anzeigt; eine Entität, die im Augenblick nicht verfügbar ist, steht also trotzdem hier.\n\n{preselected} sind zu Beginn angehakt: {breakdown}. {did_not_fit} weitere wären es wert gewesen, aber dafür reichte das Kontingent nicht.\n\nNichts wird gesendet, bevor Sie fertig sind.\n\nEin Leistungssensor (Geräteklasse power, in W oder kW) kann alle {power_interval} Sekunden statt im Mindestintervall gesendet werden: Haken Sie unten „Leistungssensoren häufiger senden“ an.",
+        "data": {
+          "entities": "Entitäten, deren Historie gespeichert wird",
+          "min_interval": "Mindestabstand zwischen Messwerten in Sekunden",
+          "show_all": "Alle Entitäten anzeigen",
+          "follow_renames": "Tags umbenennen, wenn Entitäten umbenannt werden",
+          "fast_power": "Leistungssensoren häufiger senden",
+          "share_approximate_location": "Meinen ungefähren Standort (etwa 10 km) für das Außenwetter von SMHI verwenden"
+        },
+        "data_description": {
+          "entities": "Eine Entität kostet ein Tag. Sensoren ohne Geräteklasse und ohne Zustandsklasse werden aufgeführt, aber nicht angehakt, weil Home Assistant über sie in keiner Richtung etwas weiß: Die meisten sind selbst geschriebene Template-Sensoren, die eine Zahl melden, aber einige melden ein Wort – ein Hausmodus, der auf „away“ steht, ein Status, der auf „idle“ steht –, und die speichern gar nichts. Was nichts speichert, wird auf dem Sensor „readings dropped“ gezählt, und die Entität wird dort genannt, sodass eine Reihe, die leer bleibt, sagt, warum. Alles, was Sie schon angehakt haben, bleibt in der Liste, was sich sonst auch ändert.",
+          "min_interval": "Messwerte, die früher als dieser Abstand nach dem vorigen derselben Entität eintreffen, werden übersprungen. Ihr Tageskontingent für Messwerte wird für alles verbraucht, was gesendet wird; mit dieser Einstellung halten Sie also einen gesprächigen Sensor davon ab, es aufzubrauchen.",
+          "show_all": "Nimmt jede Entität der Installation ungefiltert in die Liste auf. Einige davon speichern eine 1 oder eine 0 – ein Licht, ein Schalter, ein Rollladen, eine Automation. Die übrigen speichern nichts: Ein Schloss, eine Person, ein Klimamodus und ein Mediaplayer melden alle Wörter, und nur Entitäten, deren Zustand eine Zahl oder ein schlichtes Ein/Aus ist, können zu einem Messwert werden.",
+          "follow_renames": "Wenn Sie eine Entität in Home Assistant umbenennen, wird auch ihr Tag in Tag Historian umbenannt, sodass ihre Historie unter dem neuen Namen weiterläuft. Nichts wird kopiert: Die bisherigen Messwerte bleiben, wo sie sind, und werden unter dem neuen Namen gelesen. Aus: Die Messwerte laufen weiter in das alte Tag, und eine Reparaturen-Karte fragt, ob es umbenannt werden soll.",
+          "fast_power": "Sendet jede Entität, deren Geräteklasse power ist und deren Einheit W oder kW ist, häufiger als das Mindestintervall oben – wie häufig, steht oben auf diesem Bildschirm. Das ist für Verbraucher in Tag Historian gedacht: Dort wird ein Gerät an dem Sprung erkannt, den es in Ihrer Gesamtleistung macht, und zwei fast gleich große Geräte lassen sich mit mehr Messwerten viel besser unterscheiden. Es verbraucht mehr von Ihrem Tageskontingent für Messwerte: Der nächste Bildschirm zeigt die Summe mit Ihren eigenen Zahlen, bevor etwas gesendet wird, und wenn diese Summe über dem liegt, was Ihr Plan pro Tag erlaubt, bleibt das Häkchen ohne Wirkung. Andere Sensoren behalten das Mindestintervall, der Historienimport ebenso.",
+          "share_approximate_location": "Teilt Tag Historian mit, wo dieses Home Assistant steht, vor dem Senden auf etwa 10 km gerundet, damit Ihre Diagramme Außentemperatur und Niederschlag von den nächstgelegenen Wetterstationen des schwedischen Wetterdienstes SMHI zeigen können. Nur für Schweden. Es ist nur ein Vorschlag: Ein Standort, der in den Einstellungen von Tag Historian schon festgelegt ist, bleibt, wie er ist, und dort ändern oder entfernen Sie ihn. Aus: Über Ihren Standort wird nichts gesendet."
+        }
+      },
+      "review": {
+        "title": "Überprüfen",
+        "description": "{selected} Entitäten ausgewählt. {new_tags} davon brauchen ein neues Tag, und Ihr Plan hat {tags_available} frei, also passt die ganze Auswahl.\n\nBei einem Messwert alle {min_interval} Sekunden{power_clause} sind das höchstens {readings_per_day} Messwerte pro Tag, etwa {percent} % der {daily_limit} Ihres Plans.{fast_power_note}\n\nMehr gibt es nicht zu entscheiden – senden Sie ab, um abzuschließen."
+      },
+      "review_trim": {
+        "title": "Überprüfen – das braucht mehr Tags, als Sie haben",
+        "description": "{selected} Entitäten ausgewählt. {new_tags} davon brauchen ein neues Tag, und Ihr Plan hat {tags_available} frei, also passen {overflow} nicht.\n\nBei einem Messwert alle {min_interval} Sekunden{power_clause} sind das höchstens {readings_per_day} Messwerte pro Tag, etwa {percent} % der {daily_limit} Ihres Plans.{fast_power_note}\n\nWenn Sie fortfahren, ohne zu kürzen, werden die Messwerte der Entitäten, die diese {overflow} Tags brauchen, abgelehnt und gehen verloren – alles andere läuft weiter.",
+        "data": {
+          "trim_to_fit": "Auswahl auf das kürzen, was passt"
+        },
+        "data_description": {
+          "trim_to_fit": "Entfernt die am niedrigsten eingestuften Entitäten, die ein neues Tag brauchen, und nur diese – eine Entität, deren Tag es schon gibt, kostet nichts und wird nie entfernt, um Platz zu schaffen. Schalten Sie das aus, um Ihre Auswahl zu behalten und hinzunehmen, dass der Überschuss abgelehnt wird."
+        }
+      },
+      "history": {
+        "title": "Die Historie mitnehmen, die Home Assistant schon hat",
+        "description": "Home Assistant hat bereits Historie zu den {selected} Entitäten, die Sie gewählt haben, und sie kann mitkommen:\n\n- seine Langzeitstatistik: Mittelwert, Minimum und Maximum jedes Sensors für jede Stunde, oder Zählerstand und Verbrauch eines Zählers, aufbewahrt, solange die Datenbank von Home Assistant besteht – oft jahrelang;\n- was der Recorder hält: jeder Messwert der letzten {recorder_days} Tage.\n\nMit Häkchen geht beides im Hintergrund zu Tag Historian, sobald Sie absenden, die stündliche Historie zuerst. Keines von beiden wird auf Ihr Tageskontingent für Messwerte angerechnet, und der Sensor „Tag Historian history import“ zeigt, wie weit es ist. Binärsensoren, Zahlen- und Zähler-Helfer und Sensoren ohne state_class haben keine Langzeitstatistik. Ihre aufgezeichneten Messwerte kommen trotzdem.\n\nTag Historian erfährt außerdem die Zeitzone dieses Home Assistant, {time_zone}. Die Tage, Monate und Alarmzeiten Ihres Kontos sind in der Zeitzone des Kontos, und Tag Historian übernimmt {time_zone} nur dann als diese Zone, wenn das Konto noch keine hat: keine in den Einstellungen von Tag Historian gewählt, keine dem E-Mail-Kanal des Kontoinhabers unter Alarme gegeben und keine früher von einem Home Assistant vorgeschlagen. Geändert wird sie in Tag Historian, unter Einstellungen.",
+        "data": {
+          "import_on_setup": "Die Historie mitnehmen, die Home Assistant schon hat"
+        },
+        "data_description": {
+          "import_on_setup": "Die stündliche Historie, so weit Home Assistant sie zurück hat, bis zu zehn Jahre, danach die Messwerte des Recorders. Was Tag Historian schon hat, wird nicht doppelt gespeichert. Ohne Häkchen wird jetzt nichts importiert: Konfigurieren, Die Historie importieren, die Home Assistant schon hat, holt es nach, wann immer Sie möchten."
+        }
+      },
+      "reauth_confirm": {
+        "title": "Tag Historian braucht einen neuen API-Schlüssel",
+        "description": "Der Schlüssel, den diese Integration verwendet hat, wird nicht mehr akzeptiert. Erstellen Sie in Tag Historian Explorer einen neuen – Neuen Schlüssel erstellen, mit der Berechtigung Write – und fügen Sie ihn hier ein.",
+        "data": {
+          "api_key": "API-Schlüssel"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Dieser Host war nicht erreichbar. Prüfen Sie die Adresse und ob Home Assistant ins Internet kommt.",
+      "key_not_checked": "Tag Historian konnte den Schlüssel gerade nicht prüfen. Es hat geantwortet, die Adresse stimmt also, und über den Schlüssel selbst sagt das nichts. Versuchen Sie es in einer Minute erneut.",
+      "unavailable": "Diese Adresse hat geantwortet, aber gemeldet, dass sie das gerade nicht bedienen kann. Versuchen Sie es in einer Minute erneut; wenn sie das weiter meldet, prüfen Sie die Adresse.",
+      "unavailable_known_host": "Tag Historian hat geantwortet, konnte das aber gerade nicht tun. Versuchen Sie es in einer Minute erneut.",
+      "cannot_connect_known_host": "Tag Historian war gerade nicht zu erreichen. Prüfen Sie, ob Home Assistant ins Internet kommt, und versuchen Sie es in einer Minute erneut.",
+      "invalid_auth": "Tag Historian hat diesen Schlüssel nicht akzeptiert. Prüfen Sie, ob Sie ihn vollständig kopiert haben und ob er nicht widerrufen wurde.",
+      "read_only_key": "Die Berechtigung dieses Schlüssels ist Read. Er kann Ihre Daten lesen, aber nichts hinzufügen – erstellen Sie stattdessen einen Schlüssel mit der Berechtigung Write.",
+      "account_inactive": "Dieser Schlüssel gehört zu einem Konto, das nicht aktiv ist. Melden Sie sich in Tag Historian Explorer an, um zu sehen, warum.",
+      "account_blocked": "Tag Historian hat die Anfrage für dieses Konto abgelehnt. Melden Sie sich in Tag Historian Explorer an, um zu sehen, was nötig ist.",
+      "email_not_verified": "Die E-Mail-Adresse dieses Kontos wurde nicht bestätigt, und die Schonfrist ist abgelaufen; deshalb nimmt Tag Historian keine neuen Daten an. Bestätigen Sie die Adresse über die E-Mail zur Registrierung und versuchen Sie es erneut.",
+      "select_at_least_one": "Wählen Sie mindestens eine Entität. Eine Integration, die mit leerer Auswahl eingerichtet wird, stünde da, ohne etwas zu speichern, und sähe genauso aus wie eine, die funktioniert."
+    },
+    "abort": {
+      "already_configured": "Dieses Tag-Historian-Konto ist bereits eingerichtet. Es zweimal hinzuzufügen, würde jeden Messwert doppelt senden und Ihr Kontingent doppelt verbrauchen.",
+      "wrong_account": "Dieser Schlüssel gehört zu einem anderen Tag-Historian-Konto. Verwenden Sie einen Schlüssel des Kontos, mit dem diese Integration eingerichtet wurde, oder fügen Sie das andere Konto getrennt hinzu.",
+      "reauth_successful": "Tag Historian hat den neuen Schlüssel akzeptiert.",
+      "no_tags_available": "Ihr Konto hat keine freien Tags, und jede Entität, die Sie gewählt haben, bräuchte eines. Auf das gekürzt, was passt, bleibt also nichts übrig, dessen Historie gespeichert werden könnte. Es wurde nichts eingerichtet. Geben Sie in Tag Historian Explorer ein Tag frei oder wechseln Sie zu einem größeren Plan, und fügen Sie diese Integration dann erneut hinzu."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Tag Historian",
+        "menu_options": {
+          "choose": "Ändern, wofür Sie Historie speichern",
+          "import_history": "Die Historie importieren, die Home Assistant schon hat"
+        }
+      },
+      "select": {
+        "title": "Ändern, wofür Sie Historie speichern",
+        "description": "Ihr Plan erlaubt {tag_limit} Tags. {tags_in_use} sind schon belegt, {tags_available} sind frei.\n\nVon den {entity_count} Entitäten, die in diesem Home Assistant aktiviert sind, stehen unten die {offered_count}, deren Aufgabe es ist, etwas zu melden – Sensoren, Binärsensoren, Zahlen, Zahlen-Helfer und Zähler –, dazu alles, was Sie schon ausgewählt hatten. Die übrigen {hidden_count} sind Dinge, die Sie schalten, ausführen oder nachschlagen, nicht Dinge, die messen; haken Sie „Alle Entitäten anzeigen“ an, um stattdessen alle {entity_count} ungefiltert aufzulisten.\n\n{preselected} sind im Moment angehakt: {breakdown}. Weitere {did_not_fit} wären es wert, wenn das Kontingent für sie reichte.\n\nWenn Sie das Häkchen einer Entität entfernen, kommen für sie keine neuen Messwerte mehr. Die Historie, die schon in Tag Historian gespeichert ist, bleibt unberührt, das Tag ebenso – löschen Sie es in Tag Historian Explorer, um den Platz freizugeben.\n\nEin Leistungssensor (Geräteklasse power, in W oder kW) kann alle {power_interval} Sekunden statt im Mindestintervall gesendet werden: Haken Sie unten „Leistungssensoren häufiger senden“ an.",
+        "data": {
+          "entities": "Entitäten, deren Historie gespeichert wird",
+          "min_interval": "Mindestabstand zwischen Messwerten in Sekunden",
+          "show_all": "Alle Entitäten anzeigen",
+          "follow_renames": "Tags umbenennen, wenn Entitäten umbenannt werden",
+          "fast_power": "Leistungssensoren häufiger senden",
+          "share_approximate_location": "Meinen ungefähren Standort (etwa 10 km) für das Außenwetter von SMHI verwenden"
+        },
+        "data_description": {
+          "entities": "Eine Entität kostet ein Tag. Eine Entität, die gerade nicht verfügbar oder unbekannt ist, bleibt in dieser Liste und bleibt ausgewählt – nur die Messwerte pausieren, nicht die Auswahl. Eine Entität, deren Zustand ein Wort statt einer Zahl ist, speichert gar nichts; diese werden auf dem Sensor „readings dropped“ gezählt und genannt.",
+          "min_interval": "Messwerte, die früher als dieser Abstand nach dem vorigen derselben Entität eintreffen, werden übersprungen.",
+          "show_all": "Nimmt jede Entität der Installation ungefiltert in die Liste auf – auch solche, die nichts speichern können.",
+          "follow_renames": "Wenn Sie eine Entität in Home Assistant umbenennen, wird auch ihr Tag in Tag Historian umbenannt, sodass ihre Historie unter dem neuen Namen weiterläuft. Nichts wird kopiert: Die bisherigen Messwerte bleiben, wo sie sind, und werden unter dem neuen Namen gelesen. Aus: Die Messwerte laufen weiter in das alte Tag, und eine Reparaturen-Karte fragt, ob es umbenannt werden soll.",
+          "fast_power": "Sendet jede Entität, deren Geräteklasse power ist und deren Einheit W oder kW ist, häufiger als das Mindestintervall oben – wie häufig, steht oben auf diesem Bildschirm. Das ist für Verbraucher in Tag Historian gedacht: Dort wird ein Gerät an dem Sprung erkannt, den es in Ihrer Gesamtleistung macht, und zwei fast gleich große Geräte lassen sich mit mehr Messwerten viel besser unterscheiden. Es verbraucht mehr von Ihrem Tageskontingent für Messwerte: Der nächste Bildschirm zeigt die Summe mit Ihren eigenen Zahlen, bevor etwas gesendet wird, und wenn diese Summe über dem liegt, was Ihr Plan pro Tag erlaubt, bleibt das Häkchen ohne Wirkung. Andere Sensoren behalten das Mindestintervall, der Historienimport ebenso.",
+          "share_approximate_location": "Teilt Tag Historian mit, wo dieses Home Assistant steht, vor dem Senden auf etwa 10 km gerundet, damit Ihre Diagramme Außentemperatur und Niederschlag von den nächstgelegenen Wetterstationen des schwedischen Wetterdienstes SMHI zeigen können. Nur für Schweden. Es ist nur ein Vorschlag: Ein Standort, der in den Einstellungen von Tag Historian schon festgelegt ist, bleibt, wie er ist, und dort ändern oder entfernen Sie ihn. Aus: Über Ihren Standort wird nichts gesendet."
+        }
+      },
+      "review": {
+        "title": "Überprüfen",
+        "description": "{selected} Entitäten ausgewählt. {new_tags} davon brauchen ein neues Tag, und Ihr Plan hat {tags_available} frei, also passt die ganze Auswahl.\n\nBei einem Messwert alle {min_interval} Sekunden{power_clause} sind das höchstens {readings_per_day} Messwerte pro Tag, etwa {percent} % der {daily_limit} Ihres Plans.{fast_power_note}\n\nMehr gibt es nicht zu entscheiden – senden Sie ab, um zu speichern."
+      },
+      "review_trim": {
+        "title": "Überprüfen – das braucht mehr Tags, als Sie haben",
+        "description": "{selected} Entitäten ausgewählt. {new_tags} davon brauchen ein neues Tag, und Ihr Plan hat {tags_available} frei, also passen {overflow} nicht.\n\nBei einem Messwert alle {min_interval} Sekunden{power_clause} sind das höchstens {readings_per_day} Messwerte pro Tag, etwa {percent} % der {daily_limit} Ihres Plans.{fast_power_note}\n\nWenn Sie fortfahren, ohne zu kürzen, werden die Messwerte der Entitäten, die diese {overflow} Tags brauchen, abgelehnt und gehen verloren – alles andere läuft weiter.",
+        "data": {
+          "trim_to_fit": "Auswahl auf das kürzen, was passt"
+        },
+        "data_description": {
+          "trim_to_fit": "Entfernt die am niedrigsten eingestuften Entitäten, die ein neues Tag brauchen, und nur diese."
+        }
+      },
+      "import_history": {
+        "title": "Die Historie importieren, die Home Assistant hat",
+        "description": "Sendet die Historie, die Home Assistant zu den Entitäten unten hält, in zwei Teilen an Tag Historian, damit die Historie auf diesem Gerät erhalten bleibt, auch wenn das Gerät es nicht tut.\n\nZuerst seine stündliche Langzeitstatistik: Mittelwert, Minimum und Maximum einer Messgröße für jede Stunde, oder Zählerstand und Verbrauch eines Zählers, so weit Home Assistant sie zurück hat und bis zu zehn Jahre. In Tag Historian sind sie stündliche Historie, als Statistik von Home Assistant gekennzeichnet, und sie haben ein eigenes Kontingent: bis zu zehn Jahre pro Tag alle dreißig Tage. Binärsensoren, Zahlen- und Zähler-Helfer und Sensoren ohne state_class haben keine Langzeitstatistik.\n\nDanach, was der Recorder hält, mit den ursprünglichen Zeitstempeln; der Recorder hier bewahrt {recorder_days} Tage an Zuständen auf. Importierte Messwerte werden nicht auf Ihr Tageskontingent für Messwerte angerechnet. Sie werden stattdessen auf Ihr Importkontingent angerechnet: noch {remaining} von {total} Messwerten – {readings_per_day} pro Tag mal dem Zeitraum voller Auflösung Ihres Plans von {window_days} Tagen, für alle Importe zusammen. Messwerte, die älter als dieser Zeitraum sind, werden übersprungen, ebenso alles, was Tag Historian schon hat; ein Import, der zweimal läuft, speichert also nichts doppelt.\n\nImportiert wird nur Historie: Messwerte, die älter sind als der Moment, in dem der Import startet, älter als der erste Messwert der Entität, den Tag Historian live empfangen hat, und älter als der Beginn ihres ersten Imports. Alles danach sind Ihre Live-Daten, die diese Integration selbst sendet – auch das, was noch aufs Senden wartet. Wo ein aufgezeichneter Messwert in eine Stunde fällt, die die Statistik mitgebracht hat, behält Tag Historian die Stunde des Messwerts. Eine umbenannte Entität, deren Karte Sie mit „Stattdessen ein neues Tag beginnen“ oder „Getrennt lassen“ beantwortet haben, bleibt außen vor: Ihre Historie bleibt im alten Tag.\n\nDer Import läuft im Hintergrund. Der Sensor „Tag Historian history import“ zeigt, wie weit er ist, eine Benachrichtigung sagt, wann er fertig ist, und nach einem Neustart macht er dort weiter, wo er aufgehört hat.",
+        "data": {
+          "entities": "Zu importierende Entitäten",
+          "statistics": "Stündliche Historie aus der Langzeitstatistik von Home Assistant",
+          "days": "Wie weit zurück"
+        },
+        "data_description": {
+          "entities": "Aufgeführt sind nur Entitäten, deren Historie Sie speichern: Eine importierte Entität belegt ein Tag wie eine live gesendete.",
+          "statistics": "Entfernen Sie das Häkchen, um nur die Messwerte zu importieren, die der Recorder hält.",
+          "days": "Tage vor heute, höchstens zehn Jahre. Messwerte reichen nicht weiter zurück als der Zeitraum voller Auflösung Ihres Plans, was auch immer hier steht."
+        }
+      }
+    },
+    "error": {
+      "select_at_least_one": "Wählen Sie mindestens eine Entität. Um das Senden ganz zu beenden, deaktivieren Sie diese Integration, statt die Liste zu leeren – ein Eintrag, der geladen ist und nichts speichert, sieht genauso aus wie einer, der funktioniert.",
+      "import_nothing_selected": "Wählen Sie mindestens eine Entität für den Import."
+    },
+    "abort": {
+      "cannot_connect": "Tag Historian war nicht erreichbar, deshalb kann dieser Bildschirm nicht zeigen, wie viel von Ihrem Kontingent noch übrig ist. Versuchen Sie es gleich noch einmal.",
+      "key_not_checked": "Tag Historian konnte den Schlüssel dieser Integration gerade nicht prüfen, deshalb kann dieser Bildschirm nicht zeigen, wie viel von Ihrem Kontingent noch übrig ist. Über den Schlüssel selbst sagt das nichts. Versuchen Sie es in einer Minute erneut.",
+      "unavailable": "Tag Historian hat geantwortet, konnte das aber gerade nicht tun, deshalb kann dieser Bildschirm nicht zeigen, wie viel von Ihrem Kontingent noch übrig ist. Versuchen Sie es in einer Minute erneut.",
+      "no_tags_available": "Ihr Konto hat keine freien Tags, und jede Entität, die Sie gewählt haben, bräuchte eines. Auf das gekürzt, was passt, bleibt also nichts übrig, dessen Historie gespeichert werden könnte. Ihre bestehende Auswahl wurde nicht angetastet. Geben Sie in Tag Historian Explorer ein Tag frei oder wechseln Sie zu einem größeren Plan.",
+      "import_started": "Die Historie von {entities} Entitäten wird in Tag Historian importiert. Verfolgen Sie es auf dem Sensor „Tag Historian history import“; eine Benachrichtigung sagt, wann es fertig ist.",
+      "import_running": "Für dieses Konto läuft bereits ein Historienimport. Warten Sie, bis er fertig ist – der Sensor „Tag Historian history import“ zeigt, wie weit er ist.",
+      "import_refused": "Tag Historian hat den Import nicht gestartet und geantwortet:\n\n{message}",
+      "no_recorder": "Der Recorder von Home Assistant läuft nicht, also gibt es keine aufgezeichnete Historie zu importieren.",
+      "not_loaded": "Dieser Tag-Historian-Eintrag läuft gerade nicht. Warten Sie, bis er läuft, und versuchen Sie es dann erneut.",
+      "key_rejected": "Tag Historian akzeptiert den API-Schlüssel dieser Integration nicht mehr. Geben Sie auf der Karte, auf der Home Assistant erneut nach dem Schlüssel fragt, einen neuen ein und versuchen Sie es dann erneut.",
+      "import_cannot_connect": "Tag Historian war nicht erreichbar, um den Import zu starten. Versuchen Sie es gleich noch einmal.",
+      "import_key_not_checked": "Tag Historian konnte den Schlüssel dieser Integration gerade nicht prüfen, deshalb wurde der Import nicht gestartet. Über den Schlüssel selbst sagt das nichts. Versuchen Sie es in einer Minute erneut.",
+      "import_unavailable": "Tag Historian hat geantwortet, konnte den Import aber gerade nicht starten. Versuchen Sie es in einer Minute erneut."
+    }
+  },
+  "issues": {
+    "tag_quota_exceeded": {
+      "title": "Tag Historian hat einige Messwerte abgelehnt",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Bis auf Ihr Kontingent abwählen",
+            "description": "Ihr Konto belegt {tag_count} von {tag_limit} Tags, deshalb wurden {dropped_points} Messwerte abgelehnt und gingen verloren. Sie brauchten diese Tags, für die Ihr Plan keinen Platz hat: {refused_tags}\n\nAlles andere wird weiterhin gespeichert. Entfernen Sie unten Häkchen, bis die Auswahl passt, oder wechseln Sie zu einem größeren Plan und lassen Sie sie, wie sie ist.",
+            "data": {
+              "entities": "Entitäten, deren Historie weiter gespeichert wird"
+            }
+          }
+        }
+      }
+    },
+    "daily_quota_exceeded": {
+      "title": "Tageslimit für Messwerte bei Tag Historian erreicht",
+      "description": "Ihr Konto hat sein Kontingent an Messwerten für heute verbraucht; Tag Historian nimmt deshalb keine neuen Daten an, bis das Limit zurückgesetzt wird, und das geschieht {when}. Die Messwerte werden bis dahin zurückgehalten, auch über einen Neustart hinweg. Dauert das Warten lange, werden die ältesten losgelassen und aus dem Recorder von Home Assistant zurückgelesen, sobald Tag Historian wieder Daten annimmt; sie kommen also trotzdem an – und werden auf das Kontingent des nächsten Tages angerechnet.\n\nZwei Auswege: Erhöhen Sie das Mindestintervall in den Optionen dieser Integration, damit weniger Messwerte gesendet werden, oder wechseln Sie zu einem Plan mit größerem Kontingent."
+    },
+    "write_forbidden": {
+      "title": "Tag Historian nimmt von diesem Konto keine Daten an",
+      "description": "Tag Historian hat das Schreiben abgelehnt und geantwortet:\n\n{message}"
+    },
+    "service_unavailable": {
+      "title": "Tag Historian hat keine Daten angenommen",
+      "description": "Das Schreiben schlägt seit {minutes} Minuten fehl – Tag Historian antwortet, dass es die Daten gerade nicht annehmen kann: Es ist zu ausgelastet, oder es kann den Schlüssel dieser Integration im Moment nicht prüfen. An Ihrem Konto oder dem Schlüssel hat sich nichts geändert. Die Messwerte werden zurückgehalten, auch über einen Neustart hinweg, und gesendet, sobald sie wieder angenommen werden; hält das an, werden die ältesten losgelassen und danach aus dem Recorder von Home Assistant zurückgelesen. Sie müssen nichts tun."
+    },
+    "entity_renamed": {
+      "title": "{old} wurde in Home Assistant in {new} umbenannt",
+      "fix_flow": {
+        "step": {
+          "rename_choice": {
+            "title": "Die Historie von {old} unter dem neuen Namen behalten?",
+            "description": "Home Assistant hat {old} in {new} umbenannt. Tag Historian speichert die Messwerte einstweilen weiter im Tag {old_tag}; die Historie läuft also weiter, und nichts geht verloren.{refusal}\n\nBenennen Sie das Tag um, dann wird seine ganze Historie – die bisherigen Messwerte eingeschlossen – von nun an als {new_tag} gelesen, und neue Messwerte werden unter diesem Namen gespeichert. Nichts wird kopiert: Es ist dieselbe Historie unter einem neuen Namen, und in Tag Historian Explorer lässt sie sich zurückbenennen.\n\nOder beginnen Sie für die Messwerte von nun an ein neues Tag, {new_tag}, und lassen Sie die Historie, wo sie ist, unter {old_tag}. Das belegt ein weiteres Tag Ihres Plans.",
+            "menu_options": {
+              "rename_tag": "Das Tag umbenennen und seine Historie behalten",
+              "new_tag": "Stattdessen ein neues Tag beginnen"
+            }
+          },
+          "merge_choice": {
+            "title": "Die Historie von {old} mit {new} zusammenführen?",
+            "description": "Home Assistant hat {old} in {new} umbenannt, einen Namen, der in Tag Historian schon ein Tag hat: {new_tag}. Die Historie der umbenannten Entität aus der Zeit vor der Umbenennung liegt in {old_tag}, und ihre Messwerte laufen weiter in {old_tag}, bis Sie wählen; nichts geht also verloren.{refusal}\n\nFühren Sie sie zusammen, dann werden die beiden als eine Historie unter {new_tag} gelesen, und neue Messwerte werden dort gespeichert. Wo beide in derselben Stunde Messwerte haben, werden die Werte dieser Stunde aus beiden berechnet, und {old_tag} zählt nicht mehr als Tag. Nichts wird kopiert, und die Zusammenführung lässt sich in Tag Historian Explorer rückgängig machen.\n\nOder lassen Sie sie getrennt: {old_tag} behält seine Historie als eigenes Tag, und die Messwerte von nun an gehen in {new_tag}.",
+            "menu_options": {
+              "merge_tags": "Zu einer Historie zusammenführen",
+              "keep_apart": "Getrennt lassen"
+            }
+          }
+        },
+        "abort": {
+          "carry_unavailable": "Tag Historian konnte das gerade nicht tun, deshalb wurde nichts geändert – es war nicht erreichbar oder hat die Anfrage nicht angenommen. Falls Home Assistant außerdem erneut nach dem Schlüssel dieser Integration gefragt hat, wurde der Schlüssel abgelehnt – geben Sie ihr zuerst einen neuen. Die Messwerte laufen einstweilen weiter in das alte Tag, nichts geht also verloren. Versuchen Sie es später von dieser Karte aus erneut.",
+          "carry_refused": "Tag Historian hat abgelehnt, und nichts wurde geändert. Es hat geantwortet:\n\n{message}"
+        }
+      }
+    },
+    "bring_years": {
+      "title": "Die Jahre, die Home Assistant schon hat, in Tag Historian mitnehmen",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Die Jahre mitnehmen, die Home Assistant schon hat",
+            "description": "Diese Version der Integration kann die Historie mitnehmen, die Home Assistant bereits zu jeder Entität hält, deren Historie {account} speichert: zuerst seine stündliche Langzeitstatistik, so weit Home Assistant sie zurück hat und bis zu zehn Jahre, danach die Messwerte, die der Recorder hält. In Tag Historian werden sie zur Historie aus der Zeit, bevor diese Integration installiert wurde, als Statistik von Home Assistant gekennzeichnet. Binärsensoren, Zahlen- und Zähler-Helfer und Sensoren ohne state_class haben keine Langzeitstatistik.\n\nSenden Sie ab, um zu starten. Es läuft im Hintergrund – der Sensor „Tag Historian history import“ zeigt, wie weit es ist, und eine Benachrichtigung sagt, was es getan hat –, und es wird nicht auf Ihr Tageskontingent für Messwerte angerechnet. Was Tag Historian schon hat, wird nicht doppelt gespeichert.\n\nDiese Integration teilt Tag Historian außerdem bei jedem Start die Zeitzone dieses Home Assistant mit. Tag Historian übernimmt sie nur, wenn das Konto noch keine Zeitzone hat: keine in den Einstellungen von Tag Historian gewählt, keine dem E-Mail-Kanal des Kontoinhabers unter Alarme gegeben und keine früher vorgeschlagen. Die Tage, Monate und Alarmzeiten des Kontos sind in der Zeitzone des Kontos, und die wird in Tag Historian unter Einstellungen geändert."
+          }
+        },
+        "abort": {
+          "not_loaded": "Dieser Tag-Historian-Eintrag läuft gerade nicht. Warten Sie, bis er läuft, und versuchen Sie es dann von dieser Karte aus erneut.",
+          "import_running": "Für dieses Konto läuft bereits ein Historienimport. Versuchen Sie es von dieser Karte aus erneut, sobald er fertig ist.",
+          "no_recorder": "Der Recorder von Home Assistant läuft nicht, also gibt es keine Historie mitzunehmen.",
+          "import_refused": "Tag Historian hat den Import nicht gestartet und geantwortet:\n\n{message}",
+          "key_rejected": "Tag Historian akzeptiert den API-Schlüssel dieser Integration nicht mehr. Geben Sie auf der Karte, auf der Home Assistant erneut nach dem Schlüssel fragt, einen neuen ein und versuchen Sie es dann von dieser Karte aus erneut.",
+          "import_cannot_connect": "Tag Historian war nicht erreichbar, um den Import zu starten. Versuchen Sie es gleich noch einmal von dieser Karte aus.",
+          "import_key_not_checked": "Tag Historian konnte den Schlüssel dieser Integration gerade nicht prüfen, deshalb wurde der Import nicht gestartet. Über den Schlüssel selbst sagt das nichts. Versuchen Sie es in einer Minute von dieser Karte aus erneut.",
+          "import_unavailable": "Tag Historian hat geantwortet, konnte den Import aber gerade nicht starten. Versuchen Sie es in einer Minute von dieser Karte aus erneut."
+        }
+      }
+    },
+    "fast_power_does_not_fit": {
+      "title": "Leistungssensoren häufiger zu senden passt nicht mehr in Ihren Plan",
+      "description": "„Leistungssensoren häufiger senden“ ist angehakt, aber bei {power_interval} Sekunden könnten Ihre ausgewählten Entitäten bis zu {readings_per_day} Messwerte pro Tag senden, und Ihr Plan erlaubt {daily_limit}. Vorerst wird deshalb jede Entität, auch die Leistungssensoren, höchstens einmal alle {min_interval} Sekunden gesendet.\n\nDas passiert, wenn das Kontingent des Plans sinkt oder eine ausgewählte Entität zum Leistungssensor wird, nachdem Sie gewählt haben. Die Leistungssensoren kehren von selbst zu {power_interval} Sekunden zurück, und diese Karte verschwindet, sobald die Summe wieder passt. Damit sie passt, entfernen Sie unter Konfigurieren die Häkchen einiger Entitäten; um es zu beenden, entfernen Sie dort das Häkchen bei „Leistungssensoren häufiger senden“ und behalten {min_interval} Sekunden."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "history_import": {
+        "state": {
+          "idle": "Ruht",
+          "running": "Läuft",
+          "finished": "Fertig",
+          "stopped": "Angehalten"
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "not_selected": {
+      "message": "Nicht für Tag Historian ausgewählt: {entities}. Fügen Sie sie zuerst unter Konfigurieren, Ändern, wofür Sie Historie speichern, hinzu – eine importierte Entität belegt ein Tag wie eine live gesendete."
+    },
+    "nothing_selected": {
+      "message": "Dieser Tag-Historian-Eintrag speichert für keine Entität Historie, also gibt es nichts zu importieren."
+    },
+    "entry_not_loaded": {
+      "message": "Dieser Tag-Historian-Eintrag läuft nicht."
+    },
+    "entry_ambiguous": {
+      "message": "Hier ist mehr als ein Tag-Historian-Konto eingerichtet. Geben Sie mit config_entry_id an, welches gemeint ist."
+    },
+    "no_recorder": {
+      "message": "Der Recorder von Home Assistant läuft nicht, also gibt es keine aufgezeichnete Historie zu importieren."
+    },
+    "import_running": {
+      "message": "Für dieses Konto läuft bereits ein Historienimport."
+    },
+    "import_refused": {
+      "message": "Tag Historian hat den Import nicht gestartet: {message}"
+    },
+    "key_rejected": {
+      "message": "Tag Historian akzeptiert den API-Schlüssel dieser Integration nicht mehr."
+    },
+    "import_cannot_connect": {
+      "message": "Tag Historian war nicht erreichbar, um den Import zu starten."
+    },
+    "import_key_not_checked": {
+      "message": "Tag Historian konnte den Schlüssel dieser Integration gerade nicht prüfen, deshalb wurde der Import nicht gestartet. Versuchen Sie es in einer Minute erneut."
+    },
+    "import_unavailable": {
+      "message": "Tag Historian hat geantwortet, konnte den Import aber gerade nicht starten. Versuchen Sie es in einer Minute erneut."
+    }
+  },
+  "services": {
+    "import_history": {
+      "name": "Historie importieren",
+      "description": "Sendet die Historie, die Home Assistant zu Entitäten hält, deren Historie Sie speichern, an Tag Historian: zuerst seine stündliche Langzeitstatistik, außer statistics ist aus, danach die Messwerte des Recorders mit ihren ursprünglichen Zeitstempeln. Importierte Messwerte werden auf das Importkontingent des Kontos angerechnet, nicht auf das Tageskontingent, und importiert wird nur Historie: nichts, was diese Integration live sendet oder noch zu senden hat.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Konto",
+          "description": "In welchen Tag-Historian-Eintrag importiert wird. Nur nötig, wenn mehr als einer eingerichtet ist."
+        },
+        "entity_id": {
+          "name": "Entitäten",
+          "description": "Zu importierende Entitäten. Leer lassen für jede Entität, deren Historie dieser Eintrag speichert."
+        },
+        "statistics": {
+          "name": "Stündliche Statistik",
+          "description": "Zuerst die Langzeitstatistik von Home Assistant mitnehmen: stündliche Historie, so weit sie zurückreicht, bis zu zehn Jahre. Ein, solange es nicht ausgeschaltet wird."
+        },
+        "days": {
+          "name": "Tage zurück",
+          "description": "Wie weit zurück importiert wird, höchstens zehn Jahre. Messwerte reichen nicht weiter zurück als der Zeitraum voller Auflösung Ihres Plans. Leer lassen, um so weit zurückzugehen, wie es jeweils geht."
+        }
+      }
+    }
+  },
+  "common": {
+    "category_energy": "Energie und Leistung",
+    "category_climate": "Temperatur und Luftfeuchtigkeit",
+    "category_meter": "Zähler und Summen",
+    "category_measurement": "andere Messungen",
+    "category_numeric": "andere numerische Sensoren",
+    "category_onoff": "Ein/Aus-Zustände",
+    "category_helper": "Helfer",
+    "category_other": "nicht vorausgewählt",
+    "category_hidden": "nur mit allen angezeigt",
+    "breakdown_nothing": "noch nichts",
+    "power_clause_none": "(„Leistungssensoren häufiger senden“ ist angehakt und ändert hier nichts: Nichts in der Auswahl ist ein Leistungssensor in W oder kW mit einem längeren Intervall als diesem)",
+    "power_clause_one": ", und einem alle {seconds} Sekunden für {count} Leistungssensor,",
+    "power_clause_other": ", und einem alle {seconds} Sekunden für jeden der {count} Leistungssensoren,",
+    "fast_power_note": "„Leistungssensoren häufiger senden“ passt nicht in Ihren Plan. Bei {seconds} Sekunden könnten diese Sensoren bis zu {readings_per_day} Messwerte pro Tag senden; Ihr Plan erlaubt {daily_limit}. Wenn Sie es so absenden, wird das Häkchen nicht gespeichert, und jede Entität, auch die Leistungssensoren, wird höchstens einmal alle {min_interval} Sekunden gesendet. Um es zu nutzen, entfernen Sie unter Konfigurieren die Häkchen einiger Entitäten und haken Sie das Kästchen wieder an.",
+    "wait_under_a_minute": "in weniger als einer Minute",
+    "wait_minutes_one": "in etwa einer Minute",
+    "wait_minutes_other": "in etwa {count} Minuten",
+    "wait_hours_one": "in etwa einer Stunde",
+    "wait_hours_other": "in etwa {count} Stunden",
+    "refusal_said": "Tag Historian hat auf die Anfrage geantwortet: {refusal}",
+    "no_reason_given": "kein Grund angegeben"
+  }
+}

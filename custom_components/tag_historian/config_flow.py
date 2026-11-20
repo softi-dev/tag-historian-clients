@@ -108,12 +108,14 @@ from .fast_power import FastPowerSum, fast_power_sum
 from .line_protocol import tag_name_for_entity
 from .renames import own_tag_since, send_as
 from .selection import (
+    CATEGORIES,
     EntityFacts,
     Proposal,
     propose,
     rank_candidates,
     trim_to_new_tag_budget,
 )
+from .words import Words, async_load_words, words
 
 CONF_TRIM = "trim_to_fit"
 CONF_SHOW_ALL = "show_all"
@@ -173,42 +175,42 @@ def collect_entity_facts(hass: HomeAssistant) -> list[EntityFacts]:
     return facts
 
 
-def power_clause(power_count: int, asked: bool) -> str:
+def power_clause(words: Words, power_count: int, asked: bool) -> str:
     """What the review screens say of the power sensors, between "every N seconds" and "that is at most".
 
     Empty when the option is off, or when it does not fit (``fast_power_note``
     says that instead). When it is on and nothing selected is a power sensor,
     or the minimum interval is already as short, that is said too: a ticked
     box that changes nothing should not look as if it did.
+
+    The words are common.power_clause_* in translations/ (words.py). The
+    clause follows a number of seconds directly, so the bracket takes its
+    space from here and the other two begin with their own comma.
     """
     if not asked:
         return ""
     if power_count == 0:
-        return (
-            " (\"Send power sensors more often\" is ticked, and changes nothing here: nothing"
-            " selected is a power sensor in W or kW with a longer interval than that)"
-        )
-    which = "the 1 power sensor" if power_count == 1 else f"each of the {power_count} power sensors"
-    return f", and one every {FAST_POWER_INTERVAL_SECONDS} seconds for {which},"
+        return " " + words.say("power_clause_none")
+    return words.counted("power_clause", power_count, seconds=FAST_POWER_INTERVAL_SECONDS)
 
 
-def fast_power_note(total: FastPowerSum, asked: bool) -> str:
+def fast_power_note(words: Words, total: FastPowerSum, asked: bool) -> str:
     """The paragraph the review screens add when the option does not fit the plan.
 
     Empty unless it was ticked and its sum is above the daily allowance - then
     the box cannot take effect, and the screen says so in the account's own
     numbers (fast_power.py). The line above it is the sum at the minimum
-    interval, which is what will be sent.
+    interval, which is what will be sent. The words are common.fast_power_note
+    in translations/ (words.py).
     """
     if not asked or total.fits:
         return ""
-    return (
-        f"\n\n\"Send power sensors more often\" does not fit your plan. At"
-        f" {FAST_POWER_INTERVAL_SECONDS} seconds these sensors could send up to"
-        f" {_spaced(total.fast)} readings a day; your plan allows {_spaced(total.daily_limit)}."
-        f" Submitted as it is, the box is saved unticked and every entity, power sensors too, is"
-        f" sent at most once every {total.min_interval} seconds. To use it, untick some entities"
-        f" under Configure and tick the box again."
+    return "\n\n" + words.say(
+        "fast_power_note",
+        seconds=FAST_POWER_INTERVAL_SECONDS,
+        readings_per_day=_spaced(total.fast),
+        daily_limit=_spaced(total.daily_limit),
+        min_interval=total.min_interval,
     )
 
 
@@ -291,6 +293,10 @@ class SelectionStepsMixin:
             else:
                 return await self.async_step_review()
 
+        # The counted categories below, and the review screens' clauses, are
+        # put together here rather than by the frontend (words.py).
+        said = await async_load_words(self.hass)
+
         facts = collect_entity_facts(self.hass)
         self._proposal = propose(
             facts,
@@ -350,7 +356,10 @@ class SelectionStepsMixin:
                 "offered_count": str(len(offered)),
                 "hidden_count": str(self._proposal.hidden_count),
                 "preselected": str(len(default)),
-                "breakdown": self._proposal.breakdown(default) or "nothing yet",
+                "breakdown": (
+                    self._proposal.breakdown(said.category_labels(CATEGORIES), default)
+                    or said.say("breakdown_nothing")
+                ),
                 "did_not_fit": str(self._proposal.did_not_fit),
                 "power_interval": str(FAST_POWER_INTERVAL_SECONDS),
             },
@@ -374,6 +383,8 @@ class SelectionStepsMixin:
             else FastPowerSum(len(self._selected), self._min_interval, 0, daily_limit)
         )
         self._fast_power_fits = total.fits
+        # Loaded by the select screen, which every review screen follows.
+        said = words(self.hass)
         per_day = total.fast if total.fits else total.normal
         percent = round(per_day * 100 / daily_limit) if daily_limit else 0
         return {
@@ -381,8 +392,10 @@ class SelectionStepsMixin:
             "new_tags": str(self._new_tag_count(self._selected)),
             "tags_available": str(self._quota.tags_available),
             "min_interval": str(self._min_interval),
-            "power_clause": power_clause(total.power_count, self._fast_power and total.fits),
-            "fast_power_note": fast_power_note(total, self._fast_power),
+            "power_clause": power_clause(
+                said, total.power_count, self._fast_power and total.fits
+            ),
+            "fast_power_note": fast_power_note(said, total, self._fast_power),
             "readings_per_day": f"{per_day:,}".replace(",", " "),
             "daily_limit": f"{daily_limit:,}".replace(",", " "),
             "percent": str(percent),

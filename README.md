@@ -513,6 +513,32 @@ Tag Historian Explorer (**Tags**, open the series, **Rename**) to keep its
 history in one piece - or, if readings under the new id have already started a
 series, use **Merge into...** instead.
 
+## In your language
+
+The dialogs, the Repairs cards, the `tag_historian.import_history` action and
+its refusals are in **English, Swedish, German, Spanish, French and
+Portuguese** (Brazilian Portuguese, shown for Home Assistant's other
+Portuguese too). They follow the language of your Home Assistant profile, as
+the rest of Home Assistant does; any other language gets English. This page
+names the boxes and menus by their English labels.
+
+Three things read the same in every language, on purpose:
+
+- **The names of the sensors it adds** (below). The dialogs and this page
+  point at them by name, and their entity ids do not depend on the language.
+  What `sensor.tag_historian_history_import` reads - idle, running, finished,
+  stopped - is translated where Home Assistant shows it; its state, which an
+  automation compares against, is the English word.
+- **The history import's notification**, which is in English for now.
+- **What Tag Historian itself answered**, where a card or a refusal quotes it.
+
+A few words inside a sentence - the counted categories on the Choose screen
+("18 energy and power, 9 on/off states"), what the review screen says of the
+power sensors, how long until the daily allowance resets - are put together
+by the integration and not by your browser. Those are in the language Home
+Assistant itself is set to, under **Settings → System → General**, which on
+most installs is the same as yours.
+
 ## Sensors it adds
 
 | Sensor | What it is |

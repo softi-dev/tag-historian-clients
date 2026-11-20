@@ -1,0 +1,340 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Anslut till Tag Historian",
+        "description": "Klistra in en API-nyckel med behörigheten Write. Skapa en i Tag Historian Explorer under API-nycklar: tryck på Skapa ny nyckel, ge den ett namn och låt Behörighet stå kvar på Write, som dialogen öppnas med. En Read-nyckel kan inte skicka något. Nyckeln kontrolleras mot ditt konto nu; inga mätvärden skickas förrän du har valt vilka entiteter du vill spara historik för.",
+        "data": {
+          "host": "Värd",
+          "api_key": "API-nyckel"
+        },
+        "data_description": {
+          "host": "Låt det stå som det är om du inte kör Tag Historian någon annanstans.",
+          "api_key": "Behörigheten måste vara Write. En Read-nyckel kan läsa din historik men nekas när integrationen försöker lägga till i den."
+        }
+      },
+      "select": {
+        "title": "Välj vad du vill spara historik för",
+        "description": "Din plan tillåter {tag_limit} taggar. {tags_in_use} används redan, så {tags_available} är lediga.\n\nAv de {entity_count} entiteter som är aktiverade i det här Home Assistant är de {offered_count} i listan nedan de vars uppgift är att rapportera något: sensorer, binära sensorer, number-entiteter samt number- och counter-hjälpare, utom dem som Home Assistant märker som konfiguration och dem vars enhetsklass gör tillståndet till ett datum, en tid eller ett kategorinamn. De övriga {hidden_count} är sådant du slår på, kör eller slår upp snarare än sådant som mäter. Kryssa i ”Visa alla entiteter” för att lista alla {entity_count} i stället – den listan är inte filtrerad alls.\n\nListan bygger på vad varje entitet ÄR, inte på vad den råkar visa just nu, så en entitet som är otillgänglig för tillfället finns ändå med.\n\n{preselected} är ikryssade från början: {breakdown}. Ytterligare {did_not_fit} hade varit värda att kryssa i men rymdes inte i kvoten.\n\nIngenting skickas förrän du är klar.\n\nEn effektsensor (enhetsklass power, i W eller kW) kan skickas med {power_interval} sekunders mellanrum i stället för med minsta intervallet: kryssa i ”Skicka effektsensorer oftare” nedan.",
+        "data": {
+          "entities": "Entiteter att spara historik för",
+          "min_interval": "Minsta antal sekunder mellan mätvärden",
+          "show_all": "Visa alla entiteter",
+          "follow_renames": "Döp om taggar när entiteter döps om",
+          "fast_power": "Skicka effektsensorer oftare",
+          "share_approximate_location": "Använd min ungefärliga plats (cirka 10 km) för utomhusväder från SMHI"
+        },
+        "data_description": {
+          "entities": "En entitet kostar en tagg. Sensorer utan enhetsklass och utan tillståndsklass listas men lämnas okryssade, eftersom Home Assistant inte vet något om dem åt något håll: de flesta är handskrivna template-sensorer som rapporterar ett tal, men några rapporterar ett ord – ett husläge som står på ”away”, en status som står på ”idle” – och de sparar ingenting alls. Det som inte sparar något räknas på sensorn ”readings dropped” och entiteten namnges där, så en serie som förblir tom säger varför. Allt du redan har kryssat i ligger kvar i listan vad som än ändras i övrigt.",
+          "min_interval": "Mätvärden som kommer tidigare än så efter det föregående för samma entitet hoppas över. Din dygnskvot för mätvärden går åt till allt som skickas, så det är den här inställningen som hindrar en pratglad sensor från att göra slut på den.",
+          "show_all": "Lägger alla entiteter i installationen i listan, ofiltrerat. Några av dem sparar en 1:a eller en 0:a – en lampa, en strömbrytare, en garageport, en automation. Resten sparar ingenting: ett lås, en person, ett klimatläge och en mediaspelare rapporterar alla ord, och bara entiteter vars tillstånd är ett tal eller ett rent på/av kan bli ett mätvärde.",
+          "follow_renames": "När du döper om en entitet i Home Assistant döps även dess tagg i Tag Historian om, så att historiken fortsätter under det nya namnet. Ingenting kopieras: mätvärdena från tidigare ligger kvar där de är och läses under det nya namnet. Av: mätvärdena fortsätter in i den gamla taggen, och ett kort under Reparationer frågar om den ska döpas om.",
+          "fast_power": "Skickar varje entitet vars enhetsklass är power och vars enhet är W eller kW oftare än minsta intervallet ovan – hur ofta står överst på den här skärmen. Det är till för Laster i Tag Historian, som hittar en apparat på det steg den gör i din totala effekt och skiljer två nästan lika stora apparater åt mycket bättre med fler mätvärden. Det tar mer av din dygnskvot för mätvärden: nästa skärm visar summan med dina egna siffror innan något skickas, och när den summan är större än vad din plan tillåter per dygn får rutan ingen verkan. Övriga sensorer behåller minsta intervallet, och det gör historikimporten också.",
+          "share_approximate_location": "Talar om för Tag Historian var det här Home Assistant finns, avrundat till cirka 10 km innan det skickas, så att dina diagram kan visa utetemperatur och nederbörd från SMHI:s närmaste väderstationer. Endast Sverige. Det är bara ett förslag: en plats som redan är satt under Inställningar i Tag Historian står kvar som den är, och det är där du ändrar eller tar bort den. Av: ingenting om din plats skickas."
+        }
+      },
+      "review": {
+        "title": "Granska",
+        "description": "{selected} entiteter valda. {new_tags} av dem behöver en ny tagg, och din plan har {tags_available} lediga, så hela urvalet får plats.\n\nMed ett mätvärde per {min_interval} sekunder{power_clause} blir det högst {readings_per_day} mätvärden per dygn, ungefär {percent} % av din plans {daily_limit}.{fast_power_note}\n\nInget mer att bestämma – skicka för att slutföra."
+      },
+      "review_trim": {
+        "title": "Granska – det här kräver fler taggar än du har",
+        "description": "{selected} entiteter valda. {new_tags} av dem behöver en ny tagg och din plan har {tags_available} lediga, så {overflow} får inte plats.\n\nMed ett mätvärde per {min_interval} sekunder{power_clause} blir det högst {readings_per_day} mätvärden per dygn, ungefär {percent} % av din plans {daily_limit}.{fast_power_note}\n\nOm du fortsätter utan att korta urvalet kommer mätvärdena för de entiteter som behöver de {overflow} taggarna att nekas och gå förlorade – allt annat fortsätter att flöda.",
+        "data": {
+          "trim_to_fit": "Korta urvalet till det som får plats"
+        },
+        "data_description": {
+          "trim_to_fit": "Tar bort de lägst rankade entiteterna som behöver en ny tagg, och bara dem – en entitet vars tagg redan finns kostar ingenting och tas aldrig bort för att ge plats. Slå av för att behålla ditt urval och acceptera att det överskjutande nekas."
+        }
+      },
+      "history": {
+        "title": "Ta med historiken som Home Assistant redan har",
+        "description": "Home Assistant har redan historik för de {selected} entiteter du valde, och den kan följa med:\n\n- dess långtidsstatistik: varje sensors medel, min och max för varje timme, eller en mätares ställning och förbrukning, sparad så länge Home Assistants databas lever – ofta i åratal;\n- det recordern har: varje mätvärde från de senaste {recorder_days} dagarna.\n\nMed rutan ikryssad går båda till Tag Historian i bakgrunden när du har skickat, timhistoriken först. Ingen av dem räknas mot din dygnskvot för mätvärden, och sensorn ”Tag Historian history import” visar hur långt det har kommit. Binära sensorer, hjälpare av typen number och counter och sensorer utan state_class har ingen långtidsstatistik. Deras inspelade mätvärden kommer ändå.\n\nTag Historian får också veta det här Home Assistants tidszon, {time_zone}. Ditt kontos dygn, månader och larmtider följer kontots tidszon, och Tag Historian tar {time_zone} som den zonen bara om kontot inte har någon än: ingen vald under Inställningar i Tag Historian, ingen angiven för kontoägarens e-postkanal under Larm, och ingen som ett Home Assistant har föreslagit tidigare. Den ändras i Tag Historian, under Inställningar.",
+        "data": {
+          "import_on_setup": "Ta med historiken som Home Assistant redan har"
+        },
+        "data_description": {
+          "import_on_setup": "Timhistoriken så långt tillbaka som Home Assistant har den, upp till tio år, sedan recorderns mätvärden. Det Tag Historian redan har sparas inte två gånger. Utan kryss importeras ingenting nu: Konfigurera, Importera historiken som Home Assistant redan har, gör det när du vill."
+        }
+      },
+      "reauth_confirm": {
+        "title": "Tag Historian behöver en ny API-nyckel",
+        "description": "Nyckeln som integrationen använde godtas inte längre. Skapa en ny i Tag Historian Explorer – Skapa ny nyckel, med Behörighet satt till Write – och klistra in den här.",
+        "data": {
+          "api_key": "API-nyckel"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Det gick inte att nå den värden. Kontrollera adressen och att Home Assistant kommer ut på internet.",
+      "key_not_checked": "Tag Historian kunde inte kontrollera nyckeln just nu. Det svarade, så adressen stämmer, och det här säger ingenting om själva nyckeln. Försök igen om en minut.",
+      "unavailable": "Den adressen svarade, men sa att den inte kan göra det här just nu. Försök igen om en minut; om den fortsätter säga så, kontrollera adressen.",
+      "unavailable_known_host": "Tag Historian svarade, men kunde inte göra det här just nu. Försök igen om en minut.",
+      "cannot_connect_known_host": "Det gick inte att komma fram till Tag Historian just nu. Kontrollera att Home Assistant kommer ut på internet och försök igen om en minut.",
+      "invalid_auth": "Tag Historian godtog inte den nyckeln. Kontrollera att du kopierade hela och att den inte har dragits in.",
+      "read_only_key": "Den nyckelns behörighet är Read. Den kan läsa dina data men inte lägga till något – skapa en nyckel med Behörighet satt till Write i stället.",
+      "account_inactive": "Den nyckeln hör till ett konto som inte är aktivt. Logga in i Tag Historian Explorer för att se varför.",
+      "account_blocked": "Tag Historian nekade begäran för det här kontot. Logga in i Tag Historian Explorer för att se vad som behövs.",
+      "email_not_verified": "Kontots e-postadress har inte bekräftats och respittiden har gått ut, så Tag Historian tar inte emot nya data. Bekräfta adressen via mejlet du fick när du registrerade dig och försök igen.",
+      "select_at_least_one": "Välj minst en entitet. En integration som ställts in med tomt urval skulle stå där utan att spara något och se ut precis som en som fungerar."
+    },
+    "abort": {
+      "already_configured": "Det här Tag Historian-kontot är redan inställt. Att lägga till det två gånger skulle skicka varje mätvärde två gånger och förbruka din kvot dubbelt.",
+      "wrong_account": "Den nyckeln hör till ett annat Tag Historian-konto. Använd en nyckel för kontot som integrationen ställdes in med, eller lägg till det andra kontot separat.",
+      "reauth_successful": "Tag Historian godtog den nya nyckeln.",
+      "no_tags_available": "Ditt konto har inga lediga taggar, och varje entitet du valde skulle behöva en, så om urvalet kortas till det som får plats finns inget kvar att spara historik för. Ingenting har ställts in. Frigör en tagg i Tag Historian Explorer eller byt till en större plan, och lägg sedan till integrationen igen."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Tag Historian",
+        "menu_options": {
+          "choose": "Ändra vad du sparar historik för",
+          "import_history": "Importera historiken som Home Assistant redan har"
+        }
+      },
+      "select": {
+        "title": "Ändra vad du sparar historik för",
+        "description": "Din plan tillåter {tag_limit} taggar. {tags_in_use} används redan, så {tags_available} är lediga.\n\nAv de {entity_count} entiteter som är aktiverade i det här Home Assistant är de {offered_count} i listan nedan de vars uppgift är att rapportera något – sensorer, binära sensorer, number-entiteter samt number- och counter-hjälpare – plus allt du redan hade valt. De övriga {hidden_count} är sådant du slår på, kör eller slår upp snarare än sådant som mäter; kryssa i ”Visa alla entiteter” för att lista alla {entity_count} i stället, ofiltrerat.\n\n{preselected} är ikryssade just nu: {breakdown}. Ytterligare {did_not_fit} vore värda att kryssa i om kvoten räckte till dem.\n\nOm du kryssar ur en entitet slutar nya mätvärden för den att skickas. Historik som redan är sparad i Tag Historian rörs inte, och inte heller taggen – ta bort den i Tag Historian Explorer för att frigöra platsen.\n\nEn effektsensor (enhetsklass power, i W eller kW) kan skickas med {power_interval} sekunders mellanrum i stället för med minsta intervallet: kryssa i ”Skicka effektsensorer oftare” nedan.",
+        "data": {
+          "entities": "Entiteter att spara historik för",
+          "min_interval": "Minsta antal sekunder mellan mätvärden",
+          "show_all": "Visa alla entiteter",
+          "follow_renames": "Döp om taggar när entiteter döps om",
+          "fast_power": "Skicka effektsensorer oftare",
+          "share_approximate_location": "Använd min ungefärliga plats (cirka 10 km) för utomhusväder från SMHI"
+        },
+        "data_description": {
+          "entities": "En entitet kostar en tagg. En entitet som just nu är otillgänglig eller okänd ligger kvar i listan och förblir vald – det är bara mätvärdena som pausar, inte valet. En entitet vars tillstånd är ett ord i stället för ett tal sparar ingenting alls; de räknas och namnges på sensorn ”readings dropped”.",
+          "min_interval": "Mätvärden som kommer tidigare än så efter det föregående för samma entitet hoppas över.",
+          "show_all": "Lägger alla entiteter i installationen i listan, ofiltrerat – även sådana som inte kan spara något.",
+          "follow_renames": "När du döper om en entitet i Home Assistant döps även dess tagg i Tag Historian om, så att historiken fortsätter under det nya namnet. Ingenting kopieras: mätvärdena från tidigare ligger kvar där de är och läses under det nya namnet. Av: mätvärdena fortsätter in i den gamla taggen, och ett kort under Reparationer frågar om den ska döpas om.",
+          "fast_power": "Skickar varje entitet vars enhetsklass är power och vars enhet är W eller kW oftare än minsta intervallet ovan – hur ofta står överst på den här skärmen. Det är till för Laster i Tag Historian, som hittar en apparat på det steg den gör i din totala effekt och skiljer två nästan lika stora apparater åt mycket bättre med fler mätvärden. Det tar mer av din dygnskvot för mätvärden: nästa skärm visar summan med dina egna siffror innan något skickas, och när den summan är större än vad din plan tillåter per dygn får rutan ingen verkan. Övriga sensorer behåller minsta intervallet, och det gör historikimporten också.",
+          "share_approximate_location": "Talar om för Tag Historian var det här Home Assistant finns, avrundat till cirka 10 km innan det skickas, så att dina diagram kan visa utetemperatur och nederbörd från SMHI:s närmaste väderstationer. Endast Sverige. Det är bara ett förslag: en plats som redan är satt under Inställningar i Tag Historian står kvar som den är, och det är där du ändrar eller tar bort den. Av: ingenting om din plats skickas."
+        }
+      },
+      "review": {
+        "title": "Granska",
+        "description": "{selected} entiteter valda. {new_tags} av dem behöver en ny tagg, och din plan har {tags_available} lediga, så hela urvalet får plats.\n\nMed ett mätvärde per {min_interval} sekunder{power_clause} blir det högst {readings_per_day} mätvärden per dygn, ungefär {percent} % av din plans {daily_limit}.{fast_power_note}\n\nInget mer att bestämma – skicka för att spara."
+      },
+      "review_trim": {
+        "title": "Granska – det här kräver fler taggar än du har",
+        "description": "{selected} entiteter valda. {new_tags} av dem behöver en ny tagg och din plan har {tags_available} lediga, så {overflow} får inte plats.\n\nMed ett mätvärde per {min_interval} sekunder{power_clause} blir det högst {readings_per_day} mätvärden per dygn, ungefär {percent} % av din plans {daily_limit}.{fast_power_note}\n\nOm du fortsätter utan att korta urvalet kommer mätvärdena för de entiteter som behöver de {overflow} taggarna att nekas och gå förlorade – allt annat fortsätter att flöda.",
+        "data": {
+          "trim_to_fit": "Korta urvalet till det som får plats"
+        },
+        "data_description": {
+          "trim_to_fit": "Tar bort de lägst rankade entiteterna som behöver en ny tagg, och bara dem."
+        }
+      },
+      "import_history": {
+        "title": "Importera historiken som Home Assistant har",
+        "description": "Skickar historiken som Home Assistant har för entiteterna nedan till Tag Historian, i två delar, så att historiken på den här maskinen finns kvar även om maskinen inte gör det.\n\nFörst dess långtidsstatistik per timme: en mätstorhets medel, min och max för varje timme, eller en mätares ställning och förbrukning, så långt tillbaka som Home Assistant har dem och upp till tio år. I Tag Historian blir de timhistorik, märkt som Home Assistants statistik, och de har en egen kvot: upp till tio år per tagg var trettionde dag. Binära sensorer, hjälpare av typen number och counter och sensorer utan state_class har ingen långtidsstatistik.\n\nSedan det recordern har, med de ursprungliga tidsstämplarna; recordern här behåller {recorder_days} dagar av tillstånd. Importerade mätvärden räknas inte mot din dygnskvot för mätvärden. De räknas mot din importkvot i stället: {remaining} av {total} mätvärden kvar – {readings_per_day} per dygn gånger din plans fönster med full upplösning på {window_days} dagar, för alla importer tillsammans. Mätvärden som är äldre än det fönstret hoppas över, liksom allt som Tag Historian redan har, så att köra en import två gånger sparar ingenting två gånger.\n\nBara historik importeras: mätvärden som är äldre än ögonblicket då importen startar, äldre än entitetens första mätvärde som Tag Historian tog emot live, och äldre än starten på den första importen av den. Allt därefter är dina livedata, som integrationen skickar själv – även det som fortfarande väntar på att skickas. Där ett inspelat mätvärde hamnar i en timme som statistiken tog med behåller Tag Historian mätvärdets timme. En omdöpt entitet vars kort du besvarade med ”Börja på en ny tagg i stället” eller ”Håll isär dem” lämnas utanför: dess historik ligger kvar i den gamla taggen.\n\nImporten körs i bakgrunden. Sensorn ”Tag Historian history import” visar hur långt den har kommit, en avisering säger när den är klar, och efter en omstart fortsätter den där den slutade.",
+        "data": {
+          "entities": "Entiteter att importera",
+          "statistics": "Timhistorik från Home Assistants långtidsstatistik",
+          "days": "Hur långt tillbaka"
+        },
+        "data_description": {
+          "entities": "Bara entiteter du sparar historik för listas: en importerad entitet använder en tagg precis som en som skickas live.",
+          "statistics": "Kryssa ur för att bara importera de mätvärden recordern har.",
+          "days": "Dagar före i dag, högst tio år. Mätvärden går inte längre tillbaka än din plans fönster med full upplösning, vad som än står här."
+        }
+      }
+    },
+    "error": {
+      "select_at_least_one": "Välj minst en entitet. Om du vill sluta skicka helt, inaktivera integrationen i stället för att tömma listan – en post som är laddad men inte sparar något ser ut precis som en som fungerar.",
+      "import_nothing_selected": "Välj minst en entitet att importera."
+    },
+    "abort": {
+      "cannot_connect": "Det gick inte att nå Tag Historian, så den här skärmen kan inte visa hur mycket av din kvot som är kvar. Försök igen om en stund.",
+      "key_not_checked": "Tag Historian kunde inte kontrollera integrationens nyckel just nu, så den här skärmen kan inte visa hur mycket av din kvot som är kvar. Det säger ingenting om själva nyckeln. Försök igen om en minut.",
+      "unavailable": "Tag Historian svarade, men kunde inte göra det här just nu, så den här skärmen kan inte visa hur mycket av din kvot som är kvar. Försök igen om en minut.",
+      "no_tags_available": "Ditt konto har inga lediga taggar, och varje entitet du valde skulle behöva en, så om urvalet kortas till det som får plats finns inget kvar att spara historik för. Ditt befintliga urval har lämnats orört. Frigör en tagg i Tag Historian Explorer eller byt till en större plan.",
+      "import_started": "Importerar historiken för {entities} entiteter till Tag Historian. Följ den på sensorn ”Tag Historian history import”; en avisering säger när den är klar.",
+      "import_running": "En historikimport körs redan för det här kontot. Vänta tills den är klar – sensorn ”Tag Historian history import” visar hur långt den har kommit.",
+      "import_refused": "Tag Historian startade inte importen och sa:\n\n{message}",
+      "no_recorder": "Home Assistants recorder körs inte, så det finns ingen inspelad historik att importera.",
+      "not_loaded": "Den här Tag Historian-posten körs inte just nu. Vänta tills den gör det och försök igen.",
+      "key_rejected": "Tag Historian godtar inte längre integrationens API-nyckel. Ange en ny på kortet där Home Assistant ber om nyckeln igen, och försök sedan igen.",
+      "import_cannot_connect": "Det gick inte att nå Tag Historian för att starta importen. Försök igen om en stund.",
+      "import_key_not_checked": "Tag Historian kunde inte kontrollera integrationens nyckel just nu, så importen startade inte. Det säger ingenting om själva nyckeln. Försök igen om en minut.",
+      "import_unavailable": "Tag Historian svarade, men kunde inte starta importen just nu. Försök igen om en minut."
+    }
+  },
+  "issues": {
+    "tag_quota_exceeded": {
+      "title": "Tag Historian nekade några mätvärden",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Välj bort ned till din kvot",
+            "description": "Ditt konto använder {tag_count} av {tag_limit} taggar, så {dropped_points} mätvärden nekades och gick förlorade. De behövde de här taggarna, som din plan inte har plats för: {refused_tags}\n\nAllt annat sparas fortfarande. Kryssa ur entiteter nedan tills urvalet får plats, eller uppgradera din plan och låt det vara som det är.",
+            "data": {
+              "entities": "Entiteter att fortsätta spara historik för"
+            }
+          }
+        }
+      }
+    },
+    "daily_quota_exceeded": {
+      "title": "Tag Historians dygnsgräns för mätvärden är nådd",
+      "description": "Ditt konto har använt dagens kvot för mätvärden, så Tag Historian tar inte emot nya data förrän gränsen nollställs, vilket sker {when}. Mätvärdena hålls kvar till dess, även över en omstart. Om väntan blir lång släpps de äldsta och läses tillbaka från Home Assistants recorder när Tag Historian tar emot data igen, så de kommer ändå fram – och räknas mot nästa dygns kvot.\n\nTvå vägar ut: höj minsta intervallet i integrationens alternativ så att färre mätvärden skickas, eller byt till en plan med större kvot."
+    },
+    "write_forbidden": {
+      "title": "Tag Historian tar inte emot data från det här kontot",
+      "description": "Tag Historian nekade skrivningen och sa:\n\n{message}"
+    },
+    "service_unavailable": {
+      "title": "Tag Historian har inte tagit emot data",
+      "description": "Skrivningarna har misslyckats i {minutes} minuter – Tag Historian har svarat att det inte kan ta emot dem just nu: det är för upptaget, eller så kan det för tillfället inte kontrollera integrationens nyckel. Ingenting har ändrats med ditt konto eller nyckeln. Mätvärdena hålls kvar, även över en omstart, och skickas när de tas emot igen; om det drar ut på tiden släpps de äldsta och läses tillbaka från Home Assistants recorder efteråt. Du behöver inte göra något."
+    },
+    "entity_renamed": {
+      "title": "{old} döptes om till {new} i Home Assistant",
+      "fix_flow": {
+        "step": {
+          "rename_choice": {
+            "title": "Behålla historiken för {old} under det nya namnet?",
+            "description": "Home Assistant döpte om {old} till {new}. Tag Historian fortsätter under tiden att spara dess mätvärden i taggen {old_tag}, så historiken fortsätter och ingenting går förlorat.{refusal}\n\nDöp om taggen, så läses hela dess historik – även mätvärdena från tidigare – som {new_tag} från och med nu, och nya mätvärden sparas under det namnet. Ingenting kopieras: det är samma historik under ett nytt namn, och den kan döpas tillbaka i Tag Historian Explorer.\n\nEller börja på en ny tagg, {new_tag}, för mätvärdena från och med nu, och låt historiken ligga kvar där den är, under {old_tag}. Det tar en tagg till av din plan.",
+            "menu_options": {
+              "rename_tag": "Döp om taggen och behåll historiken",
+              "new_tag": "Börja på en ny tagg i stället"
+            }
+          },
+          "merge_choice": {
+            "title": "Slå ihop historiken för {old} med {new}?",
+            "description": "Home Assistant döpte om {old} till {new}, ett namn som redan har en tagg i Tag Historian: {new_tag}. Den omdöpta entitetens historik från före namnbytet ligger i {old_tag}, och dess mätvärden fortsätter in i {old_tag} tills du väljer, så ingenting går förlorat.{refusal}\n\nSlå ihop dem, så läses de två som en historik under {new_tag}, och nya mätvärden sparas där. Där båda har mätvärden under samma timme räknas den timmens siffror fram ur båda, och {old_tag} slutar räknas som en tagg. Ingenting kopieras, och sammanslagningen kan ångras i Tag Historian Explorer.\n\nEller håll isär dem: {old_tag} behåller sin historik som en egen tagg, och mätvärdena från och med nu går till {new_tag}.",
+            "menu_options": {
+              "merge_tags": "Slå ihop dem till en historik",
+              "keep_apart": "Håll isär dem"
+            }
+          }
+        },
+        "abort": {
+          "carry_unavailable": "Tag Historian kunde inte göra det här just nu, så ingenting ändrades – det gick inte att nå eller tog inte emot begäran. Om Home Assistant dessutom har bett om integrationens nyckel igen var det nyckeln som nekades – ge den en ny först. Mätvärdena fortsätter under tiden in i den gamla taggen, så ingenting går förlorat. Försök igen från det här kortet senare.",
+          "carry_refused": "Tag Historian nekade, och ingenting ändrades. Det sa:\n\n{message}"
+        }
+      }
+    },
+    "bring_years": {
+      "title": "Ta med åren som Home Assistant redan har till Tag Historian",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Ta med åren som Home Assistant redan har",
+            "description": "Den här versionen av integrationen kan ta med historiken som Home Assistant redan har för varje entitet som {account} sparar historik för: först dess långtidsstatistik per timme, så långt tillbaka som Home Assistant har den och upp till tio år, sedan de mätvärden recordern har. I Tag Historian blir de historiken från tiden innan integrationen installerades, märkt som Home Assistants statistik. Binära sensorer, hjälpare av typen number och counter och sensorer utan state_class har ingen långtidsstatistik.\n\nSkicka för att starta. Det körs i bakgrunden – sensorn ”Tag Historian history import” visar hur långt det har kommit, och en avisering säger vad det gjorde – och det räknas inte mot din dygnskvot för mätvärden. Det Tag Historian redan har sparas inte två gånger.\n\nIntegrationen talar också om det här Home Assistants tidszon för Tag Historian varje gång den startar. Tag Historian tar den bara om kontot inte har någon tidszon än: ingen vald under Inställningar i Tag Historian, ingen angiven för kontoägarens e-postkanal under Larm, och ingen föreslagen tidigare. Kontots dygn, månader och larmtider följer kontots tidszon, som ändras i Tag Historian, under Inställningar."
+          }
+        },
+        "abort": {
+          "not_loaded": "Den här Tag Historian-posten körs inte just nu. Vänta tills den gör det och försök igen från det här kortet.",
+          "import_running": "En historikimport körs redan för det här kontot. Försök igen från det här kortet när den är klar.",
+          "no_recorder": "Home Assistants recorder körs inte, så det finns ingen historik att ta med.",
+          "import_refused": "Tag Historian startade inte importen och sa:\n\n{message}",
+          "key_rejected": "Tag Historian godtar inte längre integrationens API-nyckel. Ange en ny på kortet där Home Assistant ber om nyckeln igen, och försök sedan igen från det här kortet.",
+          "import_cannot_connect": "Det gick inte att nå Tag Historian för att starta importen. Försök igen från det här kortet om en stund.",
+          "import_key_not_checked": "Tag Historian kunde inte kontrollera integrationens nyckel just nu, så importen startade inte. Det säger ingenting om själva nyckeln. Försök igen från det här kortet om en minut.",
+          "import_unavailable": "Tag Historian svarade, men kunde inte starta importen just nu. Försök igen från det här kortet om en minut."
+        }
+      }
+    },
+    "fast_power_does_not_fit": {
+      "title": "Att skicka effektsensorer oftare ryms inte längre i din plan",
+      "description": "”Skicka effektsensorer oftare” är ikryssad, men med {power_interval} sekunders mellanrum skulle dina valda entiteter kunna skicka upp till {readings_per_day} mätvärden per dygn, och din plan tillåter {daily_limit}. Därför skickas varje entitet, även effektsensorerna, tills vidare högst en gång per {min_interval} sekunder.\n\nDet händer när planens kvot minskar eller när en vald entitet blir en effektsensor efter att du valde. Effektsensorerna går tillbaka till {power_interval} sekunders mellanrum av sig själva, och det här kortet försvinner, så snart summan ryms igen. För att få den att rymmas, kryssa ur några entiteter under Konfigurera; för att sluta, kryssa ur ”Skicka effektsensorer oftare” där och behåll {min_interval} sekunder."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "history_import": {
+        "state": {
+          "idle": "Vilar",
+          "running": "Pågår",
+          "finished": "Klar",
+          "stopped": "Stoppad"
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "not_selected": {
+      "message": "Inte valda för Tag Historian: {entities}. Lägg till dem under Konfigurera, Ändra vad du sparar historik för, först – en importerad entitet använder en tagg precis som en som skickas live."
+    },
+    "nothing_selected": {
+      "message": "Den här Tag Historian-posten sparar inte historik för några entiteter, så det finns inget att importera."
+    },
+    "entry_not_loaded": {
+      "message": "Den Tag Historian-posten körs inte."
+    },
+    "entry_ambiguous": {
+      "message": "Mer än ett Tag Historian-konto är inställt här. Ange vilket med config_entry_id."
+    },
+    "no_recorder": {
+      "message": "Home Assistants recorder körs inte, så det finns ingen inspelad historik att importera."
+    },
+    "import_running": {
+      "message": "En historikimport körs redan för det här kontot."
+    },
+    "import_refused": {
+      "message": "Tag Historian startade inte importen: {message}"
+    },
+    "key_rejected": {
+      "message": "Tag Historian godtar inte längre integrationens API-nyckel."
+    },
+    "import_cannot_connect": {
+      "message": "Det gick inte att nå Tag Historian för att starta importen."
+    },
+    "import_key_not_checked": {
+      "message": "Tag Historian kunde inte kontrollera integrationens nyckel just nu, så importen startade inte. Försök igen om en minut."
+    },
+    "import_unavailable": {
+      "message": "Tag Historian svarade, men kunde inte starta importen just nu. Försök igen om en minut."
+    }
+  },
+  "services": {
+    "import_history": {
+      "name": "Importera historik",
+      "description": "Skickar historiken som Home Assistant har för entiteter du sparar historik för till Tag Historian: först dess långtidsstatistik per timme, om inte statistics är avstängt, sedan recorderns mätvärden med sina ursprungliga tidsstämplar. Importerade mätvärden räknas mot kontots importkvot, inte dygnskvoten, och bara historik importeras: ingenting som integrationen skickar live eller har kvar att skicka.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Konto",
+          "description": "Vilken Tag Historian-post importen ska gå till. Behövs bara när fler än en är inställd."
+        },
+        "entity_id": {
+          "name": "Entiteter",
+          "description": "Entiteter att importera. Lämna tomt för alla entiteter som posten sparar historik för."
+        },
+        "statistics": {
+          "name": "Timstatistik",
+          "description": "Ta med Home Assistants långtidsstatistik först: timhistorik så långt tillbaka som den finns, upp till tio år. På om den inte stängs av."
+        },
+        "days": {
+          "name": "Dagar tillbaka",
+          "description": "Hur långt tillbaka importen ska gå, högst tio år. Mätvärden går inte längre tillbaka än din plans fönster med full upplösning. Lämna tomt för att gå så långt tillbaka som var och en når."
+        }
+      }
+    }
+  },
+  "common": {
+    "category_energy": "energi och effekt",
+    "category_climate": "temperatur och luftfuktighet",
+    "category_meter": "mätare och summor",
+    "category_measurement": "övriga mätningar",
+    "category_numeric": "övriga numeriska sensorer",
+    "category_onoff": "på/av-tillstånd",
+    "category_helper": "hjälpare",
+    "category_other": "inte förvalda",
+    "category_hidden": "visas bara med alla",
+    "breakdown_nothing": "inga än",
+    "power_clause_none": "(”Skicka effektsensorer oftare” är ikryssad men ändrar ingenting här: inget av det valda är en effektsensor i W eller kW med längre intervall än så)",
+    "power_clause_one": ", och ett per {seconds} sekunder för {count} effektsensor,",
+    "power_clause_other": ", och ett per {seconds} sekunder för var och en av de {count} effektsensorerna,",
+    "fast_power_note": "”Skicka effektsensorer oftare” ryms inte i din plan. Med {seconds} sekunders mellanrum skulle de här sensorerna kunna skicka upp till {readings_per_day} mätvärden per dygn; din plan tillåter {daily_limit}. Skickas det som det är sparas rutan okryssad och varje entitet, även effektsensorerna, skickas högst en gång per {min_interval} sekunder. För att använda den, kryssa ur några entiteter under Konfigurera och kryssa i rutan igen.",
+    "wait_under_a_minute": "om mindre än en minut",
+    "wait_minutes_one": "om ungefär en minut",
+    "wait_minutes_other": "om ungefär {count} minuter",
+    "wait_hours_one": "om ungefär en timme",
+    "wait_hours_other": "om ungefär {count} timmar",
+    "refusal_said": "Tag Historian svarade på frågan: {refusal}",
+    "no_reason_given": "ingen orsak angavs"
+  }
+}

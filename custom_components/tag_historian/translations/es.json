@@ -1,0 +1,340 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Conectar con Tag Historian",
+        "description": "Pega una clave de API con el permiso Write. Créala en Tag Historian Explorer, en Claves de API: pulsa Crear clave nueva, ponle un nombre y deja Permiso en Write, que es como se abre el diálogo. Una clave Read no puede enviar nada. La clave se comprueba ahora con tu cuenta; no se envía ninguna medición hasta que hayas elegido de qué entidades guardar historial.",
+        "data": {
+          "host": "Host",
+          "api_key": "Clave de API"
+        },
+        "data_description": {
+          "host": "Déjalo como está, salvo que ejecutes Tag Historian en otro sitio.",
+          "api_key": "El permiso tiene que ser Write. Una clave Read puede consultar tu historial, pero se rechaza cuando esta integración intenta añadirle algo."
+        }
+      },
+      "select": {
+        "title": "Elige de qué guardar historial",
+        "description": "Tu plan permite {tag_limit} tags. {tags_in_use} ya están en uso, así que quedan {tags_available}.\n\nDe las {entity_count} entidades activadas en este Home Assistant, las {offered_count} de la lista de abajo son aquellas cuyo trabajo es informar de algo: sensores, sensores binarios, números, ayudantes número y contadores, menos las que Home Assistant marca como configuración y las que, por su device class, tienen como estado una fecha, una hora o el nombre de una categoría. Las otras {hidden_count} son cosas que enciendes, ejecutas o consultas, no cosas que miden. Marca «Mostrar todas las entidades» para listar las {entity_count}; esa lista no se filtra en absoluto.\n\nLa lista se elige por lo que cada entidad ES, no por lo que casualmente marca en este momento, así que una entidad que ahora mismo no está disponible sigue aquí.\n\n{preselected} están marcadas de entrada: {breakdown}. Otras {did_not_fit} merecían marcarse, pero el cupo no llegaba hasta ellas.\n\nNo se envía nada hasta que termines.\n\nUn sensor de potencia (device class power, en W o kW) se puede enviar cada {power_interval} segundos en lugar de con el intervalo mínimo: marca «Enviar los sensores de potencia más a menudo» abajo.",
+        "data": {
+          "entities": "Entidades de las que guardar historial",
+          "min_interval": "Segundos mínimos entre mediciones",
+          "show_all": "Mostrar todas las entidades",
+          "follow_renames": "Renombrar los tags cuando se renombren las entidades",
+          "fast_power": "Enviar los sensores de potencia más a menudo",
+          "share_approximate_location": "Usar mi ubicación aproximada (unos 10 km) para el tiempo exterior de SMHI"
+        },
+        "data_description": {
+          "entities": "Una entidad cuesta un tag. Los sensores sin device class y sin state class aparecen en la lista pero sin marcar, porque Home Assistant no sabe nada de ellos en ningún sentido: la mayoría son sensores de plantilla escritos a mano que informan de un número, pero unos pocos informan de una palabra (un modo de casa que está en «away», un estado que está en «idle») y esos no guardan nada. Lo que no guarda nada se cuenta en el sensor «readings dropped» y la entidad se nombra allí, de modo que una serie que se queda vacía dice por qué. Todo lo que ya hayas marcado se queda en la lista, cambie lo que cambie.",
+          "min_interval": "Las mediciones que llegan antes de ese tiempo tras la anterior de la misma entidad se omiten. Tu cupo diario de mediciones se gasta en todo lo que se envía, así que este es el ajuste que evita que un sensor muy hablador lo agote.",
+          "show_all": "Pone en la lista todas las entidades de la instalación, sin filtrar. Algunas guardan un 1 o un 0: una luz, un interruptor, una persiana, una automatización. El resto no guarda nada: una cerradura, una persona, un modo de climatización y un reproductor multimedia informan todos de palabras, y solo las entidades cuyo estado es un número o un simple encendido/apagado pueden convertirse en una medición.",
+          "follow_renames": "Cuando renombras una entidad en Home Assistant, se renombra también su tag en Tag Historian, para que su historial siga bajo el nombre nuevo. No se copia nada: las mediciones anteriores se quedan donde están y se leen con el nombre nuevo. Desactivado: las mediciones siguen entrando en el tag antiguo, y una tarjeta en Reparaciones pregunta si quieres renombrarlo.",
+          "fast_power": "Envía cada entidad cuya device class es power y cuya unidad es W o kW más a menudo que el intervalo mínimo de arriba; cada cuánto, lo dice la parte superior de esta pantalla. Es para Consumidores en Tag Historian, que encuentra un aparato por el escalón que produce en tu potencia total y distingue mucho mejor dos aparatos de tamaño parecido con más mediciones. Gasta más de tu cupo diario de mediciones: la pantalla siguiente muestra la suma con tus propios números antes de enviar nada, y cuando esa suma supera lo que tu plan permite al día, la casilla no tiene efecto. Los demás sensores mantienen el intervalo mínimo, y la importación del historial también.",
+          "share_approximate_location": "Le dice a Tag Historian dónde está este Home Assistant, redondeado a unos 10 km antes de enviarlo, para que tus gráficos puedan mostrar la temperatura exterior y la precipitación de las estaciones meteorológicas más cercanas del Instituto Meteorológico e Hidrológico de Suecia (SMHI). Solo Suecia. Es solo una propuesta: un lugar que ya esté puesto en los Ajustes de Tag Historian se queda como está, y es allí donde lo cambias o lo quitas. Desactivado: no se envía nada sobre tu ubicación."
+        }
+      },
+      "review": {
+        "title": "Revisar",
+        "description": "{selected} entidades seleccionadas. {new_tags} de ellas necesitan un tag nuevo, y tu plan tiene {tags_available} libres, así que cabe toda la selección.\n\nCon una medición cada {min_interval} segundos{power_clause} son como máximo {readings_per_day} mediciones al día, alrededor del {percent} % de las {daily_limit} de tu plan.{fast_power_note}\n\nNo hay nada más que decidir: envía para terminar."
+      },
+      "review_trim": {
+        "title": "Revisar: esto necesita más tags de los que tienes",
+        "description": "{selected} entidades seleccionadas. {new_tags} de ellas necesitan un tag nuevo y tu plan tiene {tags_available} libres, así que {overflow} no caben.\n\nCon una medición cada {min_interval} segundos{power_clause} son como máximo {readings_per_day} mediciones al día, alrededor del {percent} % de las {daily_limit} de tu plan.{fast_power_note}\n\nSi continúas sin recortar, las mediciones de las entidades que necesitan esos {overflow} tags se rechazarán y se perderán; todo lo demás sigue fluyendo.",
+        "data": {
+          "trim_to_fit": "Recortar la selección a lo que cabe"
+        },
+        "data_description": {
+          "trim_to_fit": "Quita las entidades peor clasificadas que necesitan un tag nuevo, y solo esas: una entidad cuyo tag ya existe no cuesta nada y nunca se quita para hacer sitio. Desactívalo para conservar tu selección y aceptar que lo que sobra se rechazará."
+        }
+      },
+      "history": {
+        "title": "Traer el historial que Home Assistant ya tiene",
+        "description": "Home Assistant ya guarda historial de las {selected} entidades que elegiste, y te lo puedes traer:\n\n- sus estadísticas a largo plazo: la media, el mínimo y el máximo de cada sensor para cada hora, o la lectura y el consumo de un contador, guardados mientras dure la base de datos de Home Assistant, a menudo años;\n- lo que tiene el recorder: cada medición de los últimos {recorder_days} días.\n\nCon la casilla marcada, los dos van a Tag Historian en segundo plano en cuanto envíes, primero el historial por horas. Ninguno cuenta para tu cupo diario de mediciones, y el sensor «Tag Historian history import» muestra por dónde va. Los sensores binarios, los ayudantes número y contador, y los sensores sin state_class no tienen estadísticas a largo plazo. Sus mediciones grabadas vienen igualmente.\n\nA Tag Historian también se le dice la zona horaria de este Home Assistant, {time_zone}. Los días, los meses y las horas de las alarmas de tu cuenta están en la zona horaria de la cuenta, y Tag Historian toma {time_zone} como esa zona solo si la cuenta todavía no tiene ninguna: ninguna elegida en los Ajustes de Tag Historian, ninguna dada al canal de correo del propietario de la cuenta en Alarmas, y ninguna propuesta antes por un Home Assistant. Se cambia en Tag Historian, en Ajustes.",
+        "data": {
+          "import_on_setup": "Traer el historial que Home Assistant ya tiene"
+        },
+        "data_description": {
+          "import_on_setup": "El historial por horas hasta donde Home Assistant lo tenga, hasta diez años, y después las mediciones del recorder. Lo que Tag Historian ya tiene no se guarda dos veces. Sin marcar, ahora no se importa nada: Configurar, Importar el historial que Home Assistant ya tiene, lo hace cuando quieras."
+        }
+      },
+      "reauth_confirm": {
+        "title": "Tag Historian necesita una clave de API nueva",
+        "description": "La clave que usaba esta integración ya no se acepta. Crea una nueva en Tag Historian Explorer (Crear clave nueva, con Permiso en Write) y pégala aquí.",
+        "data": {
+          "api_key": "Clave de API"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "No se ha podido contactar con ese host. Comprueba la dirección y que Home Assistant tenga salida a internet.",
+      "key_not_checked": "Tag Historian no ha podido comprobar la clave ahora mismo. Respondió, así que la dirección es correcta, y esto no dice nada de la clave en sí. Inténtalo de nuevo en un minuto.",
+      "unavailable": "Esa dirección respondió, pero dijo que no puede atender esto ahora mismo. Inténtalo de nuevo en un minuto; si sigue diciéndolo, comprueba la dirección.",
+      "unavailable_known_host": "Tag Historian respondió, pero no ha podido hacer esto ahora mismo. Inténtalo de nuevo en un minuto.",
+      "cannot_connect_known_host": "No se ha podido llegar a Tag Historian ahora mismo. Comprueba que Home Assistant tenga salida a internet e inténtalo de nuevo en un minuto.",
+      "invalid_auth": "Tag Historian no ha aceptado esa clave. Comprueba que la copiaste entera y que no se ha revocado.",
+      "read_only_key": "El permiso de esa clave es Read. Puede consultar tus datos, pero no añadir nada: crea en su lugar una clave con Permiso en Write.",
+      "account_inactive": "Esa clave pertenece a una cuenta que no está activa. Inicia sesión en Tag Historian Explorer para ver por qué.",
+      "account_blocked": "Tag Historian ha rechazado la petición para esta cuenta. Inicia sesión en Tag Historian Explorer para ver qué necesita.",
+      "email_not_verified": "La dirección de correo de esta cuenta no se ha confirmado y el periodo de gracia ha pasado, así que Tag Historian rechaza datos nuevos. Confirma la dirección desde el correo de registro e inténtalo de nuevo.",
+      "select_at_least_one": "Elige al menos una entidad. Una integración configurada con la selección vacía se quedaría ahí sin guardar nada y tendría el mismo aspecto que una que funciona."
+    },
+    "abort": {
+      "already_configured": "Esta cuenta de Tag Historian ya está configurada. Añadirla dos veces enviaría cada medición dos veces y gastaría tu cupo dos veces.",
+      "wrong_account": "Esa clave pertenece a otra cuenta de Tag Historian. Usa una clave de la cuenta con la que se configuró esta integración, o añade la otra cuenta por separado.",
+      "reauth_successful": "Tag Historian ha aceptado la clave nueva.",
+      "no_tags_available": "Tu cuenta no tiene tags libres, y cada entidad que elegiste necesitaría uno, así que recortar la selección a lo que cabe no deja nada de lo que guardar historial. No se ha configurado nada. Libera un tag en Tag Historian Explorer o pasa a un plan mayor, y después vuelve a añadir esta integración."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Tag Historian",
+        "menu_options": {
+          "choose": "Cambiar de qué guardas historial",
+          "import_history": "Importar el historial que Home Assistant ya tiene"
+        }
+      },
+      "select": {
+        "title": "Cambiar de qué guardas historial",
+        "description": "Tu plan permite {tag_limit} tags. {tags_in_use} ya están en uso, así que quedan {tags_available}.\n\nDe las {entity_count} entidades activadas en este Home Assistant, las {offered_count} de la lista de abajo son aquellas cuyo trabajo es informar de algo (sensores, sensores binarios, números, ayudantes número y contadores), más todo lo que ya tenías seleccionado. Las otras {hidden_count} son cosas que enciendes, ejecutas o consultas, no cosas que miden; marca «Mostrar todas las entidades» para listar las {entity_count}, sin filtrar.\n\n{preselected} están marcadas ahora mismo: {breakdown}. Otras {did_not_fit} merecerían marcarse si el cupo llegara hasta ellas.\n\nDesmarcar una entidad detiene las mediciones nuevas de esa entidad. El historial ya guardado en Tag Historian no se toca, y el tag tampoco: bórralo en Tag Historian Explorer para liberar el hueco.\n\nUn sensor de potencia (device class power, en W o kW) se puede enviar cada {power_interval} segundos en lugar de con el intervalo mínimo: marca «Enviar los sensores de potencia más a menudo» abajo.",
+        "data": {
+          "entities": "Entidades de las que guardar historial",
+          "min_interval": "Segundos mínimos entre mediciones",
+          "show_all": "Mostrar todas las entidades",
+          "follow_renames": "Renombrar los tags cuando se renombren las entidades",
+          "fast_power": "Enviar los sensores de potencia más a menudo",
+          "share_approximate_location": "Usar mi ubicación aproximada (unos 10 km) para el tiempo exterior de SMHI"
+        },
+        "data_description": {
+          "entities": "Una entidad cuesta un tag. Una entidad que ahora mismo no está disponible o es desconocida se queda en esta lista y sigue seleccionada: lo que se detiene son las mediciones, no la elección. Una entidad cuyo estado es una palabra en lugar de un número no guarda nada; esas se cuentan y se nombran en el sensor «readings dropped».",
+          "min_interval": "Las mediciones que llegan antes de ese tiempo tras la anterior de la misma entidad se omiten.",
+          "show_all": "Pone en la lista todas las entidades de la instalación, sin filtrar, incluidas las que no pueden guardar nada.",
+          "follow_renames": "Cuando renombras una entidad en Home Assistant, se renombra también su tag en Tag Historian, para que su historial siga bajo el nombre nuevo. No se copia nada: las mediciones anteriores se quedan donde están y se leen con el nombre nuevo. Desactivado: las mediciones siguen entrando en el tag antiguo, y una tarjeta en Reparaciones pregunta si quieres renombrarlo.",
+          "fast_power": "Envía cada entidad cuya device class es power y cuya unidad es W o kW más a menudo que el intervalo mínimo de arriba; cada cuánto, lo dice la parte superior de esta pantalla. Es para Consumidores en Tag Historian, que encuentra un aparato por el escalón que produce en tu potencia total y distingue mucho mejor dos aparatos de tamaño parecido con más mediciones. Gasta más de tu cupo diario de mediciones: la pantalla siguiente muestra la suma con tus propios números antes de enviar nada, y cuando esa suma supera lo que tu plan permite al día, la casilla no tiene efecto. Los demás sensores mantienen el intervalo mínimo, y la importación del historial también.",
+          "share_approximate_location": "Le dice a Tag Historian dónde está este Home Assistant, redondeado a unos 10 km antes de enviarlo, para que tus gráficos puedan mostrar la temperatura exterior y la precipitación de las estaciones meteorológicas más cercanas del Instituto Meteorológico e Hidrológico de Suecia (SMHI). Solo Suecia. Es solo una propuesta: un lugar que ya esté puesto en los Ajustes de Tag Historian se queda como está, y es allí donde lo cambias o lo quitas. Desactivado: no se envía nada sobre tu ubicación."
+        }
+      },
+      "review": {
+        "title": "Revisar",
+        "description": "{selected} entidades seleccionadas. {new_tags} de ellas necesitan un tag nuevo, y tu plan tiene {tags_available} libres, así que cabe toda la selección.\n\nCon una medición cada {min_interval} segundos{power_clause} son como máximo {readings_per_day} mediciones al día, alrededor del {percent} % de las {daily_limit} de tu plan.{fast_power_note}\n\nNo hay nada más que decidir: envía para guardar."
+      },
+      "review_trim": {
+        "title": "Revisar: esto necesita más tags de los que tienes",
+        "description": "{selected} entidades seleccionadas. {new_tags} de ellas necesitan un tag nuevo y tu plan tiene {tags_available} libres, así que {overflow} no caben.\n\nCon una medición cada {min_interval} segundos{power_clause} son como máximo {readings_per_day} mediciones al día, alrededor del {percent} % de las {daily_limit} de tu plan.{fast_power_note}\n\nSi continúas sin recortar, las mediciones de las entidades que necesitan esos {overflow} tags se rechazarán y se perderán; todo lo demás sigue fluyendo.",
+        "data": {
+          "trim_to_fit": "Recortar la selección a lo que cabe"
+        },
+        "data_description": {
+          "trim_to_fit": "Quita las entidades peor clasificadas que necesitan un tag nuevo, y solo esas."
+        }
+      },
+      "import_history": {
+        "title": "Importar el historial que tiene Home Assistant",
+        "description": "Envía a Tag Historian el historial que Home Assistant guarda de las entidades de abajo, en dos partes, para que el historial de este equipo se conserve aunque el equipo no lo haga.\n\nPrimero sus estadísticas a largo plazo por horas: la media, el mínimo y el máximo de una magnitud para cada hora, o la lectura y el consumo de un contador, hasta donde Home Assistant las tenga y hasta diez años. En Tag Historian son historial por horas, marcado como estadísticas de Home Assistant, y tienen un cupo propio: hasta diez años por tag cada treinta días. Los sensores binarios, los ayudantes número y contador, y los sensores sin state_class no tienen estadísticas a largo plazo.\n\nDespués, lo que tiene el recorder, con las marcas de tiempo originales; el recorder de aquí conserva {recorder_days} días de estados. Las mediciones importadas no cuentan para tu cupo diario de mediciones. Cuentan, en cambio, para tu cupo de importación: quedan {remaining} de {total} mediciones, es decir, {readings_per_day} al día por el periodo con resolución completa de tu plan, de {window_days} días, para todas las importaciones juntas. Las mediciones anteriores a ese periodo se omiten, igual que todo lo que Tag Historian ya tiene, así que ejecutar una importación dos veces no guarda nada dos veces.\n\nSolo se importa historial: mediciones anteriores al momento en que empieza la importación, anteriores a la primera medición de la entidad que Tag Historian recibió en directo, y anteriores al inicio de su primera importación. Todo lo posterior son tus datos en directo, que esta integración envía por sí misma, incluido lo que todavía espera a ser enviado. Cuando una medición grabada cae en una hora que trajeron las estadísticas, Tag Historian conserva la hora de la medición. Una entidad renombrada cuya tarjeta respondiste con «Mejor empezar un tag nuevo» o «Mantenerlos separados» se deja fuera: su historial se queda en el tag antiguo.\n\nLa importación se ejecuta en segundo plano. El sensor «Tag Historian history import» muestra por dónde va, una notificación avisa cuando termina, y tras un reinicio continúa donde se quedó.",
+        "data": {
+          "entities": "Entidades que importar",
+          "statistics": "Historial por horas de las estadísticas a largo plazo de Home Assistant",
+          "days": "Hasta cuándo hacia atrás"
+        },
+        "data_description": {
+          "entities": "Solo aparecen las entidades de las que guardas historial: una entidad importada usa un tag igual que una que se envía en directo.",
+          "statistics": "Desmárcalo para importar solo las mediciones que tiene el recorder.",
+          "days": "Días antes de hoy, como máximo diez años. Las mediciones no van más atrás que el periodo con resolución completa de tu plan, diga lo que diga esto."
+        }
+      }
+    },
+    "error": {
+      "select_at_least_one": "Elige al menos una entidad. Para dejar de enviar del todo, desactiva esta integración en lugar de vaciar la lista: una entrada cargada que no guarda nada tiene el mismo aspecto que una que funciona.",
+      "import_nothing_selected": "Elige al menos una entidad que importar."
+    },
+    "abort": {
+      "cannot_connect": "No se ha podido contactar con Tag Historian, así que esta pantalla no puede mostrarte cuánto te queda de tu cupo. Inténtalo de nuevo en un momento.",
+      "key_not_checked": "Tag Historian no ha podido comprobar la clave de esta integración ahora mismo, así que esta pantalla no puede mostrarte cuánto te queda de tu cupo. Esto no dice nada de la clave en sí. Inténtalo de nuevo en un minuto.",
+      "unavailable": "Tag Historian respondió, pero no ha podido hacer esto ahora mismo, así que esta pantalla no puede mostrarte cuánto te queda de tu cupo. Inténtalo de nuevo en un minuto.",
+      "no_tags_available": "Tu cuenta no tiene tags libres, y cada entidad que elegiste necesitaría uno, así que recortar la selección a lo que cabe no deja nada de lo que guardar historial. Tu selección actual se ha dejado como estaba. Libera un tag en Tag Historian Explorer o pasa a un plan mayor.",
+      "import_started": "Importando a Tag Historian el historial de {entities} entidades. Síguelo en el sensor «Tag Historian history import»; una notificación avisa cuando termina.",
+      "import_running": "Ya hay una importación de historial en marcha para esta cuenta. Espera a que termine: el sensor «Tag Historian history import» muestra por dónde va.",
+      "import_refused": "Tag Historian no inició la importación y respondió:\n\n{message}",
+      "no_recorder": "El recorder de Home Assistant no está en marcha, así que no hay historial grabado que importar.",
+      "not_loaded": "Esta entrada de Tag Historian no está en marcha ahora mismo. Espera a que lo esté e inténtalo de nuevo.",
+      "key_rejected": "Tag Historian ya no acepta la clave de API de esta integración. Introduce una nueva en la tarjeta donde Home Assistant vuelve a pedir la clave y luego inténtalo de nuevo.",
+      "import_cannot_connect": "No se ha podido contactar con Tag Historian para iniciar la importación. Inténtalo de nuevo en un momento.",
+      "import_key_not_checked": "Tag Historian no ha podido comprobar la clave de esta integración ahora mismo, así que la importación no se inició. Esto no dice nada de la clave en sí. Inténtalo de nuevo en un minuto.",
+      "import_unavailable": "Tag Historian respondió, pero no ha podido iniciar la importación ahora mismo. Inténtalo de nuevo en un minuto."
+    }
+  },
+  "issues": {
+    "tag_quota_exceeded": {
+      "title": "Tag Historian ha rechazado algunas mediciones",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Desmarca hasta quedarte en tu cupo",
+            "description": "Tu cuenta usa {tag_count} de {tag_limit} tags, así que {dropped_points} mediciones se rechazaron y se perdieron. Necesitaban estos tags, para los que tu plan no tiene sitio: {refused_tags}\n\nTodo lo demás se sigue guardando. Desmarca entidades abajo hasta que la selección quepa, o mejora tu plan y déjala como está.",
+            "data": {
+              "entities": "Entidades de las que seguir guardando historial"
+            }
+          }
+        }
+      }
+    },
+    "daily_quota_exceeded": {
+      "title": "Límite diario de mediciones de Tag Historian alcanzado",
+      "description": "Tu cuenta ha gastado su cupo de mediciones de hoy, así que Tag Historian rechaza datos nuevos hasta que el límite se reinicie, que será {when}. Las mediciones se retienen hasta entonces, también durante un reinicio. Si la espera es larga, las más antiguas se sueltan y se vuelven a leer del recorder de Home Assistant cuando Tag Historian acepte datos otra vez, así que llegan igualmente, y cuentan para el cupo del día siguiente.\n\nDos salidas: sube el intervalo mínimo en las opciones de esta integración para que se envíen menos mediciones, o pasa a un plan con un cupo mayor."
+    },
+    "write_forbidden": {
+      "title": "Tag Historian no acepta datos de esta cuenta",
+      "description": "Tag Historian rechazó la escritura y respondió:\n\n{message}"
+    },
+    "service_unavailable": {
+      "title": "Tag Historian no ha estado aceptando datos",
+      "description": "Las escrituras llevan {minutes} minutos fallando: Tag Historian responde que no puede aceptarlas ahora mismo, porque está demasiado ocupado o porque de momento no puede comprobar la clave de esta integración. No ha cambiado nada en tu cuenta ni en la clave. Las mediciones se retienen, también durante un reinicio, y se enviarán cuando las acepte de nuevo; si esto se alarga, las más antiguas se sueltan y se vuelven a leer después del recorder de Home Assistant. No tienes que hacer nada."
+    },
+    "entity_renamed": {
+      "title": "{old} se renombró a {new} en Home Assistant",
+      "fix_flow": {
+        "step": {
+          "rename_choice": {
+            "title": "¿Conservar el historial de {old} bajo su nombre nuevo?",
+            "description": "Home Assistant renombró {old} a {new}. Mientras tanto, Tag Historian sigue guardando sus mediciones en el tag {old_tag}, así que el historial continúa y no se pierde nada.{refusal}\n\nRenombra el tag, y todo su historial, incluidas las mediciones anteriores, se lee como {new_tag} a partir de ahora, y las mediciones nuevas se guardan con ese nombre. No se copia nada: es el mismo historial con un nombre nuevo, y se puede volver a renombrar en Tag Historian Explorer.\n\nO empieza un tag nuevo, {new_tag}, para las mediciones a partir de ahora, y deja el historial donde está, en {old_tag}. Eso ocupa un tag más de tu plan.",
+            "menu_options": {
+              "rename_tag": "Renombrar el tag y conservar su historial",
+              "new_tag": "Mejor empezar un tag nuevo"
+            }
+          },
+          "merge_choice": {
+            "title": "¿Unir el historial de {old} con {new}?",
+            "description": "Home Assistant renombró {old} a {new}, un nombre que ya tiene un tag en Tag Historian: {new_tag}. El historial de la entidad renombrada anterior al cambio de nombre está en {old_tag}, y sus mediciones siguen entrando en {old_tag} hasta que elijas, así que no se pierde nada.{refusal}\n\nÚnelos, y los dos se leen como un solo historial en {new_tag}, y las mediciones nuevas se guardan allí. Cuando los dos tienen mediciones en la misma hora, las cifras de esa hora se calculan a partir de ambos, y {old_tag} deja de contar como tag. No se copia nada, y la unión se puede deshacer en Tag Historian Explorer.\n\nO mantenlos separados: {old_tag} conserva su historial como tag propio, y las mediciones a partir de ahora van a {new_tag}.",
+            "menu_options": {
+              "merge_tags": "Unirlos en un solo historial",
+              "keep_apart": "Mantenerlos separados"
+            }
+          }
+        },
+        "abort": {
+          "carry_unavailable": "Tag Historian no ha podido hacer esto ahora mismo, así que no se ha cambiado nada: no se pudo contactar con él o no aceptó la petición. Si Home Assistant además ha vuelto a pedir la clave de esta integración, es que la clave fue rechazada: dale primero una nueva. Mientras tanto, las mediciones siguen entrando en el tag antiguo, así que no se pierde nada. Inténtalo de nuevo desde esta tarjeta más tarde.",
+          "carry_refused": "Tag Historian se negó, y no se ha cambiado nada. Respondió:\n\n{message}"
+        }
+      }
+    },
+    "bring_years": {
+      "title": "Trae a Tag Historian los años que Home Assistant ya tiene",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Traer los años que Home Assistant ya tiene",
+            "description": "Esta versión de la integración puede traer el historial que Home Assistant ya guarda de cada entidad de la que {account} guarda historial: primero sus estadísticas a largo plazo por horas, hasta donde Home Assistant las tenga y hasta diez años, y después las mediciones que tiene el recorder. En Tag Historian pasan a ser el historial anterior a la instalación de esta integración, marcado como estadísticas de Home Assistant. Los sensores binarios, los ayudantes número y contador, y los sensores sin state_class no tienen estadísticas a largo plazo.\n\nEnvía para empezar. Se ejecuta en segundo plano (el sensor «Tag Historian history import» muestra por dónde va, y una notificación dice lo que hizo) y no cuenta para tu cupo diario de mediciones. Lo que Tag Historian ya tiene no se guarda dos veces.\n\nEsta integración también le dice a Tag Historian la zona horaria de este Home Assistant cada vez que arranca. Tag Historian la toma solo si la cuenta todavía no tiene zona horaria: ninguna elegida en los Ajustes de Tag Historian, ninguna dada al canal de correo del propietario de la cuenta en Alarmas, y ninguna propuesta antes. Los días, los meses y las horas de las alarmas de la cuenta están en la zona horaria de la cuenta, que se cambia en Tag Historian, en Ajustes."
+          }
+        },
+        "abort": {
+          "not_loaded": "Esta entrada de Tag Historian no está en marcha ahora mismo. Espera a que lo esté e inténtalo de nuevo desde esta tarjeta.",
+          "import_running": "Ya hay una importación de historial en marcha para esta cuenta. Inténtalo de nuevo desde esta tarjeta cuando haya terminado.",
+          "no_recorder": "El recorder de Home Assistant no está en marcha, así que no hay historial que traer.",
+          "import_refused": "Tag Historian no inició la importación y respondió:\n\n{message}",
+          "key_rejected": "Tag Historian ya no acepta la clave de API de esta integración. Introduce una nueva en la tarjeta donde Home Assistant vuelve a pedir la clave y luego inténtalo de nuevo desde esta tarjeta.",
+          "import_cannot_connect": "No se ha podido contactar con Tag Historian para iniciar la importación. Inténtalo de nuevo desde esta tarjeta en un momento.",
+          "import_key_not_checked": "Tag Historian no ha podido comprobar la clave de esta integración ahora mismo, así que la importación no se inició. Esto no dice nada de la clave en sí. Inténtalo de nuevo desde esta tarjeta en un minuto.",
+          "import_unavailable": "Tag Historian respondió, pero no ha podido iniciar la importación ahora mismo. Inténtalo de nuevo desde esta tarjeta en un minuto."
+        }
+      }
+    },
+    "fast_power_does_not_fit": {
+      "title": "Enviar los sensores de potencia más a menudo ya no cabe en tu plan",
+      "description": "«Enviar los sensores de potencia más a menudo» está marcada, pero a {power_interval} segundos tus entidades seleccionadas podrían enviar hasta {readings_per_day} mediciones al día, y tu plan permite {daily_limit}. Así que, por ahora, cada entidad, también los sensores de potencia, se envía como mucho una vez cada {min_interval} segundos.\n\nEsto ocurre cuando baja el cupo del plan o cuando una entidad seleccionada pasa a ser un sensor de potencia después de que eligieras. Los sensores de potencia vuelven solos a cada {power_interval} segundos, y esta tarjeta desaparece, en cuanto la suma vuelve a caber. Para que quepa, desmarca algunas entidades en Configurar; para dejarlo, desmarca allí «Enviar los sensores de potencia más a menudo» y quédate con {min_interval} segundos."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "history_import": {
+        "state": {
+          "idle": "En reposo",
+          "running": "En marcha",
+          "finished": "Terminada",
+          "stopped": "Detenida"
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "not_selected": {
+      "message": "No seleccionadas para Tag Historian: {entities}. Añádelas antes en Configurar, Cambiar de qué guardas historial: una entidad importada usa un tag igual que una que se envía en directo."
+    },
+    "nothing_selected": {
+      "message": "Esta entrada de Tag Historian no guarda historial de ninguna entidad, así que no hay nada que importar."
+    },
+    "entry_not_loaded": {
+      "message": "Esa entrada de Tag Historian no está en marcha."
+    },
+    "entry_ambiguous": {
+      "message": "Aquí hay más de una cuenta de Tag Historian configurada. Indica cuál con config_entry_id."
+    },
+    "no_recorder": {
+      "message": "El recorder de Home Assistant no está en marcha, así que no hay historial grabado que importar."
+    },
+    "import_running": {
+      "message": "Ya hay una importación de historial en marcha para esta cuenta."
+    },
+    "import_refused": {
+      "message": "Tag Historian no inició la importación: {message}"
+    },
+    "key_rejected": {
+      "message": "Tag Historian ya no acepta la clave de API de esta integración."
+    },
+    "import_cannot_connect": {
+      "message": "No se ha podido contactar con Tag Historian para iniciar la importación."
+    },
+    "import_key_not_checked": {
+      "message": "Tag Historian no ha podido comprobar la clave de esta integración ahora mismo, así que la importación no se inició. Inténtalo de nuevo en un minuto."
+    },
+    "import_unavailable": {
+      "message": "Tag Historian respondió, pero no ha podido iniciar la importación ahora mismo. Inténtalo de nuevo en un minuto."
+    }
+  },
+  "services": {
+    "import_history": {
+      "name": "Importar historial",
+      "description": "Envía a Tag Historian el historial que Home Assistant guarda de entidades de las que guardas historial: primero sus estadísticas a largo plazo por horas, salvo que statistics esté desactivado, y después las mediciones del recorder con sus marcas de tiempo originales. Las mediciones importadas cuentan para el cupo de importación de la cuenta, no para el diario, y solo se importa historial: nada de lo que esta integración envía en directo, o todavía tiene que enviar.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Cuenta",
+          "description": "A qué entrada de Tag Historian importar. Solo hace falta cuando hay más de una configurada."
+        },
+        "entity_id": {
+          "name": "Entidades",
+          "description": "Entidades que importar. Déjalo vacío para todas las entidades de las que esta entrada guarda historial."
+        },
+        "statistics": {
+          "name": "Estadísticas por horas",
+          "description": "Traer primero las estadísticas a largo plazo de Home Assistant: historial por horas hasta donde lo tenga, hasta diez años. Activado salvo que se desactive."
+        },
+        "days": {
+          "name": "Días hacia atrás",
+          "description": "Hasta cuándo importar hacia atrás, como máximo diez años. Las mediciones no van más atrás que el periodo con resolución completa de tu plan. Déjalo vacío para ir tan atrás como llegue cada una."
+        }
+      }
+    }
+  },
+  "common": {
+    "category_energy": "de energía y potencia",
+    "category_climate": "de temperatura y humedad",
+    "category_meter": "contadores y totales",
+    "category_measurement": "otras medidas",
+    "category_numeric": "otros sensores numéricos",
+    "category_onoff": "estados de encendido/apagado",
+    "category_helper": "ayudantes",
+    "category_other": "no preseleccionadas",
+    "category_hidden": "mostradas solo con todas",
+    "breakdown_nothing": "ninguna todavía",
+    "power_clause_none": "(«Enviar los sensores de potencia más a menudo» está marcada y aquí no cambia nada: nada de lo seleccionado es un sensor de potencia en W o kW con un intervalo más largo que ese)",
+    "power_clause_one": ", y una cada {seconds} segundos para {count} sensor de potencia,",
+    "power_clause_other": ", y una cada {seconds} segundos para cada uno de los {count} sensores de potencia,",
+    "fast_power_note": "«Enviar los sensores de potencia más a menudo» no cabe en tu plan. A {seconds} segundos, estos sensores podrían enviar hasta {readings_per_day} mediciones al día; tu plan permite {daily_limit}. Si lo envías así, la casilla se guarda sin marcar y cada entidad, también los sensores de potencia, se envía como mucho una vez cada {min_interval} segundos. Para usarla, desmarca algunas entidades en Configurar y vuelve a marcar la casilla.",
+    "wait_under_a_minute": "en menos de un minuto",
+    "wait_minutes_one": "dentro de un minuto, más o menos",
+    "wait_minutes_other": "dentro de unos {count} minutos",
+    "wait_hours_one": "dentro de una hora, más o menos",
+    "wait_hours_other": "dentro de unas {count} horas",
+    "refusal_said": "Al preguntarle, Tag Historian respondió: {refusal}",
+    "no_reason_given": "no dio ningún motivo"
+  }
+}

@@ -243,6 +243,18 @@
       "description": "\"Send power sensors more often\" is ticked, but at {power_interval} seconds your selected entities could send up to {readings_per_day} readings a day, and your plan allows {daily_limit}. So for now every entity, power sensors too, is sent at most once every {min_interval} seconds.\n\nThis happens when the plan's allowance goes down or a selected entity becomes a power sensor after you chose. The power sensors go back to every {power_interval} seconds by themselves, and this card goes away, as soon as the sum fits again. To make it fit, untick some entities under Configure; to stop it, untick \"Send power sensors more often\" there and keep {min_interval} seconds."
     }
   },
+  "entity": {
+    "sensor": {
+      "history_import": {
+        "state": {
+          "idle": "Idle",
+          "running": "Running",
+          "finished": "Finished",
+          "stopped": "Stopped"
+        }
+      }
+    }
+  },
   "exceptions": {
     "not_selected": {
       "message": "Not selected for Tag Historian: {entities}. Add them under Configure, Change what you keep history for, first - an imported entity uses a tag like a forwarded one."
@@ -301,5 +313,28 @@
         }
       }
     }
+  },
+  "common": {
+    "category_energy": "energy and power",
+    "category_climate": "temperature and humidity",
+    "category_meter": "meters and totals",
+    "category_measurement": "other measurements",
+    "category_numeric": "other numeric sensors",
+    "category_onoff": "on/off states",
+    "category_helper": "helpers",
+    "category_other": "not pre-selected",
+    "category_hidden": "shown only with everything",
+    "breakdown_nothing": "nothing yet",
+    "power_clause_none": "(\"Send power sensors more often\" is ticked, and changes nothing here: nothing selected is a power sensor in W or kW with a longer interval than that)",
+    "power_clause_one": ", and one every {seconds} seconds for the {count} power sensor,",
+    "power_clause_other": ", and one every {seconds} seconds for each of the {count} power sensors,",
+    "fast_power_note": "\"Send power sensors more often\" does not fit your plan. At {seconds} seconds these sensors could send up to {readings_per_day} readings a day; your plan allows {daily_limit}. Submitted as it is, the box is saved unticked and every entity, power sensors too, is sent at most once every {min_interval} seconds. To use it, untick some entities under Configure and tick the box again.",
+    "wait_under_a_minute": "in less than a minute",
+    "wait_minutes_one": "in about a minute",
+    "wait_minutes_other": "in about {count} minutes",
+    "wait_hours_one": "in about an hour",
+    "wait_hours_other": "in about {count} hours",
+    "refusal_said": "Tag Historian said, when asked: {refusal}",
+    "no_reason_given": "no reason given"
   }
 }
