@@ -224,7 +224,14 @@ class ImportSensor(SensorEntity):
     _attr_should_poll = False
     _attr_device_class = SensorDeviceClass.ENUM
     _attr_options = STATUSES
+    # The sensor's NAME stays as it is, in every language: the dialogs, the
+    # cards and the README point at it by that name, and an entity id made
+    # from a translated one would differ from install to install. What it
+    # reads - idle, running, finished, stopped - is translated where it is
+    # shown (entity.sensor.history_import.state in translations/); the state
+    # itself, which automations compare against, is the English word.
     _attr_name = "Tag Historian history import"
+    _attr_translation_key = "history_import"
 
     def __init__(self, entry: TagHistorianConfigEntry) -> None:
         self._entry = entry

@@ -67,9 +67,10 @@ CONF_SHARE_LOCATION: Final = "share_approximate_location"
 # (importer.py). Asked on the last screen of a new entry, ticked by default.
 # An entry made before that screen existed has no such option at all, and is
 # offered the same through a repair card instead (repairs.py). Its label
-# (import_on_setup in translations/en.json) is quoted by the README, by
-# taghistorian.com's home page and docs/home-assistant-hacs, and by the
-# Overview in Tag Historian; change them with it.
+# (import_on_setup in translations/, one file per language) is quoted by the
+# README, by taghistorian.com's home page and docs/home-assistant-hacs, and by
+# the Overview in Tag Historian, in English and by its English wording; change
+# them with it.
 CONF_IMPORT_ON_SETUP: Final = "import_on_setup"
 
 DEFAULT_HOST: Final = "api.taghistorian.com"

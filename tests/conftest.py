@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import sys
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -23,6 +25,27 @@ from custom_components.tag_historian.api import (
     LineageResult,
     QuotaSnapshot,
 )
+from custom_components.tag_historian.const import DOMAIN
+from custom_components.tag_historian.words import CATEGORY, Words
+
+TRANSLATIONS_DIR = (
+    Path(__file__).resolve().parent.parent / "custom_components" / "tag_historian" / "translations"
+)
+
+
+def words_in(language: str) -> Words:
+    """The words the integration puts together itself (words.py), read straight from one file.
+
+    For the tests of the functions that take them. What Home Assistant itself
+    serves from these files, and in which language, is tests/test_translations.py.
+    """
+    common = json.loads((TRANSLATIONS_DIR / f"{language}.json").read_text(encoding="utf-8"))[
+        CATEGORY
+    ]
+    return Words(
+        language, {f"component.{DOMAIN}.{CATEGORY}.{key}": text for key, text in common.items()}
+    )
+
 
 pytest_plugins = "pytest_homeassistant_custom_component"
 

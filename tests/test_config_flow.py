@@ -38,7 +38,7 @@ from custom_components.tag_historian.const import (
     MAX_IMPORT_DAYS,
 )
 
-from .conftest import STUB_ACCOUNT, STUB_ALLOWANCE, STUB_QUOTA, make_client
+from .conftest import STUB_ACCOUNT, STUB_ALLOWANCE, STUB_QUOTA, make_client, words_in
 
 CREDENTIALS = {CONF_HOST: "api.taghistorian.com", CONF_API_KEY: "not-a-real-key"}
 CLIENT_PATH = "custom_components.tag_historian.config_flow.TagHistorianClient"
@@ -1350,10 +1350,15 @@ def test_the_sum_counts_power_sensors_at_their_own_pace() -> None:
     assert readings_per_day(10, 1, power_count=1, power_interval=2) == 10 * 86_400
     assert readings_per_day(3, 10, power_count=5, power_interval=2) == 3 * 43_200
 
-    assert power_clause(0, asked=False) == ""
-    assert power_clause(1, asked=True) == ", and one every 2 seconds for the 1 power sensor,"
-    assert power_clause(3, asked=True) == ", and one every 2 seconds for each of the 3 power sensors,"
-    assert "changes nothing here" in power_clause(0, asked=True)
+    english = words_in("en")
+    assert power_clause(english, 0, asked=False) == ""
+    assert power_clause(english, 1, asked=True) == ", and one every 2 seconds for the 1 power sensor,"
+    assert (
+        power_clause(english, 3, asked=True)
+        == ", and one every 2 seconds for each of the 3 power sensors,"
+    )
+    assert power_clause(english, 0, asked=True).startswith(' ("Send power sensors more often" is')
+    assert "changes nothing here" in power_clause(english, 0, asked=True)
 
 
 async def test_review_shows_what_sending_power_sensors_more_often_costs(

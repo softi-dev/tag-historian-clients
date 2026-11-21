@@ -109,6 +109,7 @@ from .const import (
     RENAME_RETRY_SECONDS,
 )
 from .line_protocol import tag_name_for_entity
+from .words import Words, words
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Iterable, Mapping
@@ -510,7 +511,7 @@ def async_raise_renamed_issue(
         is_persistent=True,
         severity=ir.IssueSeverity.WARNING,
         translation_key=ISSUE_ENTITY_RENAMED,
-        translation_placeholders=renamed_placeholders(entity_id, history, refusal),
+        translation_placeholders=renamed_placeholders(words(hass), entity_id, history, refusal),
         data={
             "entry_id": entry.entry_id,
             "entity_id": entity_id,
@@ -521,14 +522,20 @@ def async_raise_renamed_issue(
     )
 
 
-def renamed_placeholders(entity_id: str, history: str, refusal: str | None = None) -> dict[str, str]:
-    """What the card and its fix flow print."""
+def renamed_placeholders(
+    words: Words, entity_id: str, history: str, refusal: str | None = None
+) -> dict[str, str]:
+    """What the card and its fix flow print.
+
+    What Tag Historian answered is quoted as it came; the words that
+    introduce it are common.refusal_said in translations/ (words.py).
+    """
     return {
         "old": history,
         "new": entity_id,
         "old_tag": tag_name_for_entity(history),
         "new_tag": tag_name_for_entity(entity_id),
-        "refusal": f"\n\nTag Historian said, when asked: {refusal}" if refusal else "",
+        "refusal": "\n\n" + words.say("refusal_said", refusal=refusal) if refusal else "",
     }
 
 

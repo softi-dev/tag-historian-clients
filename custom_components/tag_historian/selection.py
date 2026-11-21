@@ -61,21 +61,20 @@ RANK_NOT_PRESELECTED = 900
 RANK_HIDDEN = 9000
 
 # The categories exist to be counted back at the user ("18 energy and power,
-# 12 temperature and humidity, ..."), so the label is part of the data. When a
-# second language appears these move into translations/; with one language,
-# a lookup table in translations that only ever resolves to English would be
-# ceremony without a reader.
-CATEGORY_LABELS: dict[str, str] = {
-    "energy": "energy and power",
-    "climate": "temperature and humidity",
-    "meter": "meters and totals",
-    "measurement": "other measurements",
-    "numeric": "other numeric sensors",
-    "onoff": "on/off states",
-    "helper": "helpers",
-    "other": "not pre-selected",
-    "hidden": "shown only with everything",
-}
+# 12 temperature and humidity, ..."). What each is called is in translations/,
+# under common.category_<name>, in every language the integration speaks
+# (words.py); a test holds the two lists to each other.
+CATEGORIES: tuple[str, ...] = (
+    "energy",
+    "climate",
+    "meter",
+    "measurement",
+    "numeric",
+    "onoff",
+    "helper",
+    "other",
+    "hidden",
+)
 
 # The domains that exist to REPORT something. Everything outside this set is a
 # thing you operate (light, switch, lock, cover, media_player), a thing that
@@ -208,8 +207,13 @@ class Proposal:
         wanted = sum(1 for c in self.candidates if c.preselectable)
         return max(0, wanted - len(self.selected))
 
-    def breakdown(self, entity_ids: Iterable[str] | None = None) -> str:
+    def breakdown(
+        self, labels: Mapping[str, str], entity_ids: Iterable[str] | None = None
+    ) -> str:
         """A human sentence fragment: '18 energy and power, 9 on/off states'.
+
+        ``labels`` is what each category is called in the language the screen
+        is in (words.Words.category_labels).
 
         Describes ``entity_ids`` when given, so the screen can count back what
         is actually ticked rather than what was proposed - the two differ the
@@ -232,7 +236,7 @@ class Proposal:
             ),
         )
         return ", ".join(
-            f"{count} {CATEGORY_LABELS.get(category, category)}"
+            f"{count} {labels.get(category, category)}"
             for category, count in ordered
         )
 

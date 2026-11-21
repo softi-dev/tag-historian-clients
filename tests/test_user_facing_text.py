@@ -72,7 +72,7 @@ from custom_components.tag_historian.const import (
 from custom_components.tag_historian.forwarder import INFLIGHT_WAIT_SECONDS
 from custom_components.tag_historian.importer import NO_STATISTICS_SENTENCE
 
-from .conftest import STUB_ACCOUNT, STUB_QUOTA, make_client
+from .conftest import STUB_ACCOUNT, STUB_QUOTA, make_client, words_in
 
 TRANSLATIONS = json.loads(
     (
@@ -215,7 +215,7 @@ async def test_the_daily_quota_card_can_say_minutes(
     ],
 )
 def test_the_wait_is_described_as_what_it_is(seconds, expected) -> None:
-    assert repairs.describe_wait(seconds) == expected
+    assert repairs.describe_wait(words_in("en"), seconds) == expected
 
 
 async def test_the_daily_quota_card_is_still_raised_for_the_real_thing(

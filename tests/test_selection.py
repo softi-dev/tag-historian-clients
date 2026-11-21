@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 from custom_components.tag_historian.selection import (
+    CATEGORIES,
     EntityFacts,
     propose,
     rank_candidates,
     trim_to_new_tag_budget,
 )
+
+from .conftest import words_in
+
+# What the categories are called in English (translations/en.json, common).
+LABELS = words_in("en").category_labels(CATEGORIES)
 
 
 def facts(entity_id: str, **kwargs) -> EntityFacts:
@@ -249,13 +255,13 @@ def test_selection_is_deterministic_for_the_same_registry():
 
 def test_breakdown_counts_only_what_was_selected():
     proposal = propose(HOUSE, budget=3)
-    assert proposal.breakdown() == "2 energy and power, 1 temperature and humidity"
+    assert proposal.breakdown(LABELS) == "2 energy and power, 1 temperature and humidity"
 
 
 def test_breakdown_can_describe_a_list_that_is_not_the_proposal():
     """The screen counts back what is ticked NOW, not what was proposed."""
     proposal = propose(HOUSE, budget=3)
-    assert proposal.breakdown(["sensor.outdoor_temperature"]) == (
+    assert proposal.breakdown(LABELS, ["sensor.outdoor_temperature"]) == (
         "1 temperature and humidity"
     )
 

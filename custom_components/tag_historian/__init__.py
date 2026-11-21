@@ -85,6 +85,7 @@ from .repairs import (
     async_clear_write_issues,
     async_raise_bring_years_issue,
 )
+from .words import async_load_words
 
 PLATFORMS: list[Platform] = [Platform.SENSOR]
 
@@ -263,6 +264,11 @@ async def async_setup_entry(
     # The saved buffer and the saved import are read further down, so this
     # setup awaits more than it did when that was found, not less.
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
+
+    # The repair cards raised from here on carry a few words that are put
+    # together in Python, in Home Assistant's language (words.py). Loaded now,
+    # so that the callbacks raising them have nothing to wait for.
+    await async_load_words(hass)
 
     client = TagHistorianClient(
         async_get_clientsession(hass), entry.data[CONF_HOST], entry.data[CONF_API_KEY]

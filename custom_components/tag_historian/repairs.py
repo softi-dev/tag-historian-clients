@@ -84,6 +84,7 @@ from .renames import (
     renamed_placeholders,
     send_as,
 )
+from .words import Words, async_load_words, words
 
 # Issue ids are per config entry: two Tag Historian accounts on one Home
 # Assistant must be able to be over quota independently.
@@ -133,7 +134,7 @@ def async_raise_tag_quota_issue(
     # Prose-scraped from the 422 body, so it can legitimately be empty. Say so
     # rather than rendering an empty bullet list.
     placeholders["refused_tags"] = (
-        ", ".join(refused_tags) if refused_tags else "(the API did not name them)"
+        ", ".join(refused_tags) if refused_tags else words(hass).say("refused_tags_unnamed")
     )
     # Readings, not tags. The card used to describe the tag names as though
     # they were the things that were lost, which understates it by however many
@@ -154,8 +155,12 @@ def async_raise_tag_quota_issue(
     )
 
 
-def describe_wait(seconds: float) -> str:
+def describe_wait(words: Words, seconds: float) -> str:
     """Render a Retry-After as something a person can act on.
+
+    The words are common.wait_* in translations/ (words.py): the card's own
+    sentence is a translation the frontend fills in, and this is the one part
+    of it that is chosen here.
 
     The previous rendering was ``max(1, round(seconds / 3600))`` hours, which
     could not produce an answer shorter than an hour however short the wait
@@ -166,18 +171,13 @@ def describe_wait(seconds: float) -> str:
     of it - a real quota reset can also be four minutes away, near midnight.
     """
     if seconds < 60:
-        return "in less than a minute"
+        return words.say("wait_under_a_minute")
 
     minutes = round(seconds / 60)
-    if minutes == 1:
-        return "in about a minute"
     if minutes < 60:
-        return f"in about {minutes} minutes"
+        return words.counted("wait_minutes", minutes)
 
-    hours = round(seconds / 3600)
-    if hours == 1:
-        return "in about an hour"
-    return f"in about {hours} hours"
+    return words.counted("wait_hours", round(seconds / 3600))
 
 
 @callback
@@ -199,7 +199,7 @@ def async_raise_daily_quota_issue(
         is_persistent=False,
         severity=ir.IssueSeverity.WARNING,
         translation_key=ISSUE_DAILY_QUOTA,
-        translation_placeholders={"when": describe_wait(retry_after)},
+        translation_placeholders={"when": describe_wait(words(hass), retry_after)},
         learn_more_url=PRICING_URL,
     )
 
@@ -220,7 +220,7 @@ def async_raise_forbidden_issue(
         # Verbatim. The API already tells the user which of the two causes it
         # is and exactly what to do; rewording it here would create a fifth
         # customer-facing surface that can drift away from the code.
-        translation_placeholders={"message": message or "no reason given"},
+        translation_placeholders={"message": message or words(hass).say("no_reason_given")},
     )
 
 
@@ -363,7 +363,9 @@ class EntityRenamedRepairFlow(RepairsFlow):
         self._refusal = refusal
 
     def _placeholders(self) -> dict[str, str]:
-        return renamed_placeholders(self._entity_id, self._history, self._refusal or None)
+        return renamed_placeholders(
+            words(self.hass), self._entity_id, self._history, self._refusal or None
+        )
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -402,7 +404,9 @@ class EntityRenamedRepairFlow(RepairsFlow):
             return self.async_abort(reason="carry_unavailable")
         return self.async_abort(
             reason="carry_refused",
-            description_placeholders={"message": result.message or "no reason given"},
+            description_placeholders={
+                "message": result.message or words(self.hass).say("no_reason_given")
+            },
         )
 
     async def async_step_new_tag(
@@ -481,6 +485,10 @@ async def async_create_fix_flow(
     data: dict[str, str | int | float | None] | None,
 ) -> RepairsFlow:
     """Home Assistant's entry point for a fixable issue."""
+    # The cards' flows quote what Tag Historian answered, in words that are
+    # put together here (words.py); a card can be opened before its entry has
+    # been set up, so they are loaded here too.
+    await async_load_words(hass)
     entry_id = (data or {}).get("entry_id")
     entry = (
         hass.config_entries.async_get_entry(str(entry_id)) if entry_id else None
