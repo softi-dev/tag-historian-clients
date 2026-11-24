@@ -485,14 +485,12 @@ async def test_a_rename_made_while_the_entry_reloads_is_not_lost(
 async def test_a_rename_made_while_tag_historian_is_unreachable_is_followed(
     hass: HomeAssistant, client, loaded
 ) -> None:
-    """An entry whose setup waits for Tag Historian to come back (setup retry)
-    is not loaded - and the rename is followed all the same, and settled when
-    the setup succeeds."""
+    """An entry that could not reach Tag Historian yet listens and waits - and the
+    rename is followed all the same, and settled at the first answer."""
     client.async_get_quota.side_effect = TagHistorianConnectionError("unreachable")
     old = register(hass, "energy_2")
     entry = make_entry(hass, [old])
-    assert not await hass.config_entries.async_setup(entry.entry_id)
-    assert entry.state is ConfigEntryState.SETUP_RETRY
+    assert await hass.config_entries.async_setup(entry.entry_id)
 
     await rename(hass, old, "sensor.energy")
 

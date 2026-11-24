@@ -8,7 +8,8 @@ Two promises, and the one rule they must not break between them:
   seen because the entry was not running - is read back from the recorder and
   sent, oldest first, counting against the daily allowance like any live one;
 * and neither ever sends a reading Tag Historian may already have, because the
-  live endpoint does not deduplicate.
+  live endpoint does not deduplicate: it is asked first. tests/test_no_loss.py
+  holds that, whatever stops the forwarder and whenever.
 """
 
 from __future__ import annotations
@@ -62,6 +63,11 @@ class StubClient:
         # Only the bodies answered with a delivery, in order.
         self.delivered: list[str] = []
         self._results = list(results)
+        # What Tag Historian says it has, per tag (async_get_newest_readings).
+        self.newest: dict[str, float | None] = {}
+
+    async def async_get_newest_readings(self) -> dict[str, float | None]:
+        return dict(self.newest)
 
     async def async_write(self, body: str):
         self.bodies.append(body)
@@ -229,25 +235,26 @@ async def test_a_started_run_is_marked_on_disk_so_a_crash_cannot_send_the_buffer
     assert len(client.lines) == 1
 
 
-async def test_a_crash_while_writes_went_through_reads_nothing_back(
+async def test_a_crash_while_writes_went_through_reads_back_what_tag_historian_lacks(
     hass: HomeAssistant, started, hass_storage, recorder, caplog
 ) -> None:
     """Some readings after the saved watermark may already be in Tag Historian.
 
-    The live endpoint does not deduplicate, so after a crash with a healthy
-    connection nothing is read back: the last moments may be missing, and
-    nothing is doubled - and the log says which of the two was chosen.
+    The live endpoint does not deduplicate, so it is asked how far it got, and
+    what is newer than that is read back.
     """
     _seed(hass_storage, clean=False, sending_ok=True, acked={POWER: T0.timestamp()}, queue=[])
     recorder.record(POWER, "1500", T0 + timedelta(seconds=30))
     recorder.record(POWER, "1600", T0 + timedelta(seconds=60))
 
     client = StubClient()
+    client.newest = {POWER: T0.timestamp() + 30}
     await started(client)
     await hass.async_block_till_done()
     await _tick(hass, 2)
+    await _tick(hass, 2)
 
-    assert client.lines == []
+    assert client.values == ["1600.0"]
     assert "did not stop cleanly" in caplog.text
 
 
@@ -265,6 +272,7 @@ async def test_after_a_crash_during_an_outage_the_outage_is_read_back(
     client = StubClient()
     forwarder = await started(client, min_interval=10)
     await hass.async_block_till_done()
+    await _tick(hass, 2)
     await _tick(hass, 2)
 
     assert client.values == ["1600.0", "1700.0"], (
@@ -290,6 +298,7 @@ async def test_a_gap_is_read_back_at_the_power_sensors_own_pace(
     client = StubClient()
     await started(client, min_interval=10, power_interval=2)
     await hass.async_block_till_done()
+    await _tick(hass, 2)
     await _tick(hass, 2)
 
     assert client.values[:2] == ["4500.0", "4510.0"], (
@@ -552,6 +561,8 @@ async def test_a_crash_before_the_first_answer_reads_the_restored_buffer_and_the
     forwarder.async_start()
     await hass.async_block_till_done()
     await _tick(hass, 2)
+    await _tick(hass, 2)
+    await _tick(hass, 2)
     forwarder.async_stop()
 
     assert client.delivered_values("house_power") == ["2.0", "3.0"]
@@ -571,19 +582,23 @@ async def test_the_first_answer_marks_writes_as_going_through(
     assert _saved(hass_storage)["sending_ok"] is True
 
 
-async def test_a_batch_on_the_wire_is_saved_as_answered_so_it_is_never_read_back(
+async def test_a_batch_on_the_wire_is_saved_as_in_doubt(
     hass: HomeAssistant, entry, hass_storage
 ) -> None:
-    """Its answer may never come; it may have landed. Overstate the loss, never double."""
+    """Its answer may never come and it may have landed: the next start asks before it sends it."""
     forwarder = StateForwarder(
         hass, entry, StubClient(), [POWER], 0, store=Store(hass, STORAGE_VERSION, KEY)
     )
+    stamp = (T0 + timedelta(minutes=1)).timestamp()
     forwarder._acked = {POWER: T0.timestamp()}
-    forwarder._inflight = [Queued(POWER, (T0 + timedelta(minutes=1)).timestamp(), "x")]
+    forwarder._inflight = [Queued(POWER, stamp, "x")]
 
     assert await forwarder._async_save(clean=True)
 
-    assert _saved(hass_storage)["acked"][POWER] == (T0 + timedelta(minutes=1)).timestamp()
+    saved = _saved(hass_storage)
+    assert saved["acked"][POWER] == T0.timestamp()
+    assert saved["queue"] == [[POWER, stamp, "x", ""]]
+    assert saved["doubt"] == {POWER: [stamp, POWER, 1]}
 
 
 async def test_without_a_recorder_the_live_path_is_not_held_up(

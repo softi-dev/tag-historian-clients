@@ -35,8 +35,10 @@ allowance like any reading. A reading let go of while that allowance was
 spent is the exception: it is over the allowance, not lost to an outage, and
 is not read back (:meth:`StateForwarder._forfeit`). It does not re-send a
 reading Tag Historian may already have, because the live endpoint does not
-deduplicate: a batch that was on the wire when its answer was lost counts as
-delivered, never as a gap.
+deduplicate: where that is IN DOUBT - a batch whose answer was lost, or a run
+that did not stop cleanly - Tag Historian is asked first how new its newest
+reading of each tag is (:meth:`StateForwarder._async_settle_doubt`), and only
+what is newer than that is sent.
 
 A RENAMED entity (renames.py) keeps all of that. Its readings - live, read
 back or saved - go into the tag its history is in (``send_as``) until Tag
@@ -91,9 +93,13 @@ from homeassistant.util import dt as dt_util
 
 from . import history
 from .api import (
+    TagHistorianAnsweredError,
     TagHistorianAuthError,
     TagHistorianClient,
     TagHistorianConnectionError,
+    TagHistorianError,
+    TagHistorianPermissionError,
+    TagHistorianUnansweredError,
     WriteOutcome,
     WriteResult,
 )
@@ -102,9 +108,12 @@ from .const import (
     BATCH_BUFFER_SIZE,
     BATCH_TIMEOUT_SECONDS,
     LOGGER,
+    LOSS_SAVE_SECONDS,
     MAX_POINTS_PER_REQUEST,
     MAX_QUEUE_LENGTH,
+    RECORDER_WAIT_SECONDS,
     RECORDER_WINDOW_HOURS,
+    WATERMARK_SAVE_SECONDS,
 )
 from .line_protocol import (
     encode_batch,
@@ -114,6 +123,7 @@ from .line_protocol import (
     recorded_state_value,
     retag_line,
     state_to_value,
+    tag_name_for_entity,
 )
 from .renames import registry_ids, removed_since, renamed_since
 from .selection import is_power_sensor
@@ -136,6 +146,36 @@ def _answered_wait(retry_after: int) -> float:
     countdown reaching 0 at midnight costs half a minute at most.)
     """
     return retry_after if retry_after >= 1 else CONNECTION_RETRY_SECONDS
+
+
+# How many times in a row Tag Historian may answer the question of what it has
+# with something that is not an answer before it is taken to be unable to say.
+# A host that cannot be reached, a 429 and a 503 do not count: those pass.
+SETTLE_ATTEMPTS = 5
+
+# How many times one reading by itself is answered with an error, each time
+# with another entity's taken after it, before it is let go of. That is what
+# tells a reading that cannot be taken from a Tag Historian that takes none,
+# or fails now and then (StateForwarder._handle_server_error). Where only its
+# own entity has readings waiting, the next of those can be tried once, and is
+# after this many errors times as many.
+SERVER_ERROR_TRIES = 3
+
+# How long nothing but errors - of every batch, whatever is in it - is waited
+# out before the batch is let go of, counted. A Tag Historian that is broken
+# for hours is waited for; readings behind one it can never take are not held
+# up for good.
+SERVER_ERROR_GIVE_UP_SECONDS = 24 * 60 * 60
+
+# The counters that are saved with the buffer, so that a loss is still visible
+# after a restart.
+SAVED_COUNTERS = (
+    "dropped_overflow",
+    "dropped_quota",
+    "dropped_shutdown",
+    "dropped_inflight",
+    "dropped_not_numeric",
+)
 
 # How many requests the shutdown flush is allowed to make. Home Assistant is
 # waiting on this, so the buffer gets a few batches and not a drain loop; the
@@ -174,6 +214,17 @@ def _is_meter(state: State) -> bool:
     return str(state.attributes.get("state_class") or "") in METER_STATE_CLASSES
 
 
+def _floats(saved: Any) -> dict[str, float]:
+    """What is a number in something read back from the file, whatever the rest of it is."""
+    if not isinstance(saved, dict):
+        return {}
+    return {
+        str(key): float(value)
+        for key, value in saved.items()
+        if isinstance(value, int | float) and not isinstance(value, bool)
+    }
+
+
 class Queued(NamedTuple):
     """One encoded reading, with what the acknowledged-watermark needs to know about it."""
 
@@ -191,6 +242,15 @@ class Queued(NamedTuple):
     @property
     def encoded_for(self) -> str:
         return self.sent_as or self.entity_id
+
+
+def _in_doubt(batch: list[Queued]) -> dict[str, tuple[float, str, int]]:
+    """Per entity of a batch: its newest reading, the entity its tag is named for, and how many."""
+    doubt: dict[str, tuple[float, str, int]] = {}
+    for item in batch:
+        stamp, _, count = doubt.get(item.entity_id, (item.timestamp, "", 0))
+        doubt[item.entity_id] = (max(stamp, item.timestamp), item.encoded_for, count + 1)
+    return doubt
 
 
 @dataclass
@@ -219,14 +279,11 @@ class ForwarderStats:
     # had already been saved, or a save that failed. Rare by construction -
     # what the last flush cannot deliver is saved to .storage instead.
     dropped_shutdown: int = 0
-    # Readings that had already LEFT the buffer and were in a request that
-    # never finished - the entry reloaded underneath it, Home Assistant stopped
-    # while it was still open, or the write raised something nobody
-    # anticipated. Separate from dropped_shutdown because it is the only
-    # counter that can overstate: the endpoint may well have taken the batch
-    # before the socket went, and there is no way from here to know. They are
-    # not read back from the recorder either, for the same reason.
-    # See :meth:`StateForwarder.async_flush`.
+    # Readings that may have been stored and may not, and will not be sent
+    # again because nobody can say: a request that never came back, or the
+    # last moments before a crash, when Tag Historian could not tell what it
+    # has. Separate from dropped_shutdown because it is the only counter that
+    # can overstate. See :meth:`StateForwarder._async_settle_doubt`.
     dropped_inflight: int = 0
     # Readings the entity genuinely produced and this integration cannot
     # store: a state that is a word rather than a number, and not one of the
@@ -248,6 +305,8 @@ class ForwarderStats:
     # Which entities produced the states above, so the diagnostic sensor can
     # name them. Bounded: this is a hint on an attribute, not a log.
     unstorable_entities: list[str] = field(default_factory=list)
+    # Whether the saved counters have been added, once per Home Assistant run.
+    loaded: bool = False
 
 
 class StateForwarder:
@@ -292,9 +351,9 @@ class StateForwarder:
         # ``_acked`` be a watermark rather than a guess.
         self._backfill: deque[Queued] = deque()
         # Per entity, the timestamp of the newest reading Tag Historian has
-        # answered for - delivered, or refused for good (a 422, a 403), or on
-        # the wire when its answer was lost. Everything up to it is accounted
-        # for; a gap is what lies between it and the oldest reading still held.
+        # answered for - delivered, or refused for good (a 422, a 403).
+        # Everything up to it is accounted for; a gap is what lies between it
+        # and the oldest reading still held.
         self._acked: dict[str, float] = {}
         # {entity_id: entity registry id} for what is saved, so the next run
         # finds a renamed entity's buffer and watermark under its new id.
@@ -333,6 +392,49 @@ class StateForwarder:
         # When this forwarder started listening: where the gap of an entity
         # nothing has been acknowledged for begins.
         self._listening_since: float = dt_util.utcnow().timestamp()
+        # The same for an entity nothing has been acknowledged for in an
+        # earlier run either: when the first of them started listening.
+        self._since: dict[str, float] = {}
+        # Listening and buffering, sending nothing: until Tag Historian has
+        # been reached for the first time.
+        self._holding = False
+        # How many of the readings at the front of the buffer each earlier run
+        # left, oldest run first. Between two of them - and between the last
+        # and the live ones - is a stretch nobody listened through, so each is
+        # sent by itself and followed by a read-back (_tidy_segments).
+        self._segments: deque[int] = deque()
+        self._inflight_restored = False
+        # What may have been stored and may not: per entity, the newest such
+        # reading, the entity its tag is named for, and how many there are.
+        # Nothing is sent before Tag Historian has been asked.
+        self._doubt: dict[str, tuple[float, str, int]] = {}
+        # A crash: everything since the watermark may have been stored - or,
+        # when Tag Historian cannot say, everything up to _doubt_until.
+        self._doubt_all = False
+        self._doubt_until = 0.0
+        self._settle_failures = 0
+        # Per entity, the end of a stretch that is counted, not sent.
+        self._doubtful_until: dict[str, float] = {}
+        # Whether a batch on the wire when the buffer was saved is in the save.
+        self._inflight_saved = False
+        # Stopped with a gap not read back to its end: live readings must not
+        # go past it.
+        self._cut_short = False
+        self._recorder_written = False
+        self._unsub_save: CALLBACK_TYPE | None = None
+        self._save_due = 0.0
+        # An answer that was an error of Tag Historian's own, and how far
+        # taking it apart has come (_handle_server_error).
+        self._errors_since: float | None = None
+        self._error_limit: int | None = None
+        self._error_batch = 0
+        self._error_tries = 0
+        self._error_proofs = 0
+        self._error_answered = False
+        self._suspect: Queued | None = None
+        self._last_failed: Queued | None = None
+        self._probed: set[str] = set()
+        self._probing = False
         # Whether writes are going through. Saved when it changes, because the
         # watermark on disk is exact only while it is false - see async_restore.
         #
@@ -383,23 +485,17 @@ class StateForwarder:
           watermark is exact: what is between it and the oldest restored
           reading is a gap the recorder can fill.
 
-        * it did NOT stop: a crash, a power cut, a kill. Its buffer is gone
-          and the watermark on disk is the one saved when it started, or when
-          writes last began or stopped failing. If they were failing at the
-          end - or that run had not had a single answer yet - nothing was
-          acknowledged since that save and the watermark is exact: the whole
-          outage is read back, the buffer that run had restored included. (The
-          one reading that can then arrive twice is a retry Tag Historian took
-          in the very moment of the crash, whose answer never came.) If they
-          were going through, some readings after it may already be in Tag
-          Historian, and the live endpoint does not deduplicate, so nothing is
-          read back: the last second or so before the crash may be missing,
-          and nothing is doubled. The recorder itself loses its last few
-          seconds to a power cut, so this asks for no more than it can give.
+        * it did NOT stop: a crash, a power cut, a kill. Its buffer is gone -
+          the recorder has it - and the watermark on disk is at most some
+          minutes old, so some readings after it may already be in Tag
+          Historian. It is asked what it has before anything is sent
+          (:meth:`_async_settle_doubt`), and everything newer is read back.
 
         The store is then marked as a run in progress at once, so a crash
         after this does not bring back - and send twice - a buffer this run
-        has already sent.
+        has already sent. The restored readings stay in the file, under
+        another key, until they are delivered: for an entity the recorder
+        leaves out they are the only copy.
 
         An entity renamed since the save (renames.py) is picked up under its
         new id: its watermark, so its gap is read back from where Tag
@@ -416,6 +512,10 @@ class StateForwarder:
         except Exception:  # a corrupt file must not stop setup
             LOGGER.exception("Tag Historian could not read its saved buffer; starting empty")
             saved = {}
+        if not isinstance(saved, dict):
+            saved = {}
+        self._add_saved_counters(saved.get("counters"))
+        now = dt_util.utcnow().timestamp()
 
         saved_ids = {str(k): str(v) for k, v in (saved.get("registry_ids") or {}).items()}
         renamed = renamed_since(self.hass, saved_ids, self._entity_ids)
@@ -452,33 +552,92 @@ class StateForwarder:
             # reading back from the older could send what Tag Historian has
             # answered for already.
             acked[entity_id] = max(float(stamp), acked.get(entity_id, float("-inf")))
-        if saved.get("clean"):
-            restored = [
-                self._restored(item, renamed)
-                for item in saved.get("queue") or []
-                if isinstance(item, list | tuple) and len(item) in (3, 4)
-            ][-MAX_QUEUE_LENGTH:]
-            self._queue.extend(restored)
-            self.stats.restored += len(restored)
-            self.stats.queued = self._held()
-            for item in restored:
-                stamp = datetime.fromtimestamp(item.timestamp, UTC)
-                if (last := self._last_sent.get(item.entity_id)) is None or stamp > last:
-                    self._last_sent[item.entity_id] = stamp
-            self._acked = acked
-        elif saved and saved.get("sending_ok") is False:
-            self._acked = acked
-        elif saved:
+        clean = bool(saved.get("clean"))
+        self._acked = acked
+        self._since = {
+            renamed.get(entity_id, entity_id): stamp
+            for entity_id, stamp in _floats(saved.get("since")).items()
+            if renamed.get(entity_id, entity_id) in self._entity_ids and stamp <= now
+        }
+        for entity_id in self._entity_ids:
+            if entity_id not in acked:
+                # Before the save below: killed before the next one, the run
+                # after this still knows.
+                self._since.setdefault(entity_id, now)
+
+        items = saved.get("queue" if clean else "held")
+        restored = [
+            self._restored(item, renamed)
+            for item in (items if isinstance(items, list) else [])
+            if isinstance(item, list | tuple) and len(item) in (3, 4)
+        ]
+        self._queue.extend(restored)
+        segments = saved.get("segments")
+        if (
+            isinstance(segments, list)
+            and all(isinstance(n, int) and n > 0 for n in segments)
+            and sum(segments) == len(restored)
+        ):
+            self._segments.extend(segments)
+        elif restored:
+            self._segments.append(len(restored))
+        while len(self._queue) > MAX_QUEUE_LENGTH:
+            # A batch that was on the wire is saved on top of a full buffer.
+            self._pop_oldest()
+            self.stats.dropped_overflow += 1
+        while self._segments and self._segments[0] == 0:
+            self._segments.popleft()
+        self.stats.restored += len(self._queue)
+        self.stats.queued = self._held()
+        for item in self._queue:
+            stamp = datetime.fromtimestamp(item.timestamp, UTC)
+            if (last := self._last_sent.get(item.entity_id)) is None or stamp > last:
+                self._last_sent[item.entity_id] = stamp
+
+        doubt = saved.get("doubt")
+        for entity_id, value in (doubt if isinstance(doubt, dict) else {}).items():
+            try:
+                stamp, sent_as, count = float(value[0]), str(value[1]), int(value[2])
+            except (TypeError, ValueError, IndexError, KeyError):
+                continue
+            self._doubt[renamed.get(str(entity_id), str(entity_id))] = (stamp, sent_as, count)
+        saved_at = dt_util.parse_datetime(str(saved.get("saved_at") or ""))
+        since_save = now - saved_at.timestamp() if saved_at is not None else 0.0
+        if saved and (not clean or saved.get("doubt_all")):
+            self._doubt_all = True
+            self._doubt_until = _floats({"": saved.get("doubt_until")}).get("", 0.0)
+            if not clean and saved.get("sending_ok") is not False:
+                # How far it can have sent without saving that it had. A file
+                # from before it saved as it went says nothing about that.
+                spacing = _floats({"": saved.get("save_every")}).get("")
+                reach = (
+                    saved_at.timestamp() + spacing + 60
+                    if saved_at is not None and spacing is not None
+                    else now
+                )
+                self._doubt_until = max(self._doubt_until, reach)
+        if not clean and saved:
             LOGGER.warning(
-                "Home Assistant did not stop cleanly last time. Readings from its last "
-                "moments may be missing in Tag Historian; they are not read back from the "
-                "recorder, because some of them may already have been delivered"
+                "Home Assistant did not stop cleanly last time. Tag Historian is asked what it "
+                "has, and what it does not have is read back from the recorder"
             )
+        if self._doubt and since_save < CONNECTION_RETRY_SECONDS:
+            # A request cut short a moment ago may be being stored right now.
+            self._pause(CONNECTION_RETRY_SECONDS - max(0.0, since_save))
 
         for entity_id, stamp in self._acked.items():
             self._last_sent.setdefault(entity_id, datetime.fromtimestamp(stamp, UTC))
 
         await self._async_save(clean=False)
+
+    def _add_saved_counters(self, saved: Any) -> None:
+        """What an earlier Home Assistant run lost. Once: a reload's counters are still in memory."""
+        if self.stats.loaded:
+            return
+        self.stats.loaded = True
+        for name, count in _floats(saved).items():
+            if name in SAVED_COUNTERS:
+                setattr(self.stats, name, getattr(self.stats, name) + int(count))
 
     def _restored(self, item: list[Any] | tuple[Any, ...], renamed: dict[str, str]) -> Queued:
         """One saved reading: under its entity's id as it is now, for the tag it sends to now.
@@ -509,8 +668,8 @@ class StateForwarder:
         return Queued(entity_id, held.timestamp, line, "" if target == entity_id else target)
 
     @callback
-    def async_start(self) -> None:
-        """Subscribe to the selected entities.
+    def async_listen(self) -> None:
+        """Subscribe to the selected entities and buffer. Nothing is sent until :meth:`async_start`.
 
         An empty selection subscribes to nothing at all rather than to
         everything - that is the correct reading of "the user picked nothing",
@@ -532,7 +691,11 @@ class StateForwarder:
         self._unsub_stop = self.hass.async_add_shutdown_job(
             HassJob(self._async_handle_stop, "tag_historian_shutdown")
         )
+        self._holding = True
         self._listening_since = dt_util.utcnow().timestamp()
+        for entity_id in self._entity_ids:
+            if entity_id not in self._acked:
+                self._since.setdefault(entity_id, self._listening_since)
 
         if self._entity_ids:
             self._unsub_state = async_track_state_change_event(
@@ -541,9 +704,19 @@ class StateForwarder:
         else:
             LOGGER.debug("No entities selected; forwarding nothing")
 
-        # What a previous run left behind goes out first.
-        self._schedule_flush()
+    @callback
+    def async_start(self) -> None:
+        """Begin to send - and to listen, if it does not yet."""
+        if self._stopping:
+            return
+        if self._unsub_stop is None:
+            self.async_listen()
+        self._holding = False
+
+        # What a previous run left behind goes out first. The read-back is
+        # asked for first, so that no live reading can go before it.
         self._request_backfill()
+        self._schedule_flush()
 
     # ------------------------------------------------------------------
     # Stopping
@@ -568,6 +741,9 @@ class StateForwarder:
             self._unsub_stop()
             self._unsub_stop = None
         self._cancel_timer()
+        if self._unsub_save is not None:
+            self._unsub_save()
+            self._unsub_save = None
         for unsub in self._trailing_timers.values():
             unsub()
         self._trailing_timers.clear()
@@ -608,13 +784,31 @@ class StateForwarder:
         3. flush what is still buffered, a few requests' worth;
         4. save whatever is left, with the watermark, for the next start.
         """
-        self._stopping = True
-        self.async_stop()
+        self._begin_stop()
         # A meter's reading still held back goes with the last flush, or is
         # saved with the buffer: it is the reading its burst ended on.
         self._release_trailing()
         await self._async_settle_inflight()
         await self._async_final_flush()
+
+    async def async_put_back(self) -> None:
+        """The entry could not be set up: save what there is, and ask nobody anything."""
+        if self._closed:
+            return
+        self._begin_stop()
+        self._release_trailing()
+        self._holding = True
+        await self._async_final_flush()
+
+    @callback
+    def _begin_stop(self) -> None:
+        # A gap not read back to its end is the next start's to read. A live
+        # reading delivered now would move the watermark past it.
+        self._cut_short = self._cut_short or self._backfill_running or (
+            self._backfill_wanted and history.recorder_ready(self.hass)
+        )
+        self._stopping = True
+        self.async_stop()
 
     async def _async_settle_inflight(self) -> None:
         """Give a request that is already on the wire time to answer.
@@ -623,9 +817,9 @@ class StateForwarder:
         request. Cancelling it would guarantee the loss this method exists to
         avoid, whereas letting it run means one of two honest endings - it
         answers and the readings are counted as sent, or Home Assistant cancels
-        it moments later (the unload's own task sweep, or stage 2 of a stop)
-        and :meth:`async_flush`'s ``finally`` counts the batch as abandoned.
-        Both move a number.
+        it moments later (the unload's own task sweep, or stage 2 of a stop),
+        and the batch is in what was saved, in doubt, for the next start to
+        ask about.
         """
         task = self._flush_task
         if task is None or task.done():
@@ -663,8 +857,8 @@ class StateForwarder:
         request is genuinely in flight with a batch already popped off the
         queue, and forcing it false here would let this loop pop the same
         readings a second time and send them twice - the endpoint does not
-        deduplicate. A flush already running is left to finish; whatever it
-        does not take is saved below. :meth:`_async_settle_inflight` has
+        deduplicate. A flush already running is left to finish; the batch it
+        carries is saved below, in doubt. :meth:`_async_settle_inflight` has
         already given it its chance by the time this runs.
 
         The backfill's read-ahead is not saved: those readings are still in the
@@ -704,6 +898,7 @@ class StateForwarder:
                     len(self._queue),
                 )
             self._queue.clear()
+            self._segments.clear()
         elif self._store is not None:
             await self._async_save(clean=True)
 
@@ -726,35 +921,54 @@ class StateForwarder:
     async def _async_save(self, *, clean: bool) -> bool:
         """Write the watermark - and on a clean stop the buffer - to .storage.
 
-        A batch still on the wire is saved as ACKNOWLEDGED. Its answer may yet
-        say "not taken", and then it is counted as lost; the other way round,
-        saving it as a gap, would have the next start read it back from the
-        recorder and send it a second time if it HAD landed. Overstating a
-        loss is visible; a doubled reading in somebody's history is not.
+        A batch still on the wire is saved as what it is: perhaps stored. Its
+        readings go first in the buffer, and the next start asks Tag Historian
+        before it sends them. (One read back from the recorder is only marked;
+        the recorder still has it.)
         """
         if self._store is None:
             return False
 
-        acked = dict(self._acked)
-        for item in self._inflight or []:
-            if item.timestamp > acked.get(item.entity_id, float("-inf")):
-                acked[item.entity_id] = item.timestamp
-        queue = [list(item) for item in self._queue] if clean else []
+        inflight = self._inflight or []
+        doubt = {**self._doubt, **_in_doubt(inflight)}
+        front = [] if self._inflight_from_backfill else inflight
+        segments = list(self._segments)
+        if front and self._inflight_restored and segments:
+            segments[0] += len(front)
+        restored = sum(segments)
+        items = [*front, *self._queue]
+        if clean and len(items) > restored:
+            segments.append(len(items) - restored)
+        saved = [list(item) for item in (items if clean else items[:restored])]
+        # Not taken to be on the wire any more by the time it is written.
+        self._inflight_saved = clean and bool(inflight)
 
         data: dict[str, Any] = {
             "clean": clean,
             "sending_ok": self._sending_ok,
-            "acked": acked,
-            "queue": queue,
+            "acked": dict(self._acked),
+            "queue": saved if clean else [],
             # How the next run finds an entity renamed in between (renames.py).
-            "registry_ids": self._registry_ids_of({*acked, *(item[0] for item in queue)}),
+            "registry_ids": self._registry_ids_of(
+                {*self._acked, *self._since, *doubt, *(item[0] for item in saved)}
+            ),
             "saved_at": dt_util.utcnow().isoformat(),
             "stopped_at": dt_util.utcnow().isoformat() if clean else None,
+            # From here on nothing an older version knows of, or reads.
+            "held": [] if clean else saved,
+            "segments": [n for n in segments if n],
+            "doubt": {entity_id: list(value) for entity_id, value in doubt.items()},
+            "doubt_all": self._doubt_all or bool(self._doubtful_until),
+            "doubt_until": self._doubt_until,
+            "since": {e: s for e, s in self._since.items() if e not in self._acked},
+            "save_every": WATERMARK_SAVE_SECONDS,
+            "counters": {name: getattr(self.stats, name) for name in SAVED_COUNTERS},
         }
         try:
             await self._store.async_save(data)
         except Exception:  # reported, and the caller counts the loss
             LOGGER.exception("Tag Historian could not save its buffer")
+            self._inflight_saved = False
             return False
         return True
 
@@ -781,6 +995,28 @@ class StateForwarder:
         self.entry.async_create_background_task(
             self.hass, self._async_save(clean=False), "tag_historian_save"
         )
+
+    @callback
+    def _save_within(self, seconds: float) -> None:
+        """Save within this long, together with whatever else asks for it meanwhile."""
+        if self._store is None or self._closed or self._stopping:
+            return
+        due = dt_util.utcnow().timestamp() + seconds
+        if self._unsub_save is not None:
+            if self._save_due <= due:
+                return
+            self._unsub_save()
+        self._save_due = due
+        self._unsub_save = async_call_later(
+            self.hass,
+            seconds,
+            HassJob(self._on_save_due, "tag_historian_save_due", cancel_on_shutdown=True),
+        )
+
+    @callback
+    def _on_save_due(self, _now: object) -> None:
+        self._unsub_save = None
+        self._save_soon()
 
     @callback
     def _cancel_timer(self) -> None:
@@ -949,7 +1185,7 @@ class StateForwarder:
             # ones worth keeping, and an unbounded queue is an out-of-memory
             # kill of the whole Home Assistant process rather than a lost hour
             # of history.
-            self._let_go(self._queue.popleft())
+            self._let_go(self._pop_oldest())
 
         self._queue.append(
             Queued(entity_id, stamp.timestamp(), line, self._send_as.get(entity_id, ""))
@@ -973,6 +1209,7 @@ class StateForwarder:
         contradicts the open/closed series they can already see.
         """
         self.stats.dropped_not_numeric += 1
+        self._save_within(WATERMARK_SAVE_SECONDS)
         if entity_id not in self.stats.unstorable_entities:
             if len(self.stats.unstorable_entities) < MAX_UNSTORABLE_NAMES:
                 self.stats.unstorable_entities.append(entity_id)
@@ -1000,6 +1237,28 @@ class StateForwarder:
     # ------------------------------------------------------------------
     # The backfill: gaps read back from the recorder
     # ------------------------------------------------------------------
+
+    def _pop_oldest(self) -> Queued:
+        """Take the oldest reading out of the buffer for good."""
+        for index, count in enumerate(self._segments):
+            if count:
+                self._segments[index] -= 1
+                break
+        return self._queue.popleft()
+
+    @callback
+    def _tidy_segments(self) -> None:
+        """What an earlier run left is delivered: now read what came after it, before anything newer goes."""
+        done = False
+        while self._segments and not self._segments[0] and not self._inflight_restored:
+            self._segments.popleft()
+            done = True
+        if not done:
+            return
+        self._backfill_wanted = True
+        if self._stopping:
+            self._cut_short = self._cut_short or history.recorder_ready(self.hass)
+        self._request_backfill()
 
     def _held(self) -> int:
         return len(self._queue) + len(self._backfill)
@@ -1052,12 +1311,13 @@ class StateForwarder:
         if (held := self._trailing.get(entity_id)) is not None:
             candidates.append(held[0].last_updated.timestamp())
         if entity_id not in self._acked:
-            candidates.append(self._listening_since)
+            candidates.append(self._since.get(entity_id, self._listening_since))
         return min(candidates, default=None)
 
     def _let_go(self, item: Queued) -> None:
         """A reading the full buffer has evicted, oldest first. Counted either way."""
         self.stats.dropped_overflow += 1
+        self._save_within(WATERMARK_SAVE_SECONDS)
         if self._over_allowance and self._may_forfeit(item.entity_id):
             self._forfeit(item)
             return
@@ -1109,6 +1369,16 @@ class StateForwarder:
         """Start a backfill pass, unless one is running or there is no recorder to read."""
         if self._closed or self._backfill_running or not history.recorder_ready(self.hass):
             return
+        if self._holding or self._stopping or self._in_doubt:
+            # Not yet, or not any more: where the gap begins is what Tag
+            # Historian is about to be asked.
+            self._backfill_wanted = True
+            return
+        if self._inflight is not None and not self._inflight_from_backfill:
+            # A live batch that comes back is older than what would be read
+            # now, and would be behind it. When it has been answered for, then.
+            self._backfill_wanted = True
+            return
         self._backfill_wanted = False
         self._backfill_running = True
         self._backfill_task = self.entry.async_create_background_task(
@@ -1144,8 +1414,12 @@ class StateForwarder:
         watermark past the part of the gap not read yet, and a restart then
         would leave that part out for good.
         """
-        began = dt_util.utcnow().timestamp()
         try:
+            if not self._recorder_written:
+                self._recorder_written = await history.async_written(
+                    self.hass, RECORDER_WAIT_SECONDS
+                )
+            began = dt_util.utcnow().timestamp()
             for entity_id in list(self._entity_ids):
                 if self._closed:
                     break
@@ -1154,7 +1428,13 @@ class StateForwarder:
                 # second pass while the first one's readings are still held
                 # must not read them again.
                 acked = self._newest_accounted(entity_id)
-                start = acked if acked is not None else self._listening_since
+                start = acked
+                if start is None:
+                    start = self._since.get(entity_id, self._listening_since)
+                doubtful = self._doubtful_until.get(entity_id)
+                if doubtful is not None:
+                    # Counted below, not sent, so a day of it at most is read.
+                    start = max(start, doubtful - RECORDER_WINDOW_HOURS * 3600)
                 held = self._oldest_held(entity_id)
                 end = held if held is not None else began
                 if end <= start:
@@ -1164,6 +1444,11 @@ class StateForwarder:
                     entity_id, start, end, held is not None, throttle_from=acked
                 )
                 self._reading_back = None
+                if self._doubtful_until.pop(entity_id, None) is not None:
+                    self._acked[entity_id] = max(
+                        doubtful, self._acked.get(entity_id, float("-inf"))
+                    )
+                    self._save_within(LOSS_SAVE_SECONDS)
         except asyncio.CancelledError:
             raise
         except Exception:  # the recorder failing must not stop the live path
@@ -1221,6 +1506,10 @@ class StateForwarder:
                 if end_is_held and end - stamp < interval:
                     continue
                 last = stamp
+                if stamp <= self._doubtful_until.get(entity_id, float("-inf")):
+                    self.stats.dropped_inflight += 1
+                    self.stats.last_error = "readings from before a crash may be missing"
+                    continue
 
                 while len(self._backfill) >= BACKFILL_BATCH_SIZE and not self._closed:
                     self._backfill_room.clear()
@@ -1272,10 +1561,12 @@ class StateForwarder:
         reading hostage until ninety-nine more arrive; the size trigger is what
         stops a burst being sent one request per reading.
         """
-        if self._closed or self._paused or self._flushing or not self._sendable():
+        if self._closed or self._stopping or self._holding or self._paused or self._flushing:
+            return
+        if not self._sendable():
             return
 
-        if self._backfill or len(self._queue) >= BATCH_BUFFER_SIZE:
+        if self._backfill or self._in_doubt or len(self._queue) >= BATCH_BUFFER_SIZE:
             # A full buffer overtakes a pending timeout, and recorded readings
             # have waited long enough already.
             self._cancel_timer()
@@ -1289,9 +1580,14 @@ class StateForwarder:
 
     def _sendable(self) -> bool:
         """Whether there is anything the next flush may take."""
-        if self._backfill:
+        if self._backfill or self._in_doubt:
             return True
-        return bool(self._queue) and not self._backfill_running
+        return bool(self._queue) and not self._backfill_running and not self._cut_short
+
+    @property
+    def _in_doubt(self) -> bool:
+        """Whether something may have been stored already, and Tag Historian is to be asked first."""
+        return self._doubt_all or bool(self._doubt)
 
     @callback
     def _on_flush_due(self, _now: object) -> None:
@@ -1317,24 +1613,33 @@ class StateForwarder:
         with every counter still reading zero, while the README promised the
         opposite.
 
-        The batch is NOT requeued when that happens. The request may have been
+        The batch goes back to the front, IN DOUBT: the request may have been
         taken in full before the socket went, and Tag Historian does not
-        deduplicate live writes, so putting it back would risk doubling
-        readings in somebody's history. It is counted as lost and logged
-        instead - which can overstate the loss, and that is the direction this
-        project has always chosen: an overstated loss gets asked about, an
-        understated one is the silence the counters exist to prevent.
+        deduplicate live writes, so it is asked what it has before any of it
+        is sent again (:meth:`_async_settle_doubt`).
 
         Recorded readings go first, and a batch is never a mix of the two.
         """
-        if self._flushing or self._paused or not self._sendable():
+        if self._flushing or self._paused or self._holding or not self._sendable():
+            return
+        if self._in_doubt:
+            if self._stopping:
+                return  # saved as it is, for the next start to ask
+            self._flushing = True
+            try:
+                if not await self._async_settle_doubt():
+                    return
+            finally:
+                self._flushing = False
+            if self._closed or self._paused:
+                return
+        self._tidy_segments()
+        if not self._sendable():
             return
 
         source = self._backfill if self._backfill else self._queue
         self._flushing = True
-        limit = BACKFILL_BATCH_SIZE if source is self._backfill else MAX_POINTS_PER_REQUEST
-        take = min(len(source), limit)
-        batch = [source.popleft() for _ in range(take)]
+        batch = self._take(source)
         # From here until something accounts for it, this batch is the only
         # copy of those readings anywhere.
         self._inflight = batch
@@ -1368,16 +1673,25 @@ class StateForwarder:
                 return
             except TagHistorianConnectionError as err:
                 self._over_allowance = False
-                self._requeue(batch)
+                self._requeue(batch, in_doubt=isinstance(err, TagHistorianUnansweredError))
                 self.stats.last_error = str(err)
                 self._flushing = False
                 self._writes_failing()
                 self._pause(CONNECTION_RETRY_SECONDS)
                 return
+            except Exception as err:  # nothing is lost to what nobody foresaw
+                LOGGER.exception("Tag Historian could not send %s readings", len(batch))
+                result = WriteResult(
+                    WriteOutcome.SERVER_ERROR, message=str(err) or type(err).__name__
+                )
 
             self._flushing = False
             self._handle_result(result, batch)
             self._inflight = None
+            self._inflight_restored = False
+            self._tidy_segments()
+            if self._backfill_wanted:
+                self._request_backfill()
             self.stats.queued = self._held()
             self._schedule_flush()
         finally:
@@ -1389,34 +1703,260 @@ class StateForwarder:
                 self._abandon_inflight()
                 self._flushing = False
 
+    def _take(self, source: deque[Queued]) -> list[Queued]:
+        """Take the next batch out of ``source``, and remember where it came from."""
+        restored = source is self._queue and bool(self._segments)
+        self._inflight_restored = restored
+        self._probing = False
+        if self._suspect is not None:
+            index = self._probe_index(source)
+            if index is not None:
+                item = source[index]
+                del source[index]
+                if restored:
+                    self._segments[0] -= 1
+                self._probing = True
+                return [item]
+            self._suspect = None
+            self._probed.clear()
+        limit = BACKFILL_BATCH_SIZE if source is self._backfill else MAX_POINTS_PER_REQUEST
+        if restored:
+            limit = min(limit, self._segments[0])
+        if self._error_limit is not None:
+            limit = min(limit, self._error_limit)
+        take = min(len(source), limit)
+        if restored:
+            self._segments[0] -= take
+        return [source.popleft() for _ in range(take)]
+
+    def _probe_index(self, source: deque[Queued]) -> int | None:
+        """The oldest reading of an entity not tried yet, behind the one under suspicion.
+
+        Another entity's, so that its own readings still go in order. Where
+        there is no other, the next one of the same.
+        """
+        if not source or source[0] is not self._suspect:
+            return None
+        end = self._front(source)
+        alone = {source[index].entity_id for index in range(end)} == {self._suspect.entity_id}
+        if alone:
+            # Each of them is taken to be stored once the next is, so this is
+            # not done lightly.
+            if self._error_tries < SERVER_ERROR_TRIES * SERVER_ERROR_TRIES:
+                return None
+            if end < 2 or self._suspect.entity_id in self._probed:
+                return None
+            return 1
+        for index in range(1, end):
+            entity_id = source[index].entity_id
+            if entity_id != self._suspect.entity_id and entity_id not in self._probed:
+                return index
+        return None
+
+    def _front(self, source: deque[Queued]) -> int:
+        """How many readings may be sent before something has to be read back."""
+        end = self._segments[0] if source is self._queue and self._segments else len(source)
+        return min(end, len(source))
+
     def _acknowledge(self, batch: list[Queued]) -> None:
         """Move the watermark over a batch Tag Historian has answered for, for good."""
         for item in batch:
             if item.timestamp > self._acked.get(item.entity_id, float("-inf")):
                 self._acked[item.entity_id] = item.timestamp
+        if batch is self._inflight:
+            # Answered for: not on the wire any more, whatever is saved next.
+            self._inflight = None
+        self._save_within(WATERMARK_SAVE_SECONDS)
 
     def _abandon_inflight(self) -> None:
-        """Count a batch whose request never came back.
-
-        It also moves the watermark over it: the endpoint may have taken it,
-        and reading it back from the recorder later would send it twice.
-        """
+        """A batch whose request never came back: held, and in doubt."""
         batch = self._inflight or []
         self._inflight = None
         if not batch:
             return
-
-        self._acknowledge(batch)
+        if not self._closed:
+            self._requeue(batch, in_doubt=True)
+            return
+        if self._inflight_saved:
+            return  # the next start asks about it
         self.stats.dropped_inflight += len(batch)
         self.stats.last_error = f"{len(batch)} readings abandoned mid-write"
         self.stats.queued = self._held()
         LOGGER.warning(
             "Tag Historian abandoned %s readings that were already being "
-            "written when the request was cut short; they are not re-sent, "
-            "because the endpoint does not deduplicate and some or all of them "
-            "may already have been stored",
+            "written when the request was cut short, and could not save them; "
+            "some or all of them may have been stored",
             len(batch),
         )
+
+    async def _async_settle_doubt(self) -> bool:
+        """Ask Tag Historian what it has, and let go of what it has already. True once settled.
+
+        Its newest reading of a tag is moved once a batch is safely taken, and
+        readings reach it oldest first per entity, so a reading no newer than
+        that has been stored and a newer one has not. A name it has no reading
+        in has stored none.
+
+        When it cannot say, nothing in doubt is sent: a loss that is counted
+        is asked about, a doubled reading in somebody's history is not. After
+        a crash that is what was read or sent up to ``_doubt_until``, counted
+        as the recorder is read (``_doubtful_until``).
+        """
+        newest: dict[str, float | None] | None = None
+        try:
+            newest = await self._client.async_get_newest_readings()
+        except TagHistorianAuthError:
+            self.stats.last_error = "authentication failed"
+            self.entry.async_start_reauth(self.hass)
+            self._writes_failing()
+            self._pause(CONNECTION_RETRY_SECONDS)
+            return False
+        except TagHistorianPermissionError:
+            pass
+        except Exception as err:  # whatever it is, it is not an answer
+            self.stats.last_error = str(err) or type(err).__name__
+            if isinstance(err, TagHistorianAnsweredError) or not isinstance(err, TagHistorianError):
+                self._settle_failures += 1
+            if self._settle_failures < SETTLE_ATTEMPTS:
+                self._writes_failing()
+                self._pause(max(CONNECTION_RETRY_SECONDS, getattr(err, "retry_after", 0)))
+                return False
+        if self._closed:
+            return False
+
+        self._settle_failures = 0
+        doubt, self._doubt = self._doubt, {}
+        whole, self._doubt_all = self._doubt_all, False
+        # Per entity, up to where Tag Historian has it all, and up to where
+        # nobody can say.
+        stored: dict[str, float] = {}
+        unknown: dict[str, float] = {}
+        missing = 0
+        for entity_id, (stamp, sent_as, count) in doubt.items():
+            known, at = self._stored(newest, sent_as or entity_id)
+            if not known:
+                unknown[entity_id] = stamp
+                missing += count
+            elif at is not None and int(stamp) <= at:
+                if int(stamp) <= self._acked.get(entity_id, float("-inf")):
+                    # The second of one already acknowledged: that may be the
+                    # one Tag Historian's answer is about.
+                    unknown[entity_id] = stamp
+                    missing += count
+                    continue
+                stored[entity_id] = stamp
+                if not whole:
+                    self.stats.sent += count
+        if whole:
+            for entity_id in {*self._entity_ids, *self._acked, *(i.entity_id for i in self._queue)}:
+                sent_as = self._send_as.get(entity_id, entity_id)
+                known, at = self._stored(newest, sent_as)
+                if not known:
+                    if self._doubt_until:
+                        self._doubtful_until[entity_id] = self._doubt_until
+                        unknown[entity_id] = max(
+                            unknown.get(entity_id, float("-inf")), self._doubt_until
+                        )
+                elif at is not None and (
+                    entity_id in self._acked or at >= self._since.get(entity_id, float("inf"))
+                ):
+                    # To the second it is sent in: all of that second.
+                    stored[entity_id] = max(
+                        stored.get(entity_id, float("-inf")), at + 1 - 1e-6
+                    )
+
+        suspect = self._suspect
+        if (
+            suspect is not None
+            and suspect.entity_id in doubt
+            and suspect.timestamp < stored.get(suspect.entity_id, float("-inf"))
+        ):
+            # The next of its entity was tried, and is there. This one is not.
+            self.stats.dropped_quota += 1
+            self._suspect = None
+            self._probed.clear()
+
+        missing += self._let_go_up_to(stored, unknown, counted=doubt)
+        for entity_id, stamp in stored.items():
+            if stamp > self._acked.get(entity_id, float("-inf")):
+                self._acked[entity_id] = stamp
+        for entity_id, (stamp, _sent_as, _count) in doubt.items():
+            if entity_id in unknown and stamp > self._acked.get(entity_id, float("-inf")):
+                self._acked[entity_id] = stamp
+        if missing:
+            self.stats.dropped_inflight += missing
+            self.stats.last_error = f"{missing} readings that may or may not have been stored"
+            LOGGER.warning(
+                "Tag Historian could not say whether %s readings were stored before the "
+                "connection or Home Assistant went away; they are not sent again",
+                missing,
+            )
+        self.stats.queued = self._held()
+        self._save_soon()
+        self._tidy_segments()
+        # Now it is known where a gap begins.
+        if self._backfill_wanted:
+            self._request_backfill()
+        return True
+
+    def _stored(
+        self, newest: dict[str, float | None] | None, sent_as: str
+    ) -> tuple[bool, float | None]:
+        """(whether Tag Historian can say, its newest reading of that entity's tag if it has any)."""
+        if newest is None:
+            return False, None
+        name = tag_name_for_entity(sent_as)
+        if name not in newest:
+            return True, None
+        at = newest[name]
+        # A reading from the future is not one of ours, and says nothing.
+        if at is None or at > dt_util.utcnow().timestamp() + 60:
+            return False, None
+        return True, at
+
+    def _let_go_up_to(
+        self,
+        stored: dict[str, float],
+        unknown: dict[str, float],
+        counted: dict[str, tuple[float, str, int]],
+    ) -> int:
+        """Take what is settled out of the buffers. How many of them nobody can say about.
+
+        Not the ones ``counted`` already knows of.
+        """
+        lost = 0
+
+        def settled(item: Queued) -> bool:
+            nonlocal lost
+            if item.timestamp <= stored.get(item.entity_id, float("-inf")):
+                return True
+            if item.timestamp <= unknown.get(item.entity_id, float("-inf")):
+                if item.timestamp > counted.get(item.entity_id, (float("-inf"),))[0]:
+                    lost += 1
+                return True
+            return False
+
+        kept: list[Queued] = []
+        restored = sum(self._segments)
+        bounds: list[int] = []
+        total = 0
+        for count in self._segments:
+            total += count
+            bounds.append(total)
+        left = [0] * len(bounds)
+        for index, item in enumerate(self._queue):
+            if settled(item):
+                continue
+            kept.append(item)
+            if index < restored:
+                left[next(n for n, bound in enumerate(bounds) if index < bound)] += 1
+        self._queue = deque(kept)
+        self._segments = deque(left)
+        lost_before = lost
+        self._backfill = deque(item for item in self._backfill if not settled(item))
+        lost = lost_before  # the recorder has these, and counts them itself
+        self._backfill_room.set()
+        return lost
 
     @callback
     def _writes_failing(self) -> None:
@@ -1440,6 +1980,13 @@ class StateForwarder:
         # Any other answer - a delivery, an outage, a busy buffer - makes it one
         # to read back.
         self._over_allowance = result.outcome is WriteOutcome.DAILY_QUOTA
+
+        if result.outcome is WriteOutcome.SERVER_ERROR:
+            self._handle_server_error(batch, result.message)
+            return
+
+        if result.outcome in (WriteOutcome.OK, WriteOutcome.PARTIAL_TAG_QUOTA):
+            self._server_answered()
 
         if result.outcome is WriteOutcome.OK:
             self._acknowledge(batch)
@@ -1477,6 +2024,7 @@ class StateForwarder:
             refused = min(max(0, refused), len(batch))
             self.stats.sent += len(batch) - refused
             self.stats.dropped_quota += refused
+            self._save_within(LOSS_SAVE_SECONDS)
             self.stats.refused_tags = result.skipped_tags
             self.stats.last_error = result.message
             self._repairs.async_raise_tag_quota_issue(
@@ -1522,6 +2070,7 @@ class StateForwarder:
         # Answered for good either way below: the watermark moves over the
         # batch, so the recorder is never asked for it again.
         self._acknowledge(batch)
+        self._save_within(LOSS_SAVE_SECONDS)
 
         if result.outcome is WriteOutcome.FORBIDDEN:
             # Permanent until a person acts. The batch is dropped rather than
@@ -1540,14 +2089,123 @@ class StateForwarder:
         self.stats.dropped_quota += len(batch)
         self.stats.last_error = result.message
 
-    def _requeue(self, batch: list[Queued]) -> None:
+    def _handle_server_error(self, batch: list[Queued], message: str) -> None:
+        """An error of Tag Historian's own, or something nobody foresaw: nothing is dropped for it.
+
+        Sent again as it is, a batch with one reading in it that cannot be
+        taken would be at the front for good. So it is halved until it goes
+        through or is one reading; and that one is not let go of before
+        another entity's has been taken meanwhile, which tells a reading that
+        cannot be taken from a Tag Historian that takes none. The latter is
+        waited out, for SERVER_ERROR_GIVE_UP_SECONDS.
+        """
+        now = dt_util.utcnow()
+        if self._errors_since is None:
+            self._errors_since = now.timestamp()
+            self._error_batch = len(batch)
+        if self._unavailable_since is None:
+            self._unavailable_since = now
+        self.stats.last_error = message
+        probing = self._probing
+        self._requeue(batch, in_doubt=True)
+        if self._closed:
+            return
+        self._writes_failing()
+
+        source = self._backfill if self._inflight_from_backfill else self._queue
+        if now.timestamp() - self._errors_since >= SERVER_ERROR_GIVE_UP_SECONDS:
+            count = min(self._error_batch, len(source))
+            for _ in range(count):
+                self._refuse(source)
+            LOGGER.error(
+                "Tag Historian has answered every write with an error for %s hours; "
+                "%s readings are let go of",
+                SERVER_ERROR_GIVE_UP_SECONDS // 3600,
+                count,
+            )
+            self._forget_errors()
+        elif probing:
+            self._probed.add(batch[0].entity_id)
+        elif len(batch) > 1:
+            self._error_limit = len(batch) // 2
+            self._error_tries = 0
+        else:
+            self._error_limit = 1
+            if batch[0] is not self._last_failed:
+                self._last_failed = batch[0]
+                self._error_tries = 0
+                self._error_proofs = 0
+            self._error_tries += 1
+            if source and source[0] is batch[0]:
+                end = self._front(source)
+                alone = {source[index].entity_id for index in range(end)} == {batch[0].entity_id}
+                if not alone or self._error_tries >= SERVER_ERROR_TRIES * SERVER_ERROR_TRIES:
+                    self._suspect = batch[0]
+        self._repairs.async_maybe_raise_unavailable_issue(
+            self.hass, self.entry, (now - self._unavailable_since).total_seconds()
+        )
+        # Quickly only while others are being taken in between.
+        failing = now.timestamp() - (self._errors_since or now.timestamp())
+        quick = self._error_answered and failing < CONNECTION_RETRY_SECONDS
+        self._pause(1 if quick else CONNECTION_RETRY_SECONDS)
+
+    def _server_answered(self) -> None:
+        """A batch was taken: what failed before it is not Tag Historian taking nothing."""
+        if self._error_limit is None and self._errors_since is None:
+            return
+        self._errors_since = None
+        self._error_answered = True
+        if self._probing and self._suspect is not None:
+            source = self._backfill if self._inflight_from_backfill else self._queue
+            # The next of its own entity is tried once: Tag Historian's newest
+            # reading is past this one now, so its answer about it would be.
+            alone = self._inflight is not None and any(
+                item.entity_id == self._suspect.entity_id for item in self._inflight
+            )
+            self._error_proofs += SERVER_ERROR_TRIES if alone else 1
+            if self._error_proofs < SERVER_ERROR_TRIES:
+                self._suspect = None
+                self._probed.clear()
+                return
+            if source and source[0] is self._suspect:
+                LOGGER.error(
+                    "Tag Historian answers one reading of %s with an error every time; "
+                    "it is let go of",
+                    self._suspect.entity_id,
+                )
+                self._refuse(source)
+            self._suspect = None
+            self._probed.clear()
+            return
+        if self._error_limit is not None:
+            self._error_limit *= 2
+            if self._error_limit >= BATCH_BUFFER_SIZE:
+                self._forget_errors()
+
+    def _refuse(self, source: deque[Queued]) -> None:
+        """Let go of the reading at the front: Tag Historian cannot take it."""
+        item = self._pop_oldest() if source is self._queue else source.popleft()
+        self._acknowledge([item])
+        self._doubt.pop(item.entity_id, None)
+        self.stats.dropped_quota += 1
+        self._save_within(LOSS_SAVE_SECONDS)
+
+    def _forget_errors(self) -> None:
+        self._errors_since = None
+        self._error_limit = None
+        self._error_batch = 0
+        self._error_tries = 0
+        self._error_proofs = 0
+        self._last_failed = None
+        self._error_answered = False
+        self._suspect = None
+        self._probed.clear()
+
+    def _requeue(self, batch: list[Queued], *, in_doubt: bool = False) -> None:
         """Put an unsent batch back at the FRONT of where it came from, preserving order.
 
-        Only ever called where the API gave a definite answer that the batch
-        was NOT taken - a 401, a socket error or a gateway's 502 or 504, a
-        429, a 503. That is the whole
-        difference from :meth:`_abandon_inflight`, which handles the case where
-        there is no answer at all.
+        ``in_doubt`` where it may have been taken all the same: a timeout, a
+        connection that broke off, an error of Tag Historian's own.
         """
         # Back in the buffer, so the in-flight guard has nothing left to count.
         self._inflight = None
@@ -1557,19 +2215,31 @@ class StateForwarder:
             # saved. A write that took longer than the wait and then came back
             # with "not taken, try again" is asking to be put into a queue
             # nobody will ever drain, which is the silent loss with an extra
-            # step in it. It was saved as acknowledged, so it is not read back
-            # from the recorder either: counted, as lost.
-            self._count_shutdown_loss(len(batch))
+            # extra step in it. Unless the buffer was saved with this batch in
+            # it: then the next start asks about it.
+            if not self._inflight_saved:
+                self._count_shutdown_loss(len(batch))
             return
 
-        if self._inflight_from_backfill:
-            self._backfill.extendleft(reversed(batch))
+        if in_doubt:
+            self._doubt.update(_in_doubt(batch))
+        source = self._backfill if self._inflight_from_backfill else self._queue
+        if self._probing and source and source[0] is self._suspect:
+            source.insert(1, batch[0])
+        else:
+            source.extendleft(reversed(batch))
+        self._probing = False
+        if self._inflight_restored and self._segments:
+            self._segments[0] += len(batch)
+        self._inflight_restored = False
+        if source is self._backfill:
             self.stats.queued = self._held()
             return
 
-        self._queue.extendleft(reversed(batch))
         while len(self._queue) > MAX_QUEUE_LENGTH:
-            self._let_go(self._queue.popleft())
+            self._let_go(self._pop_oldest())
+        if self._backfill_wanted:
+            self._request_backfill()
         self.stats.queued = self._held()
 
     @callback

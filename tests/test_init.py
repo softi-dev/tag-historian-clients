@@ -18,6 +18,7 @@ from custom_components.tag_historian import async_get_stats
 from custom_components.tag_historian.api import (
     TagHistorianAuthError,
     TagHistorianConnectionError,
+    TagHistorianPermissionError,
     WriteOutcome,
     WriteResult,
 )
@@ -103,17 +104,54 @@ async def test_the_entrys_own_client_keeps_ten_seconds_in_all(
     await hass.async_block_till_done()
 
 
-async def test_a_dead_api_defers_setup_rather_than_loading_a_silent_entry(
+async def test_a_dead_api_does_not_keep_the_entry_from_listening(
     hass: HomeAssistant,
 ) -> None:
-    """ConfigEntryNotReady means Home Assistant retries with backoff.
+    """Loaded, buffering, and sending nothing until it can be reached.
 
-    A loaded entry that forwards nothing looks identical to a working one, so
-    failing the setup is the honest outcome.
+    It used to wait in setup retry, and a reading made meanwhile was the
+    recorder's to remember. A loaded entry that forwards nothing must not look
+    like a working one: the readings are counted as queued, and the sensor
+    says why.
     """
     entry = make_entry(hass, ["sensor.house_power"])
     client = make_client()
+    client.async_write.return_value = WriteResult(WriteOutcome.OK)
     client.async_get_quota.side_effect = TagHistorianConnectionError("down")
+
+    with patch(CLIENT_PATH, return_value=client):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        assert entry.state is ConfigEntryState.LOADED
+        hass.states.async_set("sensor.house_power", "1500")
+        await hass.async_block_till_done()
+        async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=30))
+        await hass.async_block_till_done()
+        client.async_write.assert_not_awaited()
+        stats = async_get_stats(hass, entry.entry_id)
+        assert stats.queued == 1
+        assert "down" in stats.last_error
+        # Nothing that needs an answer has been asked for either.
+        client.async_propose_time_zone.assert_not_awaited()
+
+        client.async_get_quota.side_effect = None
+        async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=65))
+        await hass.async_block_till_done()
+        async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=70))
+        await hass.async_block_till_done()
+        assert stats.sent == 1
+        client.async_propose_time_zone.assert_awaited_once()
+
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_a_key_that_may_not_read_still_defers_setup(hass: HomeAssistant) -> None:
+    """Something answered, and said no: that is not a connection to wait out."""
+    entry = make_entry(hass, ["sensor.house_power"])
+    client = make_client()
+    client.async_get_quota.side_effect = TagHistorianPermissionError("read only")
 
     with patch(CLIENT_PATH, return_value=client):
         assert not await hass.config_entries.async_setup(entry.entry_id)
@@ -340,7 +378,7 @@ async def test_an_options_change_mid_write_does_not_lose_the_batch(
         await hass.async_block_till_done()
 
 
-async def test_a_batch_that_cannot_be_saved_is_counted_rather_than_vanishing(
+async def test_a_batch_cut_short_by_a_reload_is_held_rather_than_vanishing(
     hass: HomeAssistant,
 ) -> None:
     """The counterfactual, kept as a test: take the wait away and look.
@@ -351,11 +389,9 @@ async def test_a_batch_that_cannot_be_saved_is_counted_rather_than_vanishing(
     cancels the entry's background tasks straight after ``async_unload_entry``
     returns, and that cancellation lands inside the await on the socket.
 
-    What must NOT come back is the silence. The batch is counted where it can
-    be seen, named as its own kind of loss, because it is the only one that
-    can overstate: the endpoint may have taken those readings before the
-    socket went, and it does not deduplicate, so re-sending them would risk
-    doubling somebody's history instead of restoring it.
+    What must NOT come back is the silence. The batch is saved as what it is -
+    perhaps stored - and the next forwarder has it, to send once Tag Historian
+    has said what it has.
     """
     entry = make_entry(hass, PROBES, min_interval=0)
     client = make_client()
@@ -387,11 +423,10 @@ async def test_a_batch_that_cannot_be_saved_is_counted_rather_than_vanishing(
         assert stats.sent == 0
         # The whole point. Forty readings left the buffer and did not arrive,
         # and exactly forty are accounted for.
-        assert stats.dropped_inflight == 40
+        assert stats.dropped_inflight == 0
         assert stats.dropped_shutdown == 0
-        assert (
-            hass.states.get("sensor.tag_historian_readings_dropped").state == "40"
-        ), "and a person can see it without reading the log"
+        assert stats.queued == 40
+        assert entry.runtime_data.forwarder._in_doubt
 
         assert await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()
@@ -465,16 +500,14 @@ async def test_stopping_home_assistant_mid_write_does_not_lose_the_batch(
         assert stats.queued == 0
 
 
-async def test_stopping_home_assistant_on_a_write_that_will_not_answer_counts_it(
-    hass: HomeAssistant,
+async def test_stopping_home_assistant_on_a_write_that_will_not_answer_saves_it(
+    hass: HomeAssistant, hass_storage
 ) -> None:
     """And when the grace cannot save it, the readings are still accounted for.
 
     The stop path's half of the invariant. A write that will not answer inside
-    the wait is abandoned rather than re-sent - Tag Historian does not
-    deduplicate and the endpoint may already have taken the batch - so the
-    honest ending is the counter that can overstate, moving by exactly the
-    number of readings that left the buffer.
+    the wait is saved as in doubt: Tag Historian may already have taken the
+    batch, and is asked before it is sent again.
     """
     entry = make_entry(hass, PROBES, min_interval=0)
     client = make_client()
@@ -496,8 +529,11 @@ async def test_stopping_home_assistant_on_a_write_that_will_not_answer_counts_it
         stats = async_get_stats(hass, entry.entry_id)
         assert writer.stored == [], "the request never came back"
         assert stats.sent == 0
-        assert stats.dropped_inflight == 40
+        assert stats.dropped_inflight == 0
         assert stats.dropped_shutdown == 0
+        saved = hass_storage[f"tag_historian.{entry.entry_id}.forwarder"]["data"]
+        assert len(saved["queue"]) == 40
+        assert len(saved["doubt"]) == 40
 
 
 async def test_changing_the_options_reloads_the_entry(hass: HomeAssistant) -> None:

@@ -32,6 +32,7 @@ readings, and the new one's are under the id it had before.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -144,6 +145,24 @@ async def async_recorded_states(
         for state in changes.get(entity_id, [])
         if start < state.last_updated < end
     ]
+
+
+async def async_written(hass: HomeAssistant, within: float) -> bool:
+    """Wait until what the recorder has been handed is written, ``within`` seconds at most.
+
+    It commits every few seconds, and nothing at all until Home Assistant has
+    started: a state set just before is not in an answer read before that.
+    """
+    if not recorder_ready(hass):
+        return True
+    from homeassistant.components.recorder import get_instance
+
+    try:
+        async with asyncio.timeout(within):
+            await get_instance(hass).async_block_till_done()
+    except (KeyError, TimeoutError):
+        return False
+    return True
 
 
 async def async_last_recorded(hass: HomeAssistant, entity_id: str) -> datetime | None:

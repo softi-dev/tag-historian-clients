@@ -136,8 +136,9 @@ What this integration has that the built-in one does not:
   reading allowance. See [Import your history](#import-your-history).
 - **A restart or an outage does not cost you your readings.** Readings it
   could not deliver are saved when Home Assistant stops and sent when it
-  starts again, and readings it had to let go of during an outage are read
-  back from the recorder while the recorder still has them. See [When the
+  starts again, and readings it had to let go of during an outage, or was not
+  there for, are read back from the recorder while the recorder still has
+  them. See [When the
   connection or Home Assistant goes
   away](#when-the-connection-or-home-assistant-goes-away).
 
@@ -556,10 +557,10 @@ reading can fail to become history:
 
 | Attribute | What it counts |
 |---|---|
-| `dropped_over_quota` | Refused because it needed a series your plan has no room for, or refused for good for another reason that `last_error` names: an account that may not write just now, or a batch Tag Historian could not take (`400`, `413`, `500`) |
+| `dropped_over_quota` | Refused because it needed a series your plan has no room for, or refused for good for another reason that `last_error` names: an account that may not write just now, a batch Tag Historian could not take (`400`, `413`), or a reading it answers with an error every time |
 | `dropped_queue_overflow` | Evicted from a full buffer, oldest first. During an outage they are read back from the recorder once Tag Historian answers again, while the recorder still has them; while today's reading allowance is spent they are over the allowance and are not |
-| `dropped_on_shutdown` | Neither delivered nor saved when the integration stopped: handed back too late to requeue, or a save that failed |
-| `dropped_mid_write` | Already in a request that never came back, because Home Assistant stopped or the entry was reloaded underneath it |
+| `dropped_on_shutdown` | Neither delivered nor saved when the integration stopped, because the save failed |
+| `dropped_mid_write` | May or may not have been stored, and nobody can say: their request never came back, or Home Assistant crashed, and Tag Historian could not tell what it has |
 | `dropped_not_a_number` | The entity reported a word this integration cannot store |
 
 `entities_storing_nothing` names the entities behind that last one, so a chart
@@ -571,10 +572,10 @@ from the recorder to fill a gap, and `restored_after_restart`, readings saved
 at the last stop and sent after it.
 
 The counters keep their values across a reload, so fixing a Repairs card does
-not erase the evidence of what it was telling you about. A Home Assistant
-restart clears them — they are held in memory — while the readings they
-describe are saved and sent, and anything that could not be is written to the
-log as well as counted.
+not erase the evidence of what it was telling you about. The ones that make up
+the total keep them across a Home Assistant restart too: they are saved with
+the buffer, within half a minute of a loss, and within five minutes of an
+eviction or of a word it cannot store. Removing the integration clears them.
 
 ## When something goes wrong
 
@@ -586,6 +587,7 @@ Everything below that needs your attention shows up in **Settings → Repairs**.
 | Some readings exceed your plan's series count | Names the series, counts the readings that were lost, keeps sending everything else, and offers to reopen the picker so you can deselect |
 | Today's reading allowance is spent | Holds the newest readings — through a restart too — and waits exactly as long as the API asks; it does not hammer a closed door. What no longer fits in the buffer meanwhile is over the allowance: counted, not sent later |
 | Tag Historian is busy, cannot check your key just now, or cannot be reached | Holds the readings and tries again. When Tag Historian answered (busy, or unable to take them just now: `429` or `503`), it waits as long as the API asks (half a minute when the answer names no wait, as a gateway's `503` may not), and raises a card only if that goes on for half an hour; that card never mentions your plan, because this is not about your plan. When nothing answers at all (your network or the host is down), or a gateway in front of Tag Historian answers `502` or `504` in its place, there is no wait to honour: it tries again half a minute after each failed attempt and raises no card; the `last_error` attribute on the **readings dropped** sensor says why. A key Tag Historian could not check (it answers `503` with reason `sign_in_unavailable`) is not a key it refused (`401`), and the integration never asks you for a new one for it |
+| Tag Historian answers with an error of its own (`500`, or anything else that says nothing about the readings) | Holds the readings and tries again half a minute later, in smaller and smaller batches. A single reading that gets an error every time while another is taken is let go of and counted as `dropped_over_quota`. While nothing but errors comes back, whatever is sent, it goes on trying, and lets go of a batch, counted, only after a day of that. A card is raised when it has gone on for half an hour |
 | Your account cannot write yet | Shows Tag Historian's own explanation, word for word |
 | **Send power sensors more often** no longer fits your plan's daily reading allowance | Sends every entity at the minimum interval, power sensors too, and says why on a card with the numbers; goes back to every 2 seconds by itself when the sum fits again - see [Power sensors more often](#power-sensors-more-often) |
 | An entity you send was renamed | Follows it and keeps its readings arriving in its history; renames the series in Tag Historian if you switched that on, or asks you on a card - see [When you rename an entity](#when-you-rename-an-entity) |
@@ -603,9 +605,10 @@ things happen before the buffer is let go of:
 - and anything that will not go is **saved** to Home Assistant's `.storage`
   (`tag_historian.<entry>.forwarder`), with how far Tag Historian had
   acknowledged each entity, and sent when the integration starts again. The
-  file is bounded like the buffer — at most ten thousand readings, a few
-  megabytes — and is written when the integration stops and when writes start
-  or stop failing, not on every reading, so it does not wear an SD card.
+  file is bounded like the buffer — at most ten thousand readings and one
+  request, a few megabytes — and is written when the integration stops, when
+  writes start or stop failing, when something was lost, and otherwise at most
+  every five minutes, not on every reading, so it does not wear an SD card.
 
 Both of those apply to both ways out, and that is worth stating because the two
 are not the same underneath. Home Assistant cancels an integration's background
@@ -615,13 +618,20 @@ not in response to it. An integration that only handled the reload would give
 you the full five seconds on the rarer event and nothing at all on the one that
 happens every time you restart.
 
-A request that does *not* finish in that window is abandoned rather than
-re-sent. The live write endpoint does not deduplicate, and it may already have
-taken the batch before the connection went, so re-sending it would risk
-doubling readings in your history instead of restoring them. Those readings are
-counted as `dropped_mid_write`, which means that counter can *overstate* the
-loss — some of them may have landed. That is the direction chosen on purpose:
-an overstated loss gets asked about, an understated one is invisible.
+A request that does *not* finish in that window, and any other whose answer
+never came — a timeout, a connection that broke off — may or may not have been
+stored, and the live write endpoint does not deduplicate. So its readings are
+kept, through a restart too, and before anything more is sent Tag Historian is
+asked how new its newest reading of each series is: what it has is not sent
+again, and what it does not have is. If it cannot say — a proxy that does not
+let the question through, for one — the readings are not sent again, and counted
+as `dropped_mid_write`. That counter can *overstate* the loss, because some of
+them may have landed. That is the direction chosen on purpose: an overstated
+loss gets asked about, an understated one is invisible.
+
+When Home Assistant is up before your connection is, the integration listens
+and holds its readings from the start, asks once a minute whether Tag Historian
+can be reached, and sends them once it can.
 
 The buffer is also bounded — during a long outage the oldest go first and
 `dropped_queue_overflow` moves. They are not gone: the recorder still has
@@ -629,7 +639,9 @@ them. For every entity the integration keeps the time of the last reading Tag
 Historian acknowledged, and after a gap — an outage that overflowed the buffer,
 a restart, a stretch with the integration disabled — it reads the recorder for
 what lies between that reading and the oldest one it still holds, and sends
-that first, oldest first. That is your live data arriving late, so it counts
+that first, oldest first. After a restart it also reads what came after the
+readings it had saved, before it sends any new one. That is your live data
+arriving late, so it counts
 against your daily reading allowance like any other reading; a long gap can
 take more than a day's allowance, and then it waits for the allowance like any
 reading does.
@@ -645,15 +657,14 @@ allowance resets. (One exception: an entity that is still catching up on an
 earlier outage when the allowance runs out has its readings read back as
 usual, so none of that outage is lost.)
 
-It does not re-send a reading Tag Historian may already have. A request that
-was abandoned mid-write counts as delivered, never as a gap, and if Home
-Assistant did not shut down cleanly — a crash, a power cut — while writes were
-going through, nothing is read back: the last moment before it may be missing,
-and nothing is doubled. (The recorder loses its own last few seconds to a power
-cut too.) If writes were failing when it went down, or it had not yet had an
-answer since it started, nothing had been acknowledged since, and the whole
-outage is read back — with the one exception of a retry Tag Historian took in
-the very moment of the crash, which then arrives twice.
+It does not re-send a reading Tag Historian may already have. If Home Assistant
+did not shut down cleanly — a crash, a power cut — Tag Historian is asked what
+it has in the same way, and everything newer is read back from the recorder.
+(The recorder loses its own last few seconds to a power cut, and the readings
+of an entity you have excluded from it cannot be read back.) If Tag Historian
+cannot say, what may have been sent since the last save — at most about six
+minutes before the crash, and what it was still catching up on — is counted as
+`dropped_mid_write`, and the rest is read back.
 
 ## Development
 

@@ -33,8 +33,12 @@ from typing import Any
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.const import ATTR_ENTITY_ID, Platform
-from homeassistant.core import HomeAssistant, ServiceCall
-from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.core import HomeAssistant, ServiceCall, callback
+from homeassistant.exceptions import (
+    ConfigEntryNotReady,
+    HomeAssistantError,
+    ServiceValidationError,
+)
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
@@ -124,7 +128,8 @@ def async_get_stats(hass: HomeAssistant, entry_id: str) -> ForwarderStats:
     repair flow triggers one. Counters kept on the forwarder went back to zero
     there, so "readings dropped" silently reset at the exact moment somebody
     was fixing the thing that had been dropping them. These live beside the
-    entry instead, and only a Home Assistant restart clears them.
+    entry instead; what was dropped is saved with the buffer too, and survives
+    a Home Assistant restart.
     """
     return hass.data.setdefault(DOMAIN, {}).setdefault(entry_id, ForwarderStats())
 
@@ -136,7 +141,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     when they are needed. The action exists - and can say what is wrong -
     while no entry is loaded. And a rename can happen at any time: each
     handled rename changes the options and so reloads the entry, and an entry
-    waits out a dead API in setup-retry; a listener that came and went with
+    waits for a new key when its own is refused; a listener that came and went with
     the entry missed every rename made in those windows - the second entity of
     a device being renamed, typically - and that entity's readings stopped
     without a word (renames.py).
@@ -275,11 +280,6 @@ async def async_setup_entry(
     )
 
     coordinator = QuotaCoordinator(hass, entry, client)
-    # Raises ConfigEntryNotReady on a dead API (Home Assistant then retries
-    # with backoff) and ConfigEntryAuthFailed on a revoked key (Home Assistant
-    # then shows its reauth card). Both are better than a loaded entry that
-    # silently forwards nothing.
-    await coordinator.async_config_entry_first_refresh()
 
     # ONE reading of the options, for the forwarder and the importer both. A
     # rename landing during the awaits below replaces entry.options and queues
@@ -299,6 +299,55 @@ async def async_setup_entry(
         store=_store(hass, STORAGE_KEY_FORWARDER, entry),
         send_as=renamed,
     )
+    # What the last run saved - its undelivered readings and how far Tag
+    # Historian had acknowledged each entity - goes back in before anything
+    # new arrives: under each entity's id as it is now, for one renamed since,
+    # and bound for the tag it sends to now. And it listens before Tag
+    # Historian is asked anything, so a slow or dead connection costs nothing.
+    await forwarder.async_restore()
+    forwarder.async_listen()
+    try:
+        return await _async_set_up_the_rest(
+            hass, entry, client, coordinator, forwarder, options, selected, renamed, min_interval
+        )
+    except BaseException:
+        # Nobody will unload an entry that did not set up.
+        await forwarder.async_put_back()
+        raise
+
+
+async def _async_set_up_the_rest(
+    hass: HomeAssistant,
+    entry: TagHistorianConfigEntry,
+    client: TagHistorianClient,
+    coordinator: QuotaCoordinator,
+    forwarder: StateForwarder,
+    options: Mapping[str, Any],
+    selected: list[str],
+    renamed: dict[str, str],
+    min_interval: int,
+) -> bool:
+    """Everything that comes after the forwarder has begun to listen."""
+    reached = True
+    try:
+        # Raises ConfigEntryAuthFailed on a revoked key: Home Assistant then
+        # shows its reauth card, and nothing can be sent until it is answered.
+        await coordinator.async_config_entry_first_refresh()
+    except ConfigEntryNotReady as err:
+        cause = getattr(coordinator.last_exception, "__cause__", None)
+        if not isinstance(cause, TagHistorianConnectionError):
+            raise
+        # Not reachable yet - a power cut, a router slower than this machine.
+        # Waiting out a setup retry, as this did, is a stretch nobody listens
+        # through; the entry is loaded instead and buffers, and what needs an
+        # answer is done at the first one (_when_reached).
+        reached = False
+        forwarder.stats.last_error = str(cause)
+        LOGGER.warning(
+            "Tag Historian cannot be reached yet (%s); readings are held and sent once it can",
+            err.__cause__ or cause,
+        )
+
     # Power sensors more often, when asked for and only while the sum fits the
     # plan's daily readings allowance (fast_power.py): the guard sets the
     # forwarder's power interval now, before the catch-up is read back, and
@@ -309,18 +358,14 @@ async def async_setup_entry(
         entry.async_on_unload(guard.async_start())
     else:
         async_clear_fast_power_issue(hass, entry)
-    # What the last run saved - its undelivered readings and how far Tag
-    # Historian had acknowledged each entity - goes back in before anything
-    # new arrives: under each entity's id as it is now, for one renamed since,
-    # and bound for the tag it sends to now.
-    await forwarder.async_restore()
-    forwarder.async_start()
+    if reached:
+        forwarder.async_start()
     # NOT entry.async_on_unload(forwarder.async_shutdown). See
     # async_unload_entry below: the on-unload callbacks run AFTER Home
     # Assistant has begun cancelling the entry's background tasks, and one of
     # those tasks is the flush that may have a batch on the wire. The stop
     # path has the same hazard one layer up and its own answer - a shutdown
-    # job, registered in StateForwarder.async_start.
+    # job, registered in StateForwarder.async_listen.
 
     # The importer asks the forwarder where each entity's live part begins, so
     # it never imports a reading the forwarder is still going to deliver, and
@@ -342,9 +387,40 @@ async def async_setup_entry(
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
+    # Where the last import got to. It carries on below.
+    await importer.async_read()
+    if reached:
+        await _async_when_reached(hass, entry, options)
+        return True
+
+    started = False
+
+    @callback
+    def _quota_answered() -> None:
+        nonlocal started
+        if started or not coordinator.last_update_success:
+            return
+        started = True
+        # First, so that the power sensors' interval is known when it reads
+        # the gap back: the guard above listened before this did.
+        forwarder.async_start()
+        entry.async_create_background_task(
+            hass, _async_when_reached(hass, entry, options), f"{DOMAIN} reached"
+        )
+
+    entry.async_on_unload(coordinator.async_add_listener(_quota_answered))
+    return True
+
+
+async def _async_when_reached(
+    hass: HomeAssistant, entry: TagHistorianConfigEntry, options: Mapping[str, Any]
+) -> None:
+    """What only makes sense once Tag Historian has answered: at setup, or at the first answer after it."""
+    client = entry.runtime_data.client
+
     # An import that was running when Home Assistant stopped, or when this
     # entry was reloaded - by a rename, too - carries on.
-    await importer.async_load()
+    await entry.runtime_data.importer.async_carry_on()
 
     # Every rename waiting to be settled - just made, which is what this
     # reload is for; made while the entry was not loaded; or left from before
@@ -369,8 +445,6 @@ async def async_setup_entry(
     )
 
     _async_bring_years(hass, entry, options)
-
-    return True
 
 
 def _async_bring_years(

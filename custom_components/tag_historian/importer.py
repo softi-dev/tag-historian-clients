@@ -353,10 +353,20 @@ class HistoryImporter:
 
     async def async_load(self) -> None:
         """Read where the last import got to, and carry on if it was not done."""
+        await self.async_read()
+        await self.async_carry_on()
+
+    async def async_read(self) -> None:
+        """Read where the last import got to."""
         saved = await self._store.async_load()
         if saved:
             self.progress = ImportProgress.from_saved(saved)
             self._follow_renames()
+
+    async def async_carry_on(self) -> None:
+        """Carry on the import if it was not done. Once Tag Historian has answered."""
+        if self.running:
+            return
         progress = self.progress
         if (
             progress.status == STATUS_STOPPED

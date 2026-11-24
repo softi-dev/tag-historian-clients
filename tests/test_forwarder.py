@@ -466,6 +466,11 @@ async def test_a_gateway_answering_in_tag_historians_place_holds_the_batch(
 
     aioclient_mock.clear_requests()
     aioclient_mock.post(WRITE_URL, status=204)
+    # It may have reached the API behind the gateway, so that is asked first.
+    aioclient_mock.get(
+        "https://api.taghistorian.com/api/tags?take=1000&skip=0",
+        json={"totalCount": 0, "tags": []},
+    )
     await _tick(hass, CONNECTION_RETRY_SECONDS + 1)
 
     assert forwarder.stats.sent == 1

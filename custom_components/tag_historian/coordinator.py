@@ -22,7 +22,12 @@ from .api import (
     TagHistorianClient,
     TagHistorianError,
 )
-from .const import DOMAIN, LOGGER, QUOTA_UPDATE_INTERVAL_MINUTES
+from .const import (
+    DOMAIN,
+    LOGGER,
+    QUOTA_FIRST_ANSWER_SECONDS,
+    QUOTA_UPDATE_INTERVAL_MINUTES,
+)
 
 
 class QuotaCoordinator(DataUpdateCoordinator[QuotaSnapshot]):
@@ -45,7 +50,9 @@ class QuotaCoordinator(DataUpdateCoordinator[QuotaSnapshot]):
             LOGGER,
             name=DOMAIN,
             config_entry=entry,
-            update_interval=timedelta(minutes=QUOTA_UPDATE_INTERVAL_MINUTES),
+            # Until the first answer more often than that: the forwarder
+            # starts sending with it (__init__.py).
+            update_interval=timedelta(seconds=QUOTA_FIRST_ANSWER_SECONDS),
             # The snapshot is a frozen dataclass, so equality is by value:
             # an unchanged quota does not wake every listener.
             always_update=False,
@@ -54,7 +61,7 @@ class QuotaCoordinator(DataUpdateCoordinator[QuotaSnapshot]):
 
     async def _async_update_data(self) -> QuotaSnapshot:
         try:
-            return await self._client.async_get_quota()
+            quota = await self._client.async_get_quota()
         except TagHistorianAuthError as err:
             # Stops the poll and hands the entry to Home Assistant's own reauth
             # flow, which is the only screen that can actually take a new key.
@@ -63,3 +70,5 @@ class QuotaCoordinator(DataUpdateCoordinator[QuotaSnapshot]):
             ) from err
         except TagHistorianError as err:
             raise UpdateFailed(f"Could not read quota: {err}") from err
+        self.update_interval = timedelta(minutes=QUOTA_UPDATE_INTERVAL_MINUTES)
+        return quota

@@ -110,6 +110,19 @@ BACKFILL_BATCH_SIZE: Final = 1000
 # be a fortnight of State objects in memory at once.
 RECORDER_WINDOW_HOURS: Final = 24
 
+# How long the first catch-up after a start waits for the recorder to write
+# what it has been handed (history.async_written). It writes nothing until
+# Home Assistant has started; live readings wait in the buffer meanwhile.
+RECORDER_WAIT_SECONDS: Final = 60
+
+# How often, at most, the forwarder saves how far Tag Historian has
+# acknowledged each entity while writes go through - seldom, for the SD card.
+# It bounds the stretch that is in doubt after a crash when Tag Historian
+# cannot say what it has (forwarder.py) - and sooner when something was lost,
+# so that the count of it survives a restart.
+WATERMARK_SAVE_SECONDS: Final = 300
+LOSS_SAVE_SECONDS: Final = 30
+
 # Readings per history-import request. Below the endpoint's own per-batch
 # ceiling (ImportService.MaxReadingsPerBatch, 5 000) so one request stays well
 # inside IMPORT_TIMEOUT_SECONDS: the endpoint checks every reading against the
@@ -220,6 +233,10 @@ FAST_POWER_INTERVAL_SECONDS: Final = 2
 # Quota is a billing surface, not a live metric. Fifteen minutes is often
 # enough to catch "you are at your limit" long before the user goes looking.
 QUOTA_UPDATE_INTERVAL_MINUTES: Final = 15
+
+# Until the first answer after a start, the quota is asked for this often: the
+# forwarder buffers meanwhile, and starts sending with it.
+QUOTA_FIRST_ANSWER_SECONDS: Final = 60
 
 HTTP_TIMEOUT_SECONDS: Final = 10
 

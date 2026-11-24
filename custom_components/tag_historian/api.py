@@ -40,6 +40,25 @@ class TagHistorianConnectionError(TagHistorianError):
     """The host did not answer, or answered with something unusable."""
 
 
+class TagHistorianUnansweredError(TagHistorianConnectionError):
+    """A write left and its answer did not come: it may have been stored, or not.
+
+    A timeout, a connection that broke off, a gateway's 502 or 504. Told apart
+    from a connection that was never made, where nothing left: the live
+    endpoint does not deduplicate, so a batch in this state is sent again only
+    once Tag Historian has said how far it got
+    (:meth:`TagHistorianClient.async_get_newest_readings`).
+    """
+
+
+class TagHistorianAnsweredError(TagHistorianConnectionError):
+    """A question was answered, with a status that is not going to pass by waiting.
+
+    Anything from 400 up but a 401, a 403, a 429 and a 502, 503 or 504, which
+    each have a meaning of their own.
+    """
+
+
 class TagHistorianServerError(TagHistorianConnectionError):
     """Tag Historian answered, with an error of its own (a 500) that it did not explain.
 
@@ -142,10 +161,13 @@ class WriteOutcome(Enum):
     BACK_PRESSURE = "back_pressure"  # 429 (controller) - our saturation
     UNAVAILABLE = "unavailable"  # 503 - wait for Retry-After
     FORBIDDEN = "forbidden"  # 403/402 - permanent until a human acts
-    # 400/413, and an unexplained answer of Tag Historian's own (a 500): the
-    # batch is not sent again. A gateway's 502/504 is not this - it raises
-    # TagHistorianConnectionError and the batch is held.
+    # 400/413: a body it cannot take. The batch is not sent again.
     REJECTED = "rejected"
+    # Any other answer, a 500 above all: held, and sent again in smaller and
+    # smaller batches until what causes it is one reading
+    # (StateForwarder._handle_server_error). A gateway's 502/504 is not this -
+    # it raises TagHistorianUnansweredError.
+    SERVER_ERROR = "server_error"
 
 
 @dataclass
@@ -175,6 +197,7 @@ class WriteResult:
             WriteOutcome.DAILY_QUOTA,
             WriteOutcome.BACK_PRESSURE,
             WriteOutcome.UNAVAILABLE,
+            WriteOutcome.SERVER_ERROR,
         )
 
 
@@ -457,7 +480,8 @@ class TagHistorianClient:
                 if response.status == 503:
                     raise await self._unavailable(path, response)
                 if response.status >= 400:
-                    raise TagHistorianConnectionError(
+                    passing = response.status in (429, 502, 504)
+                    raise (TagHistorianConnectionError if passing else TagHistorianAnsweredError)(
                         f"{path} answered {response.status}"
                     )
                 return await response.json()
@@ -530,6 +554,33 @@ class TagHistorianClient:
                 if isinstance(former, str) and former:
                     index.setdefault(former, name)
         return index
+
+    async def async_get_newest_readings(self) -> dict[str, float | None]:
+        """Per name, how new the newest reading Tag Historian has in it is, in epoch seconds.
+
+        From the tag list, for every tag that has a reading and each of its
+        former names. Tag Historian moves it once a batch is safely taken,
+        readings it then compressed away included, so it says whether a batch
+        whose answer never came was stored. To the second, because that is how
+        readings are sent. A name that is not there has no reading; None is
+        one that has some, with no time that can be read.
+        """
+        newest: dict[str, float | None] = {}
+        taken = 0
+        while True:
+            payload = await self._get_json("/api/tags", take=1000, skip=taken)
+            tags = payload["tags"]
+            for tag in tags:
+                if not tag.get("tagName") or tag.get("totalMeasurements") == 0:
+                    continue
+                at = _parse_time(tag.get("lastTimestamp"))
+                stamp = None if at is None else at.timestamp()
+                newest[str(tag["tagName"])] = stamp
+                for former in tag.get("formerNames") or []:
+                    newest.setdefault(str(former), stamp)
+            taken += len(tags)
+            if not tags or taken >= int(payload.get("totalCount", 0)):
+                return newest
 
     async def async_rename_tag(self, old: str, new: str) -> LineageResult:
         """Give the tag ``old`` the name ``new``, keeping all of its history.
@@ -783,8 +834,11 @@ class TagHistorianClient:
                 timeout=aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SECONDS),
             ) as response:
                 return await self._classify(response)
-        except (TimeoutError, aiohttp.ClientError) as err:
+        except (aiohttp.ClientConnectorError, aiohttp.ConnectionTimeoutError) as err:
+            # No connection was made, so nothing left.
             raise TagHistorianConnectionError(_no_answer(err, HTTP_TIMEOUT_SECONDS)) from err
+        except (TimeoutError, aiohttp.ClientError) as err:
+            raise TagHistorianUnansweredError(_no_answer(err, HTTP_TIMEOUT_SECONDS)) from err
 
     async def _classify(self, response: aiohttp.ClientResponse) -> WriteResult:
         if response.status == 204:
@@ -799,10 +853,9 @@ class TagHistorianClient:
             # nothing behind it for a moment, or a proxy in front of a stopped
             # API. Tag Historian itself did not answer, so this is a host that
             # cannot be reached: held and tried again like a socket error,
-            # never dropped as a body it could not take. A 504 may have reached
-            # the API, as a write that timed out here may have, and that one
-            # is tried again too.
-            raise TagHistorianConnectionError(f"write answered {response.status}")
+            # never dropped as a body it could not take. It may have reached
+            # the API all the same, as a write that timed out here may have.
+            raise TagHistorianUnansweredError(f"write answered {response.status}")
 
         body = await self._read_error_body(response)
         message = str(body.get("message") or body.get("error") or "")
@@ -839,16 +892,19 @@ class TagHistorianClient:
             # that person to read.
             return WriteResult(WriteOutcome.FORBIDDEN, message=message)
 
-        # 400 and 413 mean this integration built a body the endpoint cannot
-        # take. That is a bug here, not a user problem, so it is logged loudly
-        # and the batch is dropped rather than retried into a loop. A 500 -
-        # Tag Historian's own error, unexplained - stays here too: the batch
-        # goes back to the FRONT of the queue when it is held, so a body that
-        # causes one every time would stop every reading behind it for good.
-        # (502 and 504 are a gateway's, raised as unreachable above.)
         LOGGER.error(
             "Tag Historian refused a write with %s: %s", response.status, message
         )
+        if response.status not in (400, 413):
+            # A 500, Tag Historian's own error, unexplained; or an answer that
+            # is not one of Tag Historian's at all.
+            return WriteResult(
+                WriteOutcome.SERVER_ERROR, message=message or f"write answered {response.status}"
+            )
+
+        # 400 and 413 mean this integration built a body the endpoint cannot
+        # take. That is a bug here, not a user problem, so it is logged loudly
+        # and the batch is dropped rather than retried into a loop.
         return WriteResult(WriteOutcome.REJECTED, message=message)
 
     @classmethod

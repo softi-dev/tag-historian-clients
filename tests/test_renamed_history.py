@@ -601,7 +601,9 @@ async def test_the_import_of_a_renamed_entity_stops_where_its_held_readings_begi
 
     await rename(hass, old, NEW)
     freezer.tick(timedelta(minutes=1))
-    assert entry.runtime_data.forwarder.history_boundary(NEW) == held[0]
+    assert entry.runtime_data.forwarder.history_boundary(NEW) == T0.timestamp() < held[0], (
+        "from where the entity was first listened to, under its old id"
+    )
 
     imported: list[dict[str, Any]] = []
 
@@ -773,12 +775,11 @@ async def test_both_meters_held_readings_go_to_their_own_meters_tags(
     freezer.tick(timedelta(seconds=20))
     await reading(hass, recorder, NEW, "100")  # the old meter's last
     freezer.tick(timedelta(seconds=20))
-    new_meters = dt_util.utcnow().timestamp()
     await reading(hass, recorder, OLD, "1")
 
     await _replace_the_meter(hass, recorder)
     assert entry.options[CONF_ENTITIES] == [NEW]
-    assert entry.runtime_data.forwarder.history_boundary(NEW) == new_meters
+    assert entry.runtime_data.forwarder.history_boundary(NEW) == T0.timestamp()
 
     writes.up = True
     for _ in range(3):

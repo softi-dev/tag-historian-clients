@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import gzip
 import json
+from datetime import UTC, datetime
+from unittest.mock import MagicMock
 
 import aiohttp
 import pytest
@@ -13,11 +15,13 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from custom_components.tag_historian.api import (
     ImportOutcome,
     LineageOutcome,
+    TagHistorianAnsweredError,
     TagHistorianAuthError,
     TagHistorianClient,
     TagHistorianConnectionError,
     TagHistorianImportRefused,
     TagHistorianServerError,
+    TagHistorianUnansweredError,
     TagHistorianUnavailableError,
     WriteOutcome,
     _classify_429,
@@ -31,6 +35,7 @@ from custom_components.tag_historian.const import (
 )
 
 WRITE_URL = "https://api.taghistorian.com/api/v2/write?precision=s"
+TAGS_URL = "https://api.taghistorian.com/api/tags"
 BODY = "°C,domain=sensor,entity_id=outdoor_temperature value=21.5 1786528800"
 
 
@@ -455,7 +460,72 @@ async def test_a_gateway_that_lost_the_api_is_unreachable_for_a_write_too(
     assert str(raised.value) == f"write answered {status}"
 
 
-@pytest.mark.parametrize("status", [400, 413, 500])
+@pytest.mark.parametrize("status", [500, 404, 200])
+async def test_an_answer_that_says_nothing_about_the_body_does_not_drop_it(
+    client, aioclient_mock, status
+) -> None:
+    aioclient_mock.post(WRITE_URL, status=status, text="<html>?</html>")
+
+    result = await client.async_write(BODY)
+
+    assert result.outcome is WriteOutcome.SERVER_ERROR
+    assert result.message == f"write answered {status}"
+    assert result.retryable
+
+
+@pytest.mark.parametrize(
+    ("raised", "unanswered"),
+    [
+        (TimeoutError(), True),
+        (aiohttp.ServerDisconnectedError(), True),
+        (aiohttp.ConnectionTimeoutError("connecting"), False),
+        (aiohttp.ClientConnectorError(MagicMock(), OSError("refused")), False),
+    ],
+)
+async def test_a_write_that_may_have_landed_is_told_apart_from_one_that_never_left(
+    client, aioclient_mock, raised, unanswered
+) -> None:
+    aioclient_mock.post(WRITE_URL, exc=raised)
+
+    with pytest.raises(TagHistorianConnectionError) as caught:
+        await client.async_write(BODY)
+
+    assert isinstance(caught.value, TagHistorianUnansweredError) is unanswered
+
+
+async def test_the_newest_reading_per_tag_over_every_page(client, aioclient_mock) -> None:
+    tags = [
+        {"tagName": "sensor.a", "lastTimestamp": "2026-10-17T08:00:05Z", "totalMeasurements": 3,
+         "formerNames": ["sensor.was_a"]},
+        {"tagName": "sensor.empty", "lastTimestamp": "2026-10-17T08:00:00Z", "totalMeasurements": 0},
+    ]
+    aioclient_mock.get(f"{TAGS_URL}?take=1000&skip=0", json={"totalCount": 3, "tags": tags})
+    aioclient_mock.get(
+        f"{TAGS_URL}?take=1000&skip=2",
+        json={"totalCount": 3, "tags": [{"tagName": "sensor.b", "lastTimestamp": "?"}]},
+    )
+
+    at = datetime(2026, 10, 17, 8, 0, 5, tzinfo=UTC).timestamp()
+    assert await client.async_get_newest_readings() == {
+        "sensor.a": at,
+        "sensor.was_a": at,
+        "sensor.b": None,
+    }
+
+
+@pytest.mark.parametrize(("status", "answered"), [(404, True), (500, True), (502, False), (429, False)])
+async def test_a_question_answered_for_good_is_told_apart_from_one_to_ask_again(
+    client, aioclient_mock, status, answered
+) -> None:
+    aioclient_mock.get(f"{TAGS_URL}?take=1000&skip=0", status=status)
+
+    with pytest.raises(TagHistorianConnectionError) as caught:
+        await client.async_get_newest_readings()
+
+    assert isinstance(caught.value, TagHistorianAnsweredError) is answered
+
+
+@pytest.mark.parametrize("status", [400, 413])
 async def test_a_body_tag_historian_cannot_take_is_still_dropped(
     client, aioclient_mock, status
 ) -> None:
