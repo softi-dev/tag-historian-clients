@@ -19,6 +19,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .api import (
     QuotaSnapshot,
+    TagHistorianAnsweredError,
     TagHistorianAuthError,
     TagHistorianClient,
     TagHistorianError,
@@ -72,7 +73,11 @@ class QuotaCoordinator(DataUpdateCoordinator[QuotaSnapshot]):
             raise ConfigEntryAuthFailed(
                 "Tag Historian rejected the API key"
             ) from err
-        except TagHistorianError as err:
+        except Exception as error:
+            err = error
+            if not isinstance(err, TagHistorianError):
+                # An answer, if not one that has the numbers in it.
+                err = TagHistorianAnsweredError(f"the answer is not a quota: {error!r}")
             if self.on_failure is not None:
                 self.on_failure(err)
             raise UpdateFailed(f"Could not read quota: {err}") from err

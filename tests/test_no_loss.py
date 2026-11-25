@@ -26,6 +26,7 @@ from pytest_homeassistant_custom_component.common import async_fire_time_changed
 from custom_components.tag_historian import forwarder as forwarder_module
 from custom_components.tag_historian.api import (
     TagHistorianAnsweredError,
+    TagHistorianBusyError,
     TagHistorianConnectionError,
     TagHistorianPermissionError,
     TagHistorianUnansweredError,
@@ -1358,6 +1359,291 @@ async def test_a_start_that_never_gets_the_quota(
         await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()
         assert card not in ir.async_get(hass).issues
+
+
+# --------------------------------------------------------------------------
+# Paces, sizes and answers that are not what was asked for
+# --------------------------------------------------------------------------
+
+
+async def _time_out(_body):
+    raise TagHistorianUnansweredError("no answer within 10 seconds")
+
+
+@pytest.mark.parametrize("part", [0.0, 0.5, 0.95])
+@pytest.mark.parametrize("stop_between", [False, True])
+async def test_killed_a_reading_at_the_minimum_interval_is_not_taken_to_be_too_soon(
+    hass: HomeAssistant, started, recorder, freezer, hass_storage, part, stop_between
+) -> None:
+    """What Tag Historian says it has is to the second; the interval runs from the reading."""
+    freezer.tick(timedelta(seconds=part))
+    server = Server()
+    forwarder = await started(server, min_interval=10)
+    for value in (1, 2, 3):
+        await put(hass, recorder, freezer, POWER, value, 10)
+        await later(hass)
+    kill(forwarder, hass_storage)
+    for value in range(4, 9):
+        missed(recorder, freezer, POWER, value, 10)
+    freezer.tick(timedelta(seconds=2))
+    if stop_between:
+
+        async def gone(_hass, _entity_id, _start, _end):
+            raise RuntimeError("database is locked")
+
+        with patch("custom_components.tag_historian.history.async_recorded_states", gone):
+            again = await started(server, min_interval=10)
+            await later(hass, 3)
+            await again.async_shutdown()
+    await started(server, min_interval=10)
+    await drain(hass, freezer)
+    server.everything_once(1, 8)
+
+
+@pytest.mark.parametrize("restored", [False, True])
+async def test_a_reading_that_always_gets_a_500_alone_where_it_came_from_holds_nothing_for_a_day(
+    hass: HomeAssistant, started, recorder, freezer, restored
+) -> None:
+    server = Server()
+    entities = [POWER, DOOR]
+    forwarder = await started(server, entities=entities)
+
+    async def poison(body):
+        return ERROR if "value=5.0" in body else None
+
+    server.before = poison
+    await put(hass, recorder, freezer, POWER, 4)
+    await put(hass, recorder, freezer, DOOR, "off", 1)
+    await later(hass)
+    if restored:
+        server.down = True
+        await put(hass, recorder, freezer, POWER, 5)
+        await forwarder.async_shutdown()
+        server.down = False
+    else:
+        await forwarder.async_shutdown()
+        missed(recorder, freezer, POWER, 5)
+    freezer.tick(timedelta(seconds=20))
+    again = await started(server, entities=entities)
+    for value in range(6, 12):
+        await put(hass, recorder, freezer, POWER, value)
+        await put(hass, recorder, freezer, DOOR, "off" if value % 2 else "on", 1)
+    await drain(hass, freezer, 60)
+    assert again.stats.dropped_quota == 0, "not for half an hour of it"
+    await drain(hass, freezer, 100)
+    assert server.values() == [4.0, *map(float, range(6, 12))]
+    assert len(server.values("back_door")) == 7
+    assert again.stats.dropped_quota == 1
+    assert again.stats.queued == 0
+
+
+async def test_a_lone_reading_with_nothing_behind_it_waits_the_errors_out(
+    hass: HomeAssistant, started, recorder, freezer
+) -> None:
+    server = Server()
+    forwarder = await started(server)
+    server.before = _error
+    await put(hass, recorder, freezer, POWER, 1)
+    await drain(hass, freezer, 300)
+    assert forwarder.stats.dropped_quota == 0
+    server.before = None
+    await drain(hass, freezer, 3)
+    server.everything_once(1, 1)
+
+
+@pytest.mark.parametrize("ever", [True, False])
+async def test_a_recorder_that_has_not_written_is_not_taken_to_be_read(
+    hass: HomeAssistant, started, recorder, freezer, monkeypatch, ever
+) -> None:
+    """Home Assistant takes its time to start, and the recorder commits nothing until it has."""
+    server = Server()
+    forwarder = await started(server)
+    await put(hass, recorder, freezer, POWER, 1)
+    await later(hass)
+    await forwarder.async_shutdown()
+    unwritten = dt_util.utcnow() + timedelta(seconds=20)
+    freezer.tick(timedelta(seconds=25))
+    written = False
+
+    async def async_written(_hass, _within):
+        if written:
+            recorder.record(POWER, "2", unwritten)
+        return written
+
+    monkeypatch.setattr("custom_components.tag_historian.history.async_written", async_written)
+    again = await started(server)
+    freezer.tick(timedelta(seconds=1))
+    hass.states.async_set(POWER, "3")
+    await drain(hass, freezer, 3)
+    written = ever
+    freezer.tick(timedelta(seconds=1))
+    hass.states.async_set(POWER, "4")
+    await drain(hass, freezer, 20)
+    assert server.values() == ([1.0, 2.0, 3.0, 4.0] if ever else [1.0, 3.0, 4.0])
+    assert again.stats.gaps_not_read == (0 if ever else 1)
+
+
+@pytest.mark.parametrize("wrong", [TypeError("int() of None"), TagHistorianBusyError("429"), DOWN])
+async def test_a_quota_that_cannot_be_read_holds_nothing(
+    hass: HomeAssistant, recorder, freezer, entry, monkeypatch, wrong
+) -> None:
+    without_statistics(monkeypatch)
+    hass.config_entries.async_update_entry(
+        entry,
+        options={CONF_ENTITIES: [POWER], CONF_MIN_INTERVAL: 0, "import_on_setup": False},
+    )
+    server = Server()
+    client = make_client()
+    client.async_write = server.async_write
+    client.async_get_newest_readings = server.async_get_newest_readings
+    client.async_get_quota.side_effect = DOWN
+    with patch("custom_components.tag_historian.TagHistorianClient", return_value=client):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await put(hass, recorder, freezer, POWER, 1)
+        await drain(hass, freezer, 5)
+        assert server.requests == 0
+        client.async_get_quota.side_effect = wrong
+        await drain(hass, freezer, 5)
+        assert server.values() == ([] if wrong is DOWN else [1.0])
+        await hass.config_entries.async_unload(entry.entry_id)
+        if wrong is not DOWN:
+            await hass.config_entries.async_setup(entry.entry_id)
+            assert entry.state is ConfigEntryState.LOADED
+            await put(hass, recorder, freezer, POWER, 2)
+            await drain(hass, freezer, 3)
+            server.everything_once(1, 2)
+            await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_a_batch_too_big_for_the_connection_is_made_smaller(
+    hass: HomeAssistant, started, recorder, freezer
+) -> None:
+    server = Server()
+    server.down = True
+    forwarder = await started(server)
+
+    async def slow(body):
+        if len(body.splitlines()) > 100:
+            raise TagHistorianUnansweredError("no answer within 10 seconds")
+
+    server.before = slow
+    for value in range(1, 1501):
+        freezer.tick(timedelta(seconds=2))
+        hass.states.async_set(POWER, str(value))
+    await spin()
+    server.down = False
+    await drain(hass, freezer, 250)
+    server.everything_once(1, 1500)
+    assert forwarder.stats.dropped_inflight == forwarder.stats.dropped_overflow == 0
+    assert len(forwarder._queue) == 0
+
+
+async def test_a_timeout_or_two_is_soon_forgotten(
+    hass: HomeAssistant, started, recorder, freezer
+) -> None:
+    server = Server()
+    forwarder = await started(server)
+    server.before = _time_out
+    await put(hass, recorder, freezer, POWER, 1)
+    await drain(hass, freezer, 20)
+    server.before = None
+    await drain(hass, freezer, 5)
+    for value in range(2, 20):
+        await put(hass, recorder, freezer, POWER, value)
+        await drain(hass, freezer, 1)
+    server.everything_once(1, 19)
+    assert forwarder._error_limit is None
+
+
+async def test_a_reading_let_go_of_by_the_next_one_is_counted_after_a_restart_too(
+    hass: HomeAssistant, started, recorder, freezer
+) -> None:
+    server = Server()
+    server.down = True
+    forwarder = await started(server)
+    for value in (1, 2, 3):
+        await put(hass, recorder, freezer, POWER, value)
+
+    async def poison(body):
+        if "value=1.0" in body:
+            return ERROR
+        server.stored.extend(body.splitlines())
+        server.cannot_tell = DOWN
+        raise TagHistorianUnansweredError("no answer within 10 seconds")
+
+    server.before = poison
+    server.down = False
+    await drain(hass, freezer, 60)
+    assert server.values() == [2.0]
+    await forwarder.async_shutdown()
+    server.before = server.cannot_tell = None
+    freezer.tick(timedelta(seconds=300))
+    again = await started(server)
+    await drain(hass, freezer, 10)
+    assert server.values() == [2.0, 3.0]
+    assert again.stats.dropped_quota == 1
+
+
+@pytest.mark.parametrize("outcome", [WriteOutcome.PARTIAL_TAG_QUOTA, WriteOutcome.FORBIDDEN])
+async def test_a_refusal_that_lasts_does_not_write_the_file_more_often_than_a_delivery(
+    hass: HomeAssistant, started, recorder, freezer, outcome
+) -> None:
+    server = Server()
+    forwarder = await started(server)
+
+    async def refuse(_body):
+        return WriteResult(outcome, message="no", dropped_points=1)
+
+    server.before = refuse
+    saves = 0
+    save = forwarder._store.async_save
+
+    async def counting(data):
+        nonlocal saves
+        saves += 1
+        await save(data)
+
+    forwarder._store.async_save = counting
+    for value in range(1, 117):  # an hour
+        await put(hass, recorder, freezer, POWER, value, 0)
+        await drain(hass, freezer, 1)
+    assert forwarder.stats.dropped_quota >= 110
+    assert saves <= 16
+
+
+async def test_an_entity_that_never_reports_is_not_read_again_from_the_first_day_at_every_start(
+    hass: HomeAssistant, started, recorder, freezer
+) -> None:
+    server = Server()
+    entities = [POWER, DOOR]
+    for _ in range(3):
+        forwarder = await started(server, entities=entities)
+        await drain(hass, freezer, 2)
+        await forwarder.async_shutdown()
+        freezer.tick(timedelta(days=30))
+    recorder.reads.clear()
+    recorder.record(DOOR, "on", dt_util.utcnow() - timedelta(days=1))
+    await started(server, entities=entities)
+    await drain(hass, freezer, 3)
+    assert len(recorder.reads) <= 2 * 32
+    assert server.values("back_door") == [1.0]
+
+
+async def test_killed_an_entity_first_delivered_in_the_second_it_was_last_read_up_to(
+    hass: HomeAssistant, started, recorder, freezer, hass_storage
+) -> None:
+    freezer.tick(timedelta(seconds=0.3))
+    server = Server()
+    forwarder = await started(server)
+    await spin()
+    await put(hass, recorder, freezer, POWER, 1, 0.2)
+    await later(hass)
+    kill(forwarder, hass_storage)
+    freezer.tick(timedelta(seconds=400))
+    await started(server)
+    await drain(hass, freezer, 5)
+    server.everything_once(1, 1)
 
 
 # --------------------------------------------------------------------------

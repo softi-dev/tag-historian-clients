@@ -5,7 +5,7 @@ from __future__ import annotations
 import gzip
 import json
 from datetime import UTC, datetime
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import aiohttp
 import pytest
@@ -17,6 +17,7 @@ from custom_components.tag_historian.api import (
     LineageOutcome,
     TagHistorianAnsweredError,
     TagHistorianAuthError,
+    TagHistorianBusyError,
     TagHistorianClient,
     TagHistorianConnectionError,
     TagHistorianImportRefused,
@@ -1104,3 +1105,38 @@ async def test_the_time_zone_is_proposed_as_home_assistants(client, aioclient_mo
     assert await client.async_propose_time_zone("Europe/Stockholm") is True
 
     assert aioclient_mock.mock_calls[0][2] == {"timeZone": "Europe/Stockholm", "source": "ha"}
+
+
+@pytest.mark.parametrize(
+    ("answer", "error"),
+    [
+        ({"status": 200, "text": "<html>Sign in</html>"}, TagHistorianAnsweredError),
+        ({"status": 500}, TagHistorianAnsweredError),
+        ({"status": 429}, TagHistorianBusyError),
+        ({"status": 502}, TagHistorianBusyError),
+        ({"status": 504}, TagHistorianBusyError),
+    ],
+)
+async def test_an_answer_to_a_question_is_told_apart_from_none(
+    client, aioclient_mock, answer, error
+) -> None:
+    """A page in place of JSON is an answer too, and is not waited out for ever as a dead host."""
+    aioclient_mock.get("https://api.taghistorian.com/api/tags", **answer)
+
+    with pytest.raises(error):
+        await client.async_get_newest_readings()
+
+
+async def test_a_page_where_json_was_asked_for_is_an_answer(client, aioclient_mock) -> None:
+    """What the real response raises for it, where the stand-in above has bad JSON."""
+    aioclient_mock.get("https://api.taghistorian.com/api/tags", text="<html></html>")
+    page = aiohttp.ContentTypeError(MagicMock(), (), message="text/html")
+
+    with (
+        patch(
+            "pytest_homeassistant_custom_component.test_util.aiohttp.AiohttpClientMockResponse.json",
+            side_effect=page,
+        ),
+        pytest.raises(TagHistorianAnsweredError),
+    ):
+        await client.async_get_newest_readings()

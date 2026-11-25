@@ -55,8 +55,13 @@ class TagHistorianAnsweredError(TagHistorianConnectionError):
     """A question was answered, with a status that is not going to pass by waiting.
 
     Anything from 400 up but a 401, a 403, a 429 and a 502, 503 or 504, which
-    each have a meaning of their own.
+    each have a meaning of their own - or a 200 that is not JSON, as from a
+    proxy or a portal that answers everything with a page.
     """
+
+
+class TagHistorianBusyError(TagHistorianConnectionError):
+    """A question was answered with a 429, a 502 or a 504: something is there, and it passes."""
 
 
 class TagHistorianServerError(TagHistorianConnectionError):
@@ -481,10 +486,15 @@ class TagHistorianClient:
                     raise await self._unavailable(path, response)
                 if response.status >= 400:
                     passing = response.status in (429, 502, 504)
-                    raise (TagHistorianConnectionError if passing else TagHistorianAnsweredError)(
+                    raise (TagHistorianBusyError if passing else TagHistorianAnsweredError)(
                         f"{path} answered {response.status}"
                     )
-                return await response.json()
+                try:
+                    return await response.json()
+                except (aiohttp.ContentTypeError, ValueError) as err:
+                    raise TagHistorianAnsweredError(
+                        f"{path} answered something that is not JSON"
+                    ) from err
         except (TimeoutError, aiohttp.ClientError) as err:
             raise TagHistorianConnectionError(_no_answer(err, self._answer_within)) from err
 

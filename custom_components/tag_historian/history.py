@@ -160,7 +160,9 @@ async def async_written(hass: HomeAssistant, within: float) -> bool:
     try:
         async with asyncio.timeout(within):
             await get_instance(hass).async_block_till_done()
-    except (KeyError, TimeoutError):
+    except KeyError:  # no recorder to wait for
+        return True
+    except TimeoutError:
         return False
     return True
 

@@ -75,6 +75,7 @@ is provable rather than asserted.
 from __future__ import annotations
 
 import asyncio
+import math
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -149,7 +150,7 @@ def _answered_wait(retry_after: int) -> float:
 
 
 # How many times in a row Tag Historian may answer the question of what it has
-# with a list that cannot be used - one that cannot be read, or that gives no
+# with a list that cannot be used - one that is not the list, or that gives no
 # usable time for what is asked about - before it is taken to be unable to say.
 # An error is not that: it is waited out for as long as the write path waits
 # (SERVER_ERROR_GIVE_UP_SECONDS), and a 403 for this long. A host that cannot
@@ -182,6 +183,11 @@ RECORDER_RETRY_SECONDS = 30
 # own entity has readings waiting, the next of those can be tried once, and is
 # after this many errors times as many.
 SERVER_ERROR_TRIES = 3
+
+# And where there is none to try either, and other readings wait behind it: how
+# many errors, with the question of what Tag Historian has answered before each.
+# An hour of them, at CONNECTION_RETRY_SECONDS.
+SERVER_ERROR_LONE_TRIES = 120
 
 # How long nothing but errors - of every batch, whatever is in it - is waited
 # out before the batch is let go of, counted. A Tag Historian that is broken
@@ -236,6 +242,9 @@ MAX_UNSTORABLE_NAMES = 10
 # before it goes quiet is worth a trailing send (StateForwarder._hold_trailing).
 METER_STATE_CLASSES = frozenset({"total", "total_increasing"})
 
+# The last microsecond of one.
+END_OF_SECOND = 1 - 1e-6
+
 
 def _is_meter(state: State) -> bool:
     """Whether Home Assistant says this entity is a meter (its state_class)."""
@@ -251,6 +260,17 @@ def _floats(saved: Any) -> dict[str, float]:
         for key, value in saved.items()
         if isinstance(value, int | float) and not isinstance(value, bool)
     }
+
+
+def _throttle_from(stamp: float) -> float:
+    """What the minimum interval runs from, after a watermark.
+
+    One taken from Tag Historian's own newest reading is the end of the second
+    it was sent in (:meth:`StateForwarder._async_settle_doubt`), and the
+    reading was made somewhere in it.
+    """
+    second = math.floor(stamp)
+    return second if stamp - second > END_OF_SECOND - 1e-6 else stamp
 
 
 class Queued(NamedTuple):
@@ -680,6 +700,11 @@ class StateForwarder:
             except (TypeError, ValueError, IndexError, KeyError):
                 continue
             self._doubt[renamed.get(str(entity_id), str(entity_id))] = (stamp, sent_as, count)
+        suspect = saved.get("suspect")
+        if isinstance(suspect, list) and len(suspect) == 2:
+            # What the answer to the question makes of it is all that is left of it.
+            entity_id, stamp = str(suspect[0]), _floats({"": suspect[1]}).get("", now)
+            self._suspect = Queued(renamed.get(entity_id, entity_id), stamp, "")
         saved_at = dt_util.parse_datetime(str(saved.get("saved_at") or ""))
         since_save = now - saved_at.timestamp() if saved_at is not None else 0.0
         if saved and (not clean or saved.get("doubt_all")):
@@ -710,7 +735,9 @@ class StateForwarder:
             self._unanswered_until = min(now, saved_at.timestamp()) + UNANSWERED_SETTLE_SECONDS
 
         for entity_id, stamp in self._acked.items():
-            self._last_sent.setdefault(entity_id, datetime.fromtimestamp(stamp, UTC))
+            self._last_sent.setdefault(
+                entity_id, datetime.fromtimestamp(_throttle_from(stamp), UTC)
+            )
 
         await self._async_save(clean=False)
 
@@ -1072,6 +1099,7 @@ class StateForwarder:
             "doubt_all": doubt_all or self._doubt_all or bool(self._doubtful_until),
             "doubt_until": dt_util.utcnow().timestamp() if doubt_all else self._doubt_until,
             "doubt_old": self._doubt_old,
+            "suspect": list(self._suspect[:2]) if self._suspect is not None else None,
             "since": {e: s for e, s in self._since.items() if e not in self._acked},
             "save_every": WATERMARK_SAVE_SECONDS,
             "counters": {name: getattr(self.stats, name) for name in SAVED_COUNTERS},
@@ -1550,11 +1578,11 @@ class StateForwarder:
             for attempt in range(RECORDER_TRIES):
                 if attempt:
                     await self._async_recorder_pause()
-                todo = await self._async_backfill_pass(todo, first=not attempt)
+                todo = await self._async_backfill_pass(todo, attempt)
                 if not todo or self._closed:
                     break
             for entity_id in [] if self._closed else todo:
-                self._give_up_gap(entity_id)
+                self._give_up_gap(entity_id, counted=not self._recorder_written)
         finally:
             self._unread.clear()
             self._backfill_running = False
@@ -1563,7 +1591,7 @@ class StateForwarder:
         if self._backfill_wanted and not self._closed:
             self._request_backfill()
 
-    async def _async_backfill_pass(self, entity_ids: list[str], *, first: bool) -> list[str]:
+    async def _async_backfill_pass(self, entity_ids: list[str], attempt: int) -> list[str]:
         """Read each entity's gap. The ones the recorder could not be read for."""
         if not self._recorder_written:
             try:
@@ -1572,6 +1600,16 @@ class StateForwarder:
                 )
             except Exception:  # the recorder failing must not stop the live path
                 LOGGER.exception("Tag Historian could not wait for the recorder")
+            if self._closed:
+                return entity_ids
+            if not self._recorder_written:
+                # Not all of any gap is there to be read yet. At the last try
+                # what is there is read, and the rest is counted.
+                if attempt < RECORDER_TRIES - 1:
+                    return entity_ids
+                self.stats.gaps_not_read += len(entity_ids)
+                self.stats.last_error = "the recorder has not written what it was handed"
+                self._save_within(LOSS_SAVE_SECONDS)
         began = dt_util.utcnow().timestamp()
         failed: list[str] = []
         for entity_id in entity_ids:
@@ -1580,7 +1618,7 @@ class StateForwarder:
             try:
                 await self._async_backfill_gap(entity_id, began)
             except Exception as err:  # nor one entity's the next one's
-                if first and not failed:
+                if not attempt and not failed:
                     LOGGER.exception("Tag Historian could not read the recorder to fill a gap")
                 self.stats.last_error = f"the recorder could not be read: {err}"
                 failed.append(entity_id)
@@ -1605,9 +1643,9 @@ class StateForwarder:
         )
         await waited.wait()
 
-    def _give_up_gap(self, entity_id: str) -> None:
+    def _give_up_gap(self, entity_id: str, *, counted: bool) -> None:
         """The recorder cannot be read for it: nothing waits any longer, and it is counted."""
-        self.stats.gaps_not_read += 1
+        self.stats.gaps_not_read += not counted
         self.stats.last_error = f"the recorder could not be read for {entity_id}"
         LOGGER.warning(
             "Tag Historian could not read the recorder for %s in %s attempts; readings it "
@@ -1649,9 +1687,15 @@ class StateForwarder:
         held = self._oldest_held(entity_id)
         end = held if held is not None else began
         if end > start:
-            await self._async_backfill_entity(
+            found = await self._async_backfill_entity(
                 entity_id, start, end, held is not None, throttle_from=acked
             )
+            if not (found or self._closed) and acked is None and held is None:
+                # An entity that has never reported: not all of it again at
+                # every start, for as long as it never does. A whole second, as
+                # what Tag Historian says it has is, and before the end: a
+                # reading made at it is yet to come.
+                self._since[entity_id] = max(start, math.ceil(end) - 1)
         self._end_doubtful(entity_id)
 
     async def _async_count_same_second(self, entity_id: str) -> None:
@@ -1687,14 +1731,15 @@ class StateForwarder:
         end: float,
         end_is_held: bool,
         throttle_from: float | None,
-    ) -> None:
+    ) -> int:
+        """Queue what the recorder has in the gap. How many readings that is."""
         window = timedelta(hours=RECORDER_WINDOW_HOURS)
         cursor = datetime.fromtimestamp(start, UTC)
         stop = datetime.fromtimestamp(end, UTC)
         # The minimum interval runs from the acknowledged reading. An entity
         # with none had nothing before its first live reading to be throttled
         # against, and neither has its first recorded one here.
-        last = throttle_from
+        last = None if throttle_from is None else _throttle_from(throttle_from)
         found = 0
         # A power sensor sent more often live is caught up at the same pace,
         # so a gap an outage left has the readings Loads looks for.
@@ -1737,7 +1782,7 @@ class StateForwarder:
                     self._schedule_flush()
                     await self._backfill_room.wait()
                 if self._closed:
-                    return
+                    return found
 
                 # Into the tag a live reading of it goes to: a renamed entity's
                 # gap is part of the history its live readings carry on.
@@ -1769,6 +1814,7 @@ class StateForwarder:
                 found,
                 entity_id,
             )
+        return found
 
     # ------------------------------------------------------------------
     # The wire
@@ -1899,6 +1945,10 @@ class StateForwarder:
                 self._errors.interrupted()
                 unanswered = isinstance(err, TagHistorianUnansweredError)
                 self._requeue(batch, in_doubt=unanswered, unanswered=unanswered)
+                if unanswered:
+                    # It may be more than the connection takes in the time a
+                    # request has.
+                    self._error_limit = max(1, len(batch) // 2)
                 self.stats.last_error = str(err)
                 self._flushing = False
                 self._writes_failing()
@@ -2117,7 +2167,7 @@ class StateForwarder:
                 or at >= self._since.get(entity_id, float("inf"))
             ):
                 # To the second it is sent in: all of that second.
-                before_stored[pair] = at + 1 - 1e-6
+                before_stored[pair] = at + END_OF_SECOND
                 if selected and current and self._interval_for(entity_id) < 1:
                     acked = self._acked.get(entity_id, float("-inf"))
                     self._same_second[entity_id] = (at, acked, set())
@@ -2353,7 +2403,6 @@ class StateForwarder:
             refused = min(max(0, refused), len(batch))
             self.stats.sent += len(batch) - refused
             self.stats.dropped_quota += refused
-            self._save_within(LOSS_SAVE_SECONDS)
             self.stats.refused_tags = result.skipped_tags
             self.stats.last_error = result.message
             self._repairs.async_raise_tag_quota_issue(
@@ -2399,7 +2448,6 @@ class StateForwarder:
         # Answered for good either way below: the watermark moves over the
         # batch, so the recorder is never asked for it again.
         self._acknowledge(batch)
-        self._save_within(LOSS_SAVE_SECONDS)
 
         if result.outcome is WriteOutcome.FORBIDDEN:
             # Permanent until a person acts. The batch is dropped rather than
@@ -2475,7 +2523,16 @@ class StateForwarder:
             if source and source[0] is batch[0]:
                 end = self._front(source)
                 alone = {source[index].entity_id for index in range(end)} == {batch[0].entity_id}
-                if not alone or self._error_tries >= SERVER_ERROR_TRIES * SERVER_ERROR_TRIES:
+                if alone and self._error_tries >= SERVER_ERROR_LONE_TRIES and self._held() > end:
+                    LOGGER.error(
+                        "Tag Historian has answered a reading of %s with an error %s times; "
+                        "it is let go of",
+                        batch[0].entity_id,
+                        self._error_tries,
+                    )
+                    self._refuse(source)
+                    self._suspect = None
+                elif not alone or self._error_tries >= SERVER_ERROR_TRIES * SERVER_ERROR_TRIES:
                     self._suspect = batch[0]
         self._repairs.async_maybe_raise_unavailable_issue(
             self.hass, self.entry, (now - self._unavailable_since).total_seconds()
@@ -2516,7 +2573,7 @@ class StateForwarder:
             return
         if self._error_limit is not None:
             self._error_limit *= 2
-            if self._error_limit >= BATCH_BUFFER_SIZE:
+            if self._error_limit >= MAX_POINTS_PER_REQUEST:
                 self._forget_errors()
 
     def _refuse(self, source: deque[Queued]) -> None:
@@ -2525,7 +2582,6 @@ class StateForwarder:
         self._acknowledge([item])
         self._doubt.pop(item.entity_id, None)
         self.stats.dropped_quota += 1
-        self._save_within(LOSS_SAVE_SECONDS)
 
     def _log_error_now(self) -> bool:
         """Whether an error is to be in the log: the first, and now and then while it goes on."""

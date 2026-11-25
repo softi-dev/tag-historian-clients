@@ -49,6 +49,7 @@ from . import history
 from .api import (
     TagHistorianAnsweredError,
     TagHistorianAuthError,
+    TagHistorianBusyError,
     TagHistorianClient,
     TagHistorianConnectionError,
     TagHistorianError,
@@ -104,6 +105,7 @@ PLATFORMS: list[Platform] = [Platform.SENSOR]
 # stands in front of it, was reached and did not refuse the key.
 ANSWERED = (
     TagHistorianAnsweredError,
+    TagHistorianBusyError,
     TagHistorianPermissionError,
     TagHistorianServerError,
     TagHistorianUnavailableError,
