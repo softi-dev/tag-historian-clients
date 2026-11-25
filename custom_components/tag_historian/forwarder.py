@@ -239,27 +239,8 @@ INFLIGHT_WAIT_SECONDS = 5
 # log of every entity in a badly configured house.
 MAX_UNSTORABLE_NAMES = 10
 
-# The state classes of a meter: a reading that only grows, or one that grows
-# and starts over (Home Assistant's SensorStateClass). A meter's held reading
-# goes out even when its value is the one sent last: its last reset may not be.
-METER_STATE_CLASSES = frozenset({"total", "total_increasing"})
-
 # The last microsecond of one.
 END_OF_SECOND = 1 - 1e-6
-
-
-def _is_meter(state: State) -> bool:
-    """Whether Home Assistant says this entity is a meter (its state_class)."""
-    return str(state.attributes.get("state_class") or "") in METER_STATE_CLASSES
-
-
-def _says_nothing_new(state: State, value: float, last_value: float | None) -> bool:
-    """Whether a reading held back is only what was sent last, over again.
-
-    Only an attribute changed, or it went and came back within the interval:
-    Tag Historian is on that value already.
-    """
-    return value == last_value and not _is_meter(state)
 
 
 def _floats(saved: Any) -> dict[str, float]:
@@ -297,10 +278,21 @@ class Queued(NamedTuple):
     # (renames.py). Saved with the reading, so a reading still held when the
     # rename is settled can be sent where the entity's readings go by then.
     sent_as: str = ""
+    # Not saved. What the minimum interval ran from once it went out - later
+    # than its own time for one that was held back - and its value: where the
+    # catch-up goes on from, so it comes to what the live path came to.
+    went: float | None = None
+    value: float | None = None
 
     @property
     def encoded_for(self) -> str:
         return self.sent_as or self.entity_id
+
+
+def _pace_of(item: Queued) -> tuple[float, float, float | None]:
+    """A reading's timestamp, what the interval runs from after it, and its value."""
+    went = item.timestamp if item.went is None else item.went
+    return item.timestamp, went, item.value
 
 
 def _in_doubt(batch: list[Queued]) -> dict[str, tuple[float, str, int]]:
@@ -450,8 +442,12 @@ class StateForwarder:
         # the registry no longer knows the old one.
         self._registry_ids: dict[str, str] = {}
         self._last_sent: dict[str, datetime] = {}
-        # The value of the newest one, to tell a held reading that says no more.
-        self._last_value: dict[str, float] = {}
+        # The newest one queued, live or read back, and its value: to tell a
+        # held reading that says no more.
+        self._last_value: dict[str, tuple[float, float]] = {}
+        # Of the reading at the watermark: its timestamp, what the interval
+        # ran from then, its value.
+        self._acked_pace: dict[str, tuple[float, float, float | None]] = {}
         # Per entity, the newest reading the interval held back and the
         # timer that sends it (_hold_trailing). At most one of each per
         # selected entity; both go when it is sent, let go of, or stopped.
@@ -1096,7 +1092,7 @@ class StateForwarder:
         items = [*front, *self._queue]
         if clean and len(items) > restored:
             segments.append(len(items) - restored)
-        saved = [list(item) for item in (items if clean else items[:restored])]
+        saved = [list(item[:4]) for item in (items if clean else items[:restored])]
         # Not taken to be on the wire any more by the time it is written.
         self._inflight_saved = clean and bool(inflight)
 
@@ -1290,7 +1286,10 @@ class StateForwarder:
         its own timestamp - a real value at its real time.
         """
         entity_id = state.entity_id
-        if _says_nothing_new(state, value, self._last_value.get(entity_id)):
+        # While its gap is being read an older reading may yet be queued, and
+        # the value sent last is not known.
+        sent_last = None if entity_id in self._unread else self._last_value.get(entity_id)
+        if sent_last is not None and history.says_nothing_new(state, value, sent_last[1]):
             self._let_trailing_go(entity_id)
             self.stats.dropped_throttled += 1
             return
@@ -1319,18 +1318,28 @@ class StateForwarder:
         """The interval is up: send the entity's newest held reading."""
         self._trailing_timers.pop(entity_id, None)
         if entity_id in self._trailing and not self._closed:
-            self._send_held(entity_id, dt_util.utcnow())
+            # When it was due, not when the timer got to it: what goes out
+            # follows from the readings' own times, and the catch-up, which
+            # has only those, comes to the same.
+            interval = self._interval_for(entity_id, self._trailing[entity_id][0])
+            due = self._last_sent[entity_id] + timedelta(seconds=interval)
+            if 0 < (due - dt_util.utcnow()).total_seconds() < 1:
+                # A timer keeps another clock, and may be a moment early. A
+                # reading made in that moment still takes its place.
+                self._time_trailing(entity_id)
+                return
+            self._send_held(entity_id, due)
 
     @callback
-    def _send_held(self, entity_id: str, at: datetime) -> None:
+    def _send_held(self, entity_id: str, due: datetime) -> None:
         if (unsub := self._trailing_timers.pop(entity_id, None)) is not None:
             unsub()
         state, value = self._trailing.pop(entity_id)
-        # The throttle runs from the moment it went out rather than from the
+        # The throttle runs from the moment it was due rather than from the
         # reading's own time, so an entity sends at most one reading per
         # interval, trailing ones included - the rate the review screen's
         # arithmetic promises.
-        self._last_sent[entity_id] = max(state.last_updated, at)
+        self._last_sent[entity_id] = max(state.last_updated, due)
         self._enqueue(state, value)
 
     @callback
@@ -1357,7 +1366,7 @@ class StateForwarder:
         """One reading into the buffer, encoded for the tag its entity sends to."""
         entity_id = state.entity_id
         stamp = state.last_updated
-        self._last_value[entity_id] = value
+        self._note_value(entity_id, stamp.timestamp(), value)
         # The unit and the friendly name ride along on every reading, so the
         # tag in Tag Historian carries what Home Assistant shows - "Living room
         # temperature", 21.5 °C - and follows a rename here. The attribute,
@@ -1382,10 +1391,22 @@ class StateForwarder:
             self._let_go(self._pop_oldest())
 
         self._queue.append(
-            Queued(entity_id, stamp.timestamp(), line, self._send_as.get(entity_id, ""))
+            Queued(
+                entity_id,
+                stamp.timestamp(),
+                line,
+                self._send_as.get(entity_id, ""),
+                self._last_sent[entity_id].timestamp(),
+                value,
+            )
         )
         self.stats.queued = self._held()
         self._schedule_flush()
+
+    def _note_value(self, entity_id: str, stamp: float, value: float) -> None:
+        """A reading was queued: its value is the one sent last, unless a newer one was."""
+        if (known := self._last_value.get(entity_id)) is None or stamp >= known[0]:
+            self._last_value[entity_id] = (stamp, value)
 
     def _count_unstorable(self, entity_id: str, state: str) -> None:
         """A state that is a value to its owner and not a number to us.
@@ -1486,6 +1507,20 @@ class StateForwarder:
         if (acked := self._acked.get(entity_id)) is not None:
             candidates.append(acked)
         return max(candidates, default=None)
+
+    def _pace_after(self, entity_id: str, stamp: float) -> tuple[float, float | None]:
+        """What the interval runs from after the reading of ``stamp``, and its value if known."""
+        paces = [
+            _pace_of(item)
+            for item in [*self._backfill, *(self._inflight or [])]
+            if item.entity_id == entity_id
+        ]
+        if (acked := self._acked_pace.get(entity_id)) is not None:
+            paces.append(acked)
+        for at, went, value in paces:
+            if at == stamp:
+                return went, value
+        return _throttle_from(stamp), None
 
     def history_boundary(self, entity_id: str) -> float | None:
         """Where this forwarder's part of an entity's history begins, for the history import.
@@ -1766,21 +1801,34 @@ class StateForwarder:
         second, acked, held = self._same_second[entity_id]
         source = await history.async_source(self.hass, entity_id, self._send_as.get(entity_id))
         begin = datetime.fromtimestamp(second, UTC)
+        interval = self._interval_for(entity_id)
         states = await history.async_states(
-            self.hass, source, begin - timedelta(microseconds=1), begin + timedelta(seconds=1)
+            self.hass,
+            source,
+            begin - timedelta(microseconds=1),
+            begin + timedelta(seconds=1 + interval),
         )
-        stamps = held | {
-            state.last_updated.timestamp()
+        read = [
+            (state.last_updated.timestamp(), state, value)
             for state in states
-            if state.last_updated.timestamp() > acked
-            and recorded_state_value(state.entity_id, state.state) is not None
-        }
+            if (value := recorded_state_value(state.entity_id, state.state)) is not None
+        ]
+        stamps = held | {at for at, _, _ in read if acked < at < second + 1}
         del self._same_second[entity_id]
         missing = len(stamps) - (0 if acked >= second else 1)
-        if self._interval_for(entity_id) >= 1:
-            # The interval held all but one of them back - and the newest of
-            # those may or may not have gone out when it was up.
-            missing = min(missing, 1)
+        if missing > 0 and interval >= 1:
+            # The interval held all but the first of them back. The newest of
+            # those may or may not have gone out when it was up - it had not if
+            # it only said the same again, or a newer one had taken its place
+            # by then. One that was in the buffer had.
+            first = acked if acked >= second else min(stamps)
+            newest = max(stamps)
+            values = {at: (state, value) for at, state, value in read}
+            same = newest in values and history.says_nothing_new(
+                *values[newest], values[first][1] if first in values else None
+            )
+            replaced = any(newest < at <= first + interval for at in values)
+            missing = int(bool(held - {first}) or not (same or replaced))
         self._count_mid_write(missing)
 
     def _count_mid_write(self, missing: int) -> None:
@@ -1808,16 +1856,19 @@ class StateForwarder:
         window = timedelta(hours=RECORDER_WINDOW_HOURS)
         cursor = datetime.fromtimestamp(start, UTC)
         stop = datetime.fromtimestamp(end, UTC)
-        # The minimum interval runs from the acknowledged reading. An entity
+        # The minimum interval runs from the acknowledged reading - from when
+        # it went out, for one that had been held back, so a reading the live
+        # path left out, and counted, is not sent after all. An entity
         # with none had nothing before its first live reading to be throttled
         # against, and neither has its first recorded one here.
-        last = None if throttle_from is None else _throttle_from(throttle_from)
+        last: float | None = None
         last_value: float | None = None
-        waiting: tuple[State, float] | None = None
+        if throttle_from is not None:
+            last, last_value = self._pace_after(entity_id, throttle_from)
         found = 0
         # A power sensor sent more often live is caught up at the same pace,
         # so a gap an outage left has the readings Loads looks for.
-        interval = self._interval_for(entity_id)
+        pace = history.Pace(self._interval_for(entity_id), last, last_value)
         # Where the recorder keeps this entity's history: its id - or, for one
         # renamed onto an id that had a history of its own while the rename
         # waits to be settled, its old id up to the rename (history.py).
@@ -1839,26 +1890,16 @@ class StateForwarder:
                 value = recorded_state_value(state.entity_id, state.state)
                 if value is None:
                     continue
-                if last is not None:
-                    if waiting is not None and stamp - last > interval:
-                        # Its interval was up before this one was made.
-                        found += await self._async_read_back(entity_id, *waiting)
-                        last, last_value, waiting = last + interval, waiting[1], None
-                    if stamp - last < interval:
-                        waiting = (state, value)
-                        if _says_nothing_new(state, value, last_value):
-                            waiting = None
-                        continue
-                last, last_value, waiting = stamp, value, None
-                found += await self._async_read_back(entity_id, state, value)
+                for reading in pace.take(state, value):
+                    found += await self._async_read_back(entity_id, *reading)
                 if self._closed:
                     return found
             cursor = window_end
             self._schedule_flush()
 
-        if last is not None and not self._closed:
+        if pace.last is not None and not self._closed:
             found += await self._async_read_back_last(
-                entity_id, waiting, last, interval, end if end_is_held else None
+                entity_id, pace, pace.last, end if end_is_held else None
             )
             self._schedule_flush()
 
@@ -1873,13 +1914,13 @@ class StateForwarder:
     async def _async_read_back_last(
         self,
         entity_id: str,
-        waiting: tuple[State, float] | None,
+        pace: history.Pace,
         last: float,
-        interval: float,
         held: float | None,
     ) -> int:
         """Where the gap ends: the reading still waiting for its interval, if there is one."""
-        due = last + interval
+        due = last + pace.interval
+        waiting = pace.waiting
         up = False
         if waiting is not None:
             newer = held if held is not None else self._oldest_held(entity_id)
@@ -1895,7 +1936,7 @@ class StateForwarder:
         state, value = waiting
         doubtful = self._doubtful_until.get(entity_id, float("-inf"))
         if up or state.last_updated.timestamp() <= doubtful:
-            return await self._async_read_back(entity_id, state, value)
+            return await self._async_read_back(entity_id, state, value, due)
         self._hold_trailing(
             # Under its id as it is now; it may be recorded under a former one.
             State(
@@ -1909,7 +1950,9 @@ class StateForwarder:
         )
         return 0
 
-    async def _async_read_back(self, entity_id: str, state: State, value: float) -> int:
+    async def _async_read_back(
+        self, entity_id: str, state: State, value: float, went: float
+    ) -> int:
         """Queue one recorded reading, when there is room. 1 if it was, 0 if not."""
         stamp = state.last_updated.timestamp()
         if stamp <= self._doubtful_until.get(entity_id, float("-inf")):
@@ -1925,6 +1968,7 @@ class StateForwarder:
         if self._closed:
             return 0
 
+        self._note_value(entity_id, stamp, value)
         # Into the tag a live reading of it goes to: a renamed entity's gap is
         # part of the history its live readings carry on.
         self._backfill.append(
@@ -1941,6 +1985,8 @@ class StateForwarder:
                     state.attributes.get("last_reset"),
                 ),
                 self._send_as.get(entity_id, ""),
+                went,
+                value,
             )
         )
         self.stats.backfilled += 1
@@ -2170,6 +2216,7 @@ class StateForwarder:
         for item in batch:
             if item.timestamp > self._acked.get(item.entity_id, float("-inf")):
                 self._acked[item.entity_id] = item.timestamp
+                self._acked_pace[item.entity_id] = _pace_of(item)
         if batch is self._inflight:
             # Answered for: not on the wire any more, whatever is saved next.
             self._inflight = None

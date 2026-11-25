@@ -41,6 +41,11 @@ from homeassistant.helpers import entity_registry as er
 
 RECORDER_DOMAIN = "recorder"
 
+# The state classes of a meter: a reading that only grows, or one that grows
+# and starts over (Home Assistant's SensorStateClass). A meter's held reading
+# goes out even when its value is the one sent last: its last reset may not be.
+METER_STATE_CLASSES = frozenset({"total", "total_increasing"})
+
 
 @dataclass(frozen=True)
 class Source:
@@ -98,6 +103,62 @@ def _in_use(hass: HomeAssistant, entity_id: str) -> bool:
         er.async_get(hass).async_get(entity_id) is not None
         or hass.states.get(entity_id) is not None
     )
+
+
+def says_nothing_new(state: State, value: float, last_value: float | None) -> bool:
+    """Whether a reading held back is only what was sent last, over again.
+
+    Only an attribute changed, or it went and came back within the interval:
+    Tag Historian is on that value already.
+    """
+    if str(state.attributes.get("state_class") or "") in METER_STATE_CLASSES:
+        return False
+    return value == last_value
+
+
+class Pace:
+    """The minimum interval over one entity's recorded readings, as the live path keeps it.
+
+    Given them in time order, :meth:`take` says which go out. A reading too
+    soon after the last one waits, the newest one only, and goes out when the
+    interval is up (``StateForwarder._hold_trailing``): so a burst ends on the
+    reading the entity ended on. What waits when there are no more is in
+    ``waiting``, for the caller to send or hand on.
+    """
+
+    def __init__(
+        self, interval: float, last: float | None, last_value: float | None = None
+    ) -> None:
+        self.interval = interval
+        # What the interval runs from, and the value last sent.
+        self.last = last
+        self.last_value = last_value
+        self.waiting: tuple[State, float] | None = None
+
+    def take(self, state: State, value: float) -> list[tuple[State, float, float]]:
+        """What goes out now this one is known: (state, value, what the interval runs from then)."""
+        stamp = state.last_updated.timestamp()
+        out: list[tuple[State, float, float]] = []
+        if self.last is not None:
+            if self.waiting is not None and self._since(self.last, stamp) > self.interval:
+                # Its interval was up before this one was made.
+                held, held_value = self.waiting
+                self.last += self.interval
+                self.last_value, self.waiting = held_value, None
+                out.append((held, held_value, self.last))
+            if self._since(self.last, stamp) < self.interval:
+                self.waiting = (
+                    None if says_nothing_new(state, value, self.last_value) else (state, value)
+                )
+                return out
+        self.last, self.last_value, self.waiting = stamp, value, None
+        out.append((state, value, stamp))
+        return out
+
+    @staticmethod
+    def _since(last: float, stamp: float) -> float:
+        # To the microsecond, which is what the live path compares in.
+        return round(stamp - last, 6)
 
 
 async def async_states(

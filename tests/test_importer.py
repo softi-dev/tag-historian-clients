@@ -186,7 +186,8 @@ async def test_the_import_sends_what_the_live_path_would_have_oldest_first(
     freezer.move_to(NOW)
     base = NOW - timedelta(days=2)
     recorder.record(POWER, "1500", base, friendly_name="House power", unit_of_measurement="W")
-    recorder.record(POWER, "1510", base + timedelta(seconds=4))  # inside the minimum interval
+    recorder.record(POWER, "1505", base + timedelta(seconds=2))  # inside the minimum interval
+    recorder.record(POWER, "1510", base + timedelta(seconds=4))  # the newest inside it: held back
     recorder.record(POWER, "unavailable", base + timedelta(seconds=20))  # a gap, not a zero
     recorder.record(POWER, "1520", base + timedelta(seconds=30, microseconds=700000))
     recorder.record(TEMP, "21.5", base + timedelta(hours=30))
@@ -199,6 +200,7 @@ async def test_the_import_sends_what_the_live_path_would_have_oldest_first(
 
     assert client.sent == [
         ("sensor.house_power", "2026-10-15T12:00:00Z", 1500.0),
+        ("sensor.house_power", "2026-10-15T12:00:04Z", 1510.0),
         ("sensor.house_power", "2026-10-15T12:00:30Z", 1520.0),
         ("sensor.outdoor_temperature", "2026-10-16T18:00:00Z", 21.5),
     ], "to the second, through the same throttle and the same idea of a reading as live"
@@ -211,10 +213,66 @@ async def test_the_import_sends_what_the_live_path_would_have_oldest_first(
     progress = importer.progress
     assert progress.status == STATUS_FINISHED
     assert progress.done == [POWER, TEMP]
-    assert progress.stored == 3
+    assert progress.stored == 4
 
-    assert "3 readings imported for 2 of 2 entities" in notifications[-1]
+    assert "4 readings imported for 2 of 2 entities" in notifications[-1]
     assert "Progress is on" in notifications[0]
+
+
+async def test_an_import_ends_on_the_reading_the_entity_ended_on(
+    hass: HomeAssistant, entry, recorder, freezer
+) -> None:
+    """A burst's last reading, and at the very end one whose interval is not up either."""
+    freezer.move_to(NOW)
+    for seconds, value in ((0, 140), (9, 0), (3600, 70), (3603, 900), (3606, 70)):
+        recorder.record(POWER, str(value), NOW - timedelta(hours=2) + timedelta(seconds=seconds))
+    recorder.record(POWER, "80", NOW - timedelta(seconds=9))
+    recorder.record(POWER, "5", NOW - timedelta(seconds=3))
+
+    client = ImportClient()
+    importer = make_importer(hass, entry, client)
+    await importer.async_start([POWER], None)
+    await _run(importer)
+
+    assert [value for _, _, value in client.sent] == [140, 0, 70, 80, 5]
+
+
+async def test_a_batch_is_never_more_than_a_batch(
+    hass: HomeAssistant, entry, recorder, freezer, monkeypatch
+) -> None:
+    """One reading can let two go: the one that waited, and itself."""
+    monkeypatch.setattr(importer_module, "IMPORT_BATCH_SIZE", 4)
+    freezer.move_to(NOW)
+    for n in range(20):
+        base = NOW - timedelta(hours=2) + timedelta(seconds=60 * n)
+        recorder.record(POWER, str(n), base)
+        recorder.record(POWER, str(n + 0.5), base + timedelta(seconds=5))
+
+    client = ImportClient()
+    importer = make_importer(hass, entry, client)
+    await importer.async_start([POWER], None)
+    await _run(importer)
+
+    assert [value for _, _, value in client.sent] == [n / 2 for n in range(40)]
+    assert max(len(batch) for batch in client.batches) == 4
+
+
+async def test_what_waited_is_not_sent_past_where_the_history_ends(
+    hass: HomeAssistant, entry, recorder, freezer
+) -> None:
+    """The answer to the probe says the entity is live from before the one held back."""
+    freezer.move_to(NOW)
+    base = NOW - timedelta(hours=2)
+    for seconds, value in ((0, 140), (5, 0), (60, 7)):
+        recorder.record(POWER, str(value), base + timedelta(seconds=seconds))
+
+    client = ImportClient(taken(1, importable_before={POWER: base + timedelta(seconds=4)}))
+    importer = make_importer(hass, entry, client)
+    await importer.async_start([POWER], None)
+    await _run(importer)
+
+    assert [value for _, _, value in client.sent] == [140]
+    assert importer.progress.status == STATUS_FINISHED
 
 
 async def test_an_entity_already_live_ends_where_its_first_live_reading_is(

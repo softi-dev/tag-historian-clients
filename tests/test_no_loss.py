@@ -1752,6 +1752,133 @@ async def test_killed_a_held_reading_of_the_second_tag_historian_has_is_counted_
     assert forwarder.stats.dropped_inflight == 1
 
 
+@pytest.mark.parametrize(("values", "newer"), [((860, 860), None), ((870, 861), 862)])
+async def test_killed_a_reading_of_that_second_nobody_waited_for_is_not_counted(
+    hass: HomeAssistant, started, recorder, freezer, hass_storage, values, newer
+) -> None:
+    """It only said the same again, or a newer one had taken its place."""
+    server = Server()
+    forwarder = await started(server, min_interval=10)
+    await put(hass, recorder, freezer, POWER, values[0], 1.1)
+    await later(hass)
+    freezer.tick(timedelta(seconds=0.3))
+    hass.states.async_set(POWER, str(values[1]), {"said": "again"})
+    recorder.record(POWER, str(values[1]), dt_util.utcnow())
+    await spin()
+    if newer is not None:
+        await put(hass, recorder, freezer, POWER, newer, 3)
+    kill(forwarder, hass_storage)
+    freezer.tick(timedelta(seconds=60))
+    forwarder = await started(server, min_interval=10)
+    await drain(hass, freezer, 5)
+    assert server.values() == [values[0], *([newer] if newer else [])]
+    assert forwarder.stats.dropped_inflight == 0
+
+
+async def _after_a_held_reading_went_out(hass, started, recorder, freezer, entities) -> tuple:
+    """140; 5 held back and sent; 900 held back; 5 again, which says nothing new."""
+    server = Server()
+    forwarder = await started(server, entities=entities, min_interval=60)
+    await put(hass, recorder, freezer, POWER, 140, 1)
+    await drain(hass, freezer, 0)
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=2))
+    await spin(100)
+    await put(hass, recorder, freezer, POWER, 5, 1)
+    for seconds in (61, 2):
+        freezer.tick(timedelta(seconds=seconds))
+        async_fire_time_changed(hass)
+        await spin(100)
+    assert server.values() == [140, 5]
+    await put(hass, recorder, freezer, POWER, 900, 1)
+    await put(hass, recorder, freezer, POWER, 5, 3)
+    assert forwarder.stats.dropped_throttled == 2
+    return server, forwarder
+
+
+@pytest.mark.parametrize("known", [True, False])
+async def test_a_read_back_after_a_held_reading_went_out_ends_on_what_the_entity_is(
+    hass: HomeAssistant, started, recorder, freezer, known
+) -> None:
+    """The catch-up leaves out what the live path did; and if it cannot know, it ends right."""
+    server, forwarder = await _after_a_held_reading_went_out(
+        hass, started, recorder, freezer, [POWER, DOOR]
+    )
+    if not known:
+        forwarder._acked_pace.clear()
+    freezer.tick(timedelta(seconds=3))
+    forwarder._request_backfill()
+    await spin(200)
+    for _ in range(5):
+        freezer.tick(timedelta(seconds=61))
+        async_fire_time_changed(hass)
+        await spin(150)
+    assert server.values() == ([140, 5] if known else [140, 5, 900, 5])
+    assert forwarder.stats.dropped_throttled == 2
+
+
+async def test_nothing_is_judged_by_the_last_value_while_a_gap_is_being_read(
+    hass: HomeAssistant, started, recorder, freezer
+) -> None:
+    """An older reading may yet be queued after it; the newest one must go then."""
+    _server, forwarder = await _after_a_held_reading_went_out(
+        hass, started, recorder, freezer, [POWER]
+    )
+    forwarder._unread.add(POWER)
+    await put(hass, recorder, freezer, POWER, 900, 1)
+    await put(hass, recorder, freezer, POWER, 5, 1)
+    assert forwarder._trailing[POWER][1] == 5
+
+
+async def test_an_eviction_does_not_bring_back_what_the_interval_left_out(
+    hass: HomeAssistant, started, recorder, freezer, monkeypatch
+) -> None:
+    monkeypatch.setattr(forwarder_module, "MAX_QUEUE_LENGTH", 2)
+    others = [DOOR, "sensor.a", "sensor.b", "sensor.c"]
+    server, forwarder = await _after_a_held_reading_went_out(
+        hass, started, recorder, freezer, [POWER, *others]
+    )
+    server.down = True
+    for entity_id in others:
+        await put(hass, recorder, freezer, entity_id, "on" if entity_id == DOOR else 3, 2)
+    freezer.tick(timedelta(seconds=5))
+    async_fire_time_changed(hass)
+    await spin(100)
+    server.down = False
+    await drain(hass, freezer, 60)
+    assert server.values() == [140, 5]
+    assert forwarder.stats.dropped_throttled == 2
+
+
+@pytest.mark.parametrize("seed", range(int(os.environ.get("NO_LOSS_SEEDS", "40")) // 2))
+async def test_every_reading_is_sent_or_counted_whatever_outages_there_were(
+    hass: HomeAssistant, started, recorder, freezer, monkeypatch, seed
+) -> None:
+    """Not both: sent and throttled are all the readings there were, evicted and read back or not."""
+    monkeypatch.setattr(forwarder_module, "MAX_QUEUE_LENGTH", 6)
+    dice = random.Random(f"{seed}")
+    entities = [POWER, "sensor.b"]
+    server = Server()
+    forwarder = await started(server, entities=entities, min_interval=10)
+    newest: dict[str, int] = {}
+    for made in range(1, 46):
+        entity_id = dice.choice(entities)
+        await put(hass, recorder, freezer, entity_id, made, 0.01)
+        newest[entity_id] = made
+        wait = dice.choice([0.4, 1, 2, 3, 5, 8, 9.9, 10.1, 12, 25])
+        while wait > 0:
+            freezer.tick(timedelta(seconds=min(wait, 1.0)))
+            async_fire_time_changed(hass)
+            await spin(40)
+            wait -= 1.0
+        if dice.random() < 0.15:
+            server.down = not server.down
+    server.down = False
+    await drain(hass, freezer, 40)
+    for entity_id, value in newest.items():
+        assert server.values(entity_id.split(".")[1])[-1] == value
+    assert forwarder.stats.sent + forwarder.stats.dropped_throttled == 45
+
+
 # --------------------------------------------------------------------------
 # All of it at once
 # --------------------------------------------------------------------------

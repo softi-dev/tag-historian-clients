@@ -64,7 +64,8 @@ is taken when the import starts and saved with it.
 
 What it sends is what the live forwarder would have sent: the same numbers and
 two-state words, ``unavailable`` left as a gap, the same minimum interval
-between two readings of one entity, timestamps to the second. Home
+between two readings of one entity with the last one before a silence sent
+(:class:`.history.Pace`, which the catch-up goes by too), timestamps to the second. Home
 Assistant's long-term statistics are not readings and are never sent as
 readings: they go in through the statistics phase above, as hours, and Tag
 Historian marks them as Home Assistant's statistics wherever it shows them.
@@ -119,7 +120,7 @@ from typing import Any
 
 from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import CoreState, HomeAssistant, callback
+from homeassistant.core import CoreState, HomeAssistant, State, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.storage import Store
@@ -1040,7 +1041,7 @@ class HistoryImporter:
         for line in (progress.ends.get(entity_id), *self._live_lines([entity_id]).values()):
             if line is not None:
                 end = min(end, datetime.fromtimestamp(line, UTC))
-        last_kept = answered
+        pace = history.Pace(self._min_interval, answered)
         # The tag the entity's live readings go to - for a renamed entity
         # whose tag has not been renamed yet, its old one (module docstring) -
         # and where the recorder keeps its history, which for an entity
@@ -1071,30 +1072,32 @@ class HistoryImporter:
                 value = recorded_state_value(state.entity_id, state.state)
                 if value is None:
                     continue
-                if last_kept is not None and epoch - last_kept < self._min_interval:
-                    continue
-                last_kept = epoch
-                pending.append((epoch, _reading(tag, stamp, value, state.attributes)))
-
-                if len(pending) >= batch_size:
-                    result = await self._async_send(entity_id, pending)
-                    pending = []
-                    batch_size = IMPORT_BATCH_SIZE
-                    if result is None:
-                        return False
-                    if tag in result.refused_tags:
-                        # The plan has no room for this tag; the rest of its
-                        # history would be refused the same way.
-                        return True
-                    if (line := result.importable_before.get(tag)) is not None and line < end:
-                        # Already live in Tag Historian from here on: the rest
-                        # of this entity's recorder history is not history to
-                        # it, and would only be refused.
-                        end = line
-                        if end <= cursor:
+                for kept, number, _ in pace.take(state, value):
+                    if kept.last_updated >= end:
+                        # It waited, and the last answer left less to import.
+                        continue
+                    pending.append(_kept(tag, kept, number))
+                    if len(pending) >= batch_size:
+                        result = await self._async_send(entity_id, pending)
+                        pending = []
+                        batch_size = IMPORT_BATCH_SIZE
+                        if result is None:
+                            return False
+                        if tag in result.refused_tags:
+                            # The plan has no room for this tag; the rest of its
+                            # history would be refused the same way.
                             return True
+                        if (line := result.importable_before.get(tag)) is not None and line < end:
+                            # Already live in Tag Historian from here on: the rest
+                            # of this entity's recorder history is not history to
+                            # it, and would only be refused.
+                            end = line
             cursor = window_end
 
+        # The last one the interval held back goes too: the entity may have
+        # stood at it ever since.
+        if pace.waiting is not None and pace.waiting[0].last_updated < end:
+            pending.append(_kept(tag, *pace.waiting))
         if pending:
             result = await self._async_send(entity_id, pending)
             if result is None:
@@ -1482,6 +1485,12 @@ def _summary(progress: ImportProgress) -> str:
             # Only where there is hourly history above it to speak of.
             lines.append(HOURS_UNAFFECTED_SENTENCE)
     return "\n\n".join(lines)
+
+
+def _kept(tag: str, state: State, value: float) -> tuple[float, dict[str, Any]]:
+    """One reading to import, and when it was made."""
+    stamp = state.last_updated
+    return stamp.timestamp(), _reading(tag, stamp, value, state.attributes)
 
 
 def _reading(tag: str, stamp: datetime, value: float, attributes: Any) -> dict[str, Any]:

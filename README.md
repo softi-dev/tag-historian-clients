@@ -273,7 +273,8 @@ order:
 2. **What the recorder holds — the readings.** Every state change of the last
    days (10 by default), with its original timestamp, through the same rules
    as the live readings: the same numbers and on/off words, `unavailable` left
-   as a gap, the same minimum interval, timestamps to the second. Where a
+   as a gap, the same minimum interval (and the last reading before a silence
+   is sent here too), timestamps to the second. Where a
    reading falls in an hour the statistics brought, Tag Historian keeps the
    reading's hour.
 
@@ -580,7 +581,8 @@ that stays empty says why. `dropped_rate_limited` is on the attributes too but
 is deliberately *not* in the total — those are the readings your minimum
 interval skipped for a newer one, or that only repeated the value sent last,
 which is what you asked it to do. A reading held back and then sent is not among
-them. Two more attributes are not
+them (except around a restart, or a change of the interval, where the catch-up
+can send one that was counted). Two more attributes are not
 losses but what happened next: `backfilled_from_recorder`, readings read back
 from the recorder to fill a gap, and `restored_after_restart`, readings saved
 at the last stop and sent after it. `gaps_not_read_back` counts gaps, of one
@@ -696,7 +698,8 @@ of an entity you have excluded from it cannot be read back. With a minimum
 interval of 0, an entity with several readings in the very second of Tag
 Historian's newest may have only one of them there; the others are counted as
 `dropped_mid_write`. With a longer one, the same goes for one reading the
-interval held back within that second. And a request that was on its way when Home Assistant
+interval held back within that second, if it said something new and nothing
+newer took its place. And a request that was on its way when Home Assistant
 crashed, and is held up by a gateway until after the question, is stored
 twice.) If Tag Historian
 cannot say, what may have been sent since the last save — at most about six
