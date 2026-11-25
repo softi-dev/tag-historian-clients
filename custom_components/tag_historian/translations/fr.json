@@ -190,6 +190,10 @@
       "title": "Tag Historian n’accepte pas les données en ce moment",
       "description": "Les écritures échouent depuis {minutes} minutes : Tag Historian répond qu’il ne peut pas les prendre pour l’instant, parce qu’il est trop occupé ou qu’il ne peut momentanément pas vérifier la clé de cette intégration. Rien n’a changé dans votre compte ni dans la clé. Les mesures sont retenues, y compris pendant un redémarrage, et seront envoyées dès qu’il les acceptera de nouveau ; si cela dure, les plus anciennes sont abandonnées puis relues ensuite dans l’enregistreur de Home Assistant. Vous n’avez rien à faire."
     },
+    "not_reached": {
+      "title": "Tag Historian n’a pas encore pu être joint",
+      "description": "Rien n’a répondu à l’adresse {host} depuis {minutes} minutes, c’est-à-dire depuis le démarrage de cette intégration. Les mesures sont retenues, y compris pendant un redémarrage, et seront envoyées dès que la connexion sera possible ; si cela dure, les plus anciennes sont abandonnées puis relues ensuite dans l’enregistreur de Home Assistant, pour les entités qu’il enregistre. Vérifiez que Home Assistant a une connexion à Internet, que rien ne la bloque et que l’adresse est correcte."
+    },
     "entity_renamed": {
       "title": "{old} a été renommée en {new} dans Home Assistant",
       "fix_flow": {

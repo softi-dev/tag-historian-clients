@@ -43,13 +43,18 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.typing import ConfigType
+from homeassistant.util import dt as dt_util
 
 from . import history
 from .api import (
+    TagHistorianAnsweredError,
     TagHistorianAuthError,
     TagHistorianClient,
     TagHistorianConnectionError,
+    TagHistorianError,
     TagHistorianImportRefused,
+    TagHistorianPermissionError,
+    TagHistorianServerError,
     TagHistorianUnavailableError,
 )
 from .const import (
@@ -86,12 +91,23 @@ from .renames import (
 )
 from .repairs import (
     async_clear_bring_years_issue,
+    async_clear_not_reached_issue,
     async_clear_write_issues,
+    async_maybe_raise_not_reached_issue,
     async_raise_bring_years_issue,
 )
 from .words import async_load_words
 
 PLATFORMS: list[Platform] = [Platform.SENSOR]
+
+# Not the numbers that were asked for, but an answer: Tag Historian, or what
+# stands in front of it, was reached and did not refuse the key.
+ANSWERED = (
+    TagHistorianAnsweredError,
+    TagHistorianPermissionError,
+    TagHistorianServerError,
+    TagHistorianUnavailableError,
+)
 
 # Set up from the UI only; async_setup below exists for the import action and
 # the rename listener, and hassfest wants an integration that has one to say
@@ -329,6 +345,7 @@ async def _async_set_up_the_rest(
 ) -> bool:
     """Everything that comes after the forwarder has begun to listen."""
     reached = True
+    answered = True
     try:
         # Raises ConfigEntryAuthFailed on a revoked key: Home Assistant then
         # shows its reauth card, and nothing can be sent until it is answered.
@@ -342,9 +359,11 @@ async def _async_set_up_the_rest(
         # through; the entry is loaded instead and buffers, and what needs an
         # answer is done at the first one (_when_reached).
         reached = False
+        answered = isinstance(cause, ANSWERED)
         forwarder.stats.last_error = str(cause)
         LOGGER.warning(
-            "Tag Historian cannot be reached yet (%s); readings are held and sent once it can",
+            "Tag Historian cannot %s yet (%s); readings are held and sent once it can",
+            "say what the plan has room for" if answered else "be reached",
             err.__cause__ or cause,
         )
 
@@ -358,7 +377,9 @@ async def _async_set_up_the_rest(
         entry.async_on_unload(guard.async_start())
     else:
         async_clear_fast_power_issue(hass, entry)
-    if reached:
+    if answered:
+        # It was reached and did not refuse the key, which is what this waits
+        # for. Whether it takes readings, the write path finds out.
         forwarder.async_start()
     # NOT entry.async_on_unload(forwarder.async_shutdown). See
     # async_unload_entry below: the on-unload callbacks run AFTER Home
@@ -394,6 +415,24 @@ async def _async_set_up_the_rest(
         return True
 
     started = False
+    since = dt_util.utcnow()
+
+    @callback
+    def _start() -> None:
+        if forwarder.holding:
+            forwarder.async_start()
+        async_clear_not_reached_issue(hass, entry)
+
+    @callback
+    def _quota_failed(err: TagHistorianError) -> None:
+        if not forwarder.holding:
+            return
+        if isinstance(err, ANSWERED):
+            _start()
+            return
+        async_maybe_raise_not_reached_issue(
+            hass, entry, (dt_util.utcnow() - since).total_seconds()
+        )
 
     @callback
     def _quota_answered() -> None:
@@ -403,12 +442,14 @@ async def _async_set_up_the_rest(
         started = True
         # First, so that the power sensors' interval is known when it reads
         # the gap back: the guard above listened before this did.
-        forwarder.async_start()
+        _start()
         entry.async_create_background_task(
             hass, _async_when_reached(hass, entry, options), f"{DOMAIN} reached"
         )
 
+    coordinator.on_failure = _quota_failed
     entry.async_on_unload(coordinator.async_add_listener(_quota_answered))
+    entry.async_on_unload(lambda: async_clear_not_reached_issue(hass, entry))
     return True
 
 

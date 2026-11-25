@@ -30,7 +30,7 @@ controller's "write buffer fair-share exceeded" is Tag Historian being busy.
 The card for the first names a billing limit and links the pricing page, so
 sending the second one there is this code inventing a reason to charge more.
 
-Every issue is cleared on the next clean 204. An issue that outlives its cause
+Every one of them is cleared on the next clean 204. An issue that outlives its cause
 teaches people to ignore the repairs panel.
 
 One more card is not about the write path at all, and is not cleared by a 204:
@@ -66,12 +66,14 @@ from homeassistant.helpers.selector import (
 from .api import LineageOutcome
 from .const import (
     CONF_ENTITIES,
+    CONF_HOST,
     CONF_SEND_AS,
     DOCS_URL,
     DOMAIN,
     ISSUE_BRING_YEARS,
     ISSUE_DAILY_QUOTA,
     ISSUE_ENTITY_RENAMED,
+    ISSUE_NOT_REACHED,
     ISSUE_SERVICE_UNAVAILABLE,
     ISSUE_TAG_QUOTA,
     ISSUE_WRITE_FORBIDDEN,
@@ -251,6 +253,39 @@ def async_maybe_raise_unavailable_issue(
             "minutes": str(int(failing_for_seconds // 60)),
         },
     )
+
+
+@callback
+def async_maybe_raise_not_reached_issue(
+    hass: HomeAssistant, entry: ConfigEntry, for_seconds: float
+) -> None:
+    """Not reached once since the start: the entry is loaded, holds its readings and sends nothing.
+
+    Nothing is written meanwhile, so nothing of the write path can say so - and
+    a mistyped host, a broken DNS or a firewall would look like an integration
+    that works.
+    """
+    if for_seconds < SERVICE_UNAVAILABLE_ISSUE_AFTER_SECONDS:
+        return
+
+    ir.async_create_issue(
+        hass,
+        DOMAIN,
+        issue_id(entry, ISSUE_NOT_REACHED),
+        is_fixable=False,
+        is_persistent=False,
+        severity=ir.IssueSeverity.WARNING,
+        translation_key=ISSUE_NOT_REACHED,
+        translation_placeholders={
+            "host": str(entry.data.get(CONF_HOST, "")),
+            "minutes": str(int(for_seconds // 60)),
+        },
+    )
+
+
+@callback
+def async_clear_not_reached_issue(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    ir.async_delete_issue(hass, DOMAIN, issue_id(entry, ISSUE_NOT_REACHED))
 
 
 @callback

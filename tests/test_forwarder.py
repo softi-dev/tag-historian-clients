@@ -445,7 +445,7 @@ async def test_an_answer_that_names_no_wait_is_not_asked_again_every_second(
 
 @pytest.mark.parametrize("status", [502, 504])
 async def test_a_gateway_answering_in_tag_historians_place_holds_the_batch(
-    hass: HomeAssistant, entry, make_forwarder, aioclient_mock, status
+    hass: HomeAssistant, entry, make_forwarder, aioclient_mock, status, freezer
 ) -> None:
     """With the real client: a 502 or 504 is a host that cannot be reached, so
     the readings are held and sent once it answers - never dropped as refused."""
@@ -471,7 +471,10 @@ async def test_a_gateway_answering_in_tag_historians_place_holds_the_batch(
         "https://api.taghistorian.com/api/tags?take=1000&skip=0",
         json={"totalCount": 0, "tags": []},
     )
-    await _tick(hass, CONNECTION_RETRY_SECONDS + 1)
+    # And when it says it has nothing, again: the gateway may hand it over late.
+    for _ in range(5):
+        freezer.tick(CONNECTION_RETRY_SECONDS + 1)
+        await _tick(hass, 0)
 
     assert forwarder.stats.sent == 1
     assert forwarder.stats.queued == 0

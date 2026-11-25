@@ -892,12 +892,11 @@ class TagHistorianClient:
             # that person to read.
             return WriteResult(WriteOutcome.FORBIDDEN, message=message)
 
-        LOGGER.error(
-            "Tag Historian refused a write with %s: %s", response.status, message
-        )
         if response.status not in (400, 413):
             # A 500, Tag Historian's own error, unexplained; or an answer that
-            # is not one of Tag Historian's at all.
+            # is not one of Tag Historian's at all. It is sent again, many
+            # times over in a long outage; the forwarder logs it now and then.
+            LOGGER.debug("Tag Historian answered a write with %s: %s", response.status, message)
             return WriteResult(
                 WriteOutcome.SERVER_ERROR, message=message or f"write answered {response.status}"
             )
@@ -905,6 +904,9 @@ class TagHistorianClient:
         # 400 and 413 mean this integration built a body the endpoint cannot
         # take. That is a bug here, not a user problem, so it is logged loudly
         # and the batch is dropped rather than retried into a loop.
+        LOGGER.error(
+            "Tag Historian refused a write with %s: %s", response.status, message
+        )
         return WriteResult(WriteOutcome.REJECTED, message=message)
 
     @classmethod

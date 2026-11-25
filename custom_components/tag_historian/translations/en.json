@@ -190,6 +190,10 @@
       "title": "Tag Historian has not been accepting data",
       "description": "Writes have been failing for {minutes} minutes - Tag Historian has been answering that it cannot take them just now: it is too busy, or it cannot check this integration's key for the moment. Nothing about your account or the key has changed. Readings are being held, through a restart too, and will be sent when it accepts them again; if this goes on, the oldest are let go and read back from Home Assistant's recorder afterwards. Nothing needs doing at your end."
     },
+    "not_reached": {
+      "title": "Tag Historian has not been reached yet",
+      "description": "Nothing has answered at {host} in the {minutes} minutes since this integration started. Readings are being held, through a restart too, and will be sent once it can be reached; if this goes on, the oldest are let go and read back from Home Assistant's recorder afterwards, for the entities it records. Check that Home Assistant has an internet connection, that nothing blocks it, and that the address is right."
+    },
     "entity_renamed": {
       "title": "{old} was renamed to {new} in Home Assistant",
       "fix_flow": {

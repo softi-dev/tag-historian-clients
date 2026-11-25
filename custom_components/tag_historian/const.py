@@ -256,6 +256,7 @@ ISSUE_TAG_QUOTA: Final = "tag_quota_exceeded"
 ISSUE_DAILY_QUOTA: Final = "daily_quota_exceeded"
 ISSUE_WRITE_FORBIDDEN: Final = "write_forbidden"
 ISSUE_SERVICE_UNAVAILABLE: Final = "service_unavailable"
+ISSUE_NOT_REACHED: Final = "not_reached"
 ISSUE_ENTITY_RENAMED: Final = "entity_renamed"
 ISSUE_BRING_YEARS: Final = "bring_years"
 # "Send power sensors more often" is ticked, and no longer fits the plan's daily

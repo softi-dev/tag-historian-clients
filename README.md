@@ -569,7 +569,10 @@ is deliberately *not* in the total — those are the readings your minimum
 interval skipped, which is what you asked it to do. Two more attributes are not
 losses but what happened next: `backfilled_from_recorder`, readings read back
 from the recorder to fill a gap, and `restored_after_restart`, readings saved
-at the last stop and sent after it.
+at the last stop and sent after it. `gaps_not_read_back` counts gaps, of one
+entity each, that the recorder could not be read for in ten tries, half a
+minute apart; how many readings were in them nobody knows, so it is not part of
+the total. Live readings wait behind those tries.
 
 The counters keep their values across a reload, so fixing a Repairs card does
 not erase the evidence of what it was telling you about. The ones that make up
@@ -586,8 +589,8 @@ Everything below that needs your attention shows up in **Settings → Repairs**.
 | Your API key was revoked | Asks for a new one through Home Assistant's normal re-authentication card, and stops retrying the dead key meanwhile |
 | Some readings exceed your plan's series count | Names the series, counts the readings that were lost, keeps sending everything else, and offers to reopen the picker so you can deselect |
 | Today's reading allowance is spent | Holds the newest readings — through a restart too — and waits exactly as long as the API asks; it does not hammer a closed door. What no longer fits in the buffer meanwhile is over the allowance: counted, not sent later |
-| Tag Historian is busy, cannot check your key just now, or cannot be reached | Holds the readings and tries again. When Tag Historian answered (busy, or unable to take them just now: `429` or `503`), it waits as long as the API asks (half a minute when the answer names no wait, as a gateway's `503` may not), and raises a card only if that goes on for half an hour; that card never mentions your plan, because this is not about your plan. When nothing answers at all (your network or the host is down), or a gateway in front of Tag Historian answers `502` or `504` in its place, there is no wait to honour: it tries again half a minute after each failed attempt and raises no card; the `last_error` attribute on the **readings dropped** sensor says why. A key Tag Historian could not check (it answers `503` with reason `sign_in_unavailable`) is not a key it refused (`401`), and the integration never asks you for a new one for it |
-| Tag Historian answers with an error of its own (`500`, or anything else that says nothing about the readings) | Holds the readings and tries again half a minute later, in smaller and smaller batches. A single reading that gets an error every time while another is taken is let go of and counted as `dropped_over_quota`. While nothing but errors comes back, whatever is sent, it goes on trying, and lets go of a batch, counted, only after a day of that. A card is raised when it has gone on for half an hour |
+| Tag Historian is busy, cannot check your key just now, or cannot be reached | Holds the readings and tries again. When Tag Historian answered (busy, or unable to take them just now: `429` or `503`), it waits as long as the API asks (half a minute when the answer names no wait, as a gateway's `503` may not), and raises a card only if that goes on for half an hour; that card never mentions your plan, because this is not about your plan. When nothing answers at all (your network or the host is down), or a gateway in front of Tag Historian answers `502` or `504` in its place, there is no wait to honour: it tries again half a minute after each failed attempt and raises no card (but for a start at which nothing answers for half an hour); the `last_error` attribute on the **readings dropped** sensor says why. A key Tag Historian could not check (it answers `503` with reason `sign_in_unavailable`) is not a key it refused (`401`), and the integration never asks you for a new one for it |
+| Tag Historian answers with an error of its own (`500`, or anything else that says nothing about the readings) | Holds the readings and tries again half a minute later, in smaller and smaller batches - asking first whether the batch was stored after all. A single reading that gets an error every time while another is taken is let go of and counted as `dropped_over_quota`. While nothing but errors comes back, whatever is sent, it goes on trying, and lets go of a batch, counted, only after a day of that. A card is raised when it has gone on for half an hour |
 | Your account cannot write yet | Shows Tag Historian's own explanation, word for word |
 | **Send power sensors more often** no longer fits your plan's daily reading allowance | Sends every entity at the minimum interval, power sensors too, and says why on a card with the numbers; goes back to every 2 seconds by itself when the sum fits again - see [Power sensors more often](#power-sensors-more-often) |
 | An entity you send was renamed | Follows it and keeps its readings arriving in its history; renames the series in Tag Historian if you switched that on, or asks you on a card - see [When you rename an entity](#when-you-rename-an-entity) |
@@ -618,20 +621,30 @@ not in response to it. An integration that only handled the reload would give
 you the full five seconds on the rarer event and nothing at all on the one that
 happens every time you restart.
 
+No request is started later than six seconds into a stop, and the buffer is
+saved before the last requests as well as after them, so that a stop that takes
+too long and is cut off - or killed - loses nothing either.
+
 A request that does *not* finish in that window, and any other whose answer
 never came — a timeout, a connection that broke off — may or may not have been
 stored, and the live write endpoint does not deduplicate. So its readings are
 kept, through a restart too, and before anything more is sent Tag Historian is
 asked how new its newest reading of each series is: what it has is not sent
-again, and what it does not have is. If it cannot say — a proxy that does not
-let the question through, for one — the readings are not sent again, and counted
-as `dropped_mid_write`. That counter can *overstate* the loss, because some of
+again, and what it does not have is. (That it does not have them is believed
+only two minutes after the request, and the readings wait until then: a gateway
+may still be about to hand the request over.) An error in answer to that
+question is waited out like any other, for a day. If it cannot say — a `403`
+for an hour, as from a proxy that does not let the question through, or a list
+that gives no usable time — the readings are not sent again, and counted as
+`dropped_mid_write`. That counter can *overstate* the loss, because some of
 them may have landed. That is the direction chosen on purpose: an overstated
 loss gets asked about, an understated one is invisible.
 
 When Home Assistant is up before your connection is, the integration listens
 and holds its readings from the start, asks once a minute whether Tag Historian
-can be reached, and sends them once it can.
+can be reached, and sends them once it can. If that takes more than half an
+hour, a card says so: a mistyped address looks no different. An error in answer
+to that question is an answer, and the readings are sent.
 
 The buffer is also bounded — during a long outage the oldest go first and
 `dropped_queue_overflow` moves. They are not gone: the recorder still has
@@ -661,7 +674,12 @@ It does not re-send a reading Tag Historian may already have. If Home Assistant
 did not shut down cleanly — a crash, a power cut — Tag Historian is asked what
 it has in the same way, and everything newer is read back from the recorder.
 (The recorder loses its own last few seconds to a power cut, and the readings
-of an entity you have excluded from it cannot be read back.) If Tag Historian
+of an entity you have excluded from it cannot be read back. With a minimum
+interval of 0, an entity with several readings in the very second of Tag
+Historian's newest may have only one of them there; the others are counted as
+`dropped_mid_write`. And a request that was on its way when Home Assistant
+crashed, and is held up by a gateway until after the question, is stored
+twice.) If Tag Historian
 cannot say, what may have been sent since the last save — at most about six
 minutes before the crash, and what it was still catching up on — is counted as
 `dropped_mid_write`, and the rest is read back.

@@ -211,6 +211,7 @@ class DeliverySensor(SensorEntity):
             # that a counter that moved has the story of what happened next
             # beside it.
             "backfilled_from_recorder": stats.backfilled,
+            "gaps_not_read_back": stats.gaps_not_read,
             "restored_after_restart": stats.restored,
         }
 

@@ -9,6 +9,7 @@ repair issues quote back at them.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import timedelta
 
 from homeassistant.config_entries import ConfigEntry
@@ -58,6 +59,9 @@ class QuotaCoordinator(DataUpdateCoordinator[QuotaSnapshot]):
             always_update=False,
         )
         self._client = client
+        # Called with every failure to read it: a coordinator's listeners hear
+        # of the first of several only.
+        self.on_failure: Callable[[TagHistorianError], None] | None = None
 
     async def _async_update_data(self) -> QuotaSnapshot:
         try:
@@ -69,6 +73,8 @@ class QuotaCoordinator(DataUpdateCoordinator[QuotaSnapshot]):
                 "Tag Historian rejected the API key"
             ) from err
         except TagHistorianError as err:
+            if self.on_failure is not None:
+                self.on_failure(err)
             raise UpdateFailed(f"Could not read quota: {err}") from err
         self.update_interval = timedelta(minutes=QUOTA_UPDATE_INTERVAL_MINUTES)
         return quota

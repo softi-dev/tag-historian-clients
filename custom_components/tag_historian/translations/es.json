@@ -190,6 +190,10 @@
       "title": "Tag Historian no ha estado aceptando datos",
       "description": "Las escrituras llevan {minutes} minutos fallando: Tag Historian responde que no puede aceptarlas ahora mismo, porque está demasiado ocupado o porque de momento no puede comprobar la clave de esta integración. No ha cambiado nada en tu cuenta ni en la clave. Las mediciones se retienen, también durante un reinicio, y se enviarán cuando las acepte de nuevo; si esto se alarga, las más antiguas se sueltan y se vuelven a leer después del recorder de Home Assistant. No tienes que hacer nada."
     },
+    "not_reached": {
+      "title": "Todavía no se ha podido contactar con Tag Historian",
+      "description": "Nada ha respondido en {host} en los {minutes} minutos desde que se inició esta integración. Las mediciones se retienen, también durante un reinicio, y se enviarán en cuanto haya conexión; si esto se alarga, las más antiguas se sueltan y se vuelven a leer después del recorder de Home Assistant, en el caso de las entidades que registra. Comprueba que Home Assistant tiene conexión a internet, que nada la bloquea y que la dirección es correcta."
+    },
     "entity_renamed": {
       "title": "{old} se renombró a {new} en Home Assistant",
       "fix_flow": {

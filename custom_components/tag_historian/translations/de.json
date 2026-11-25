@@ -190,6 +190,10 @@
       "title": "Tag Historian hat keine Daten angenommen",
       "description": "Das Schreiben schlägt seit {minutes} Minuten fehl – Tag Historian antwortet, dass es die Daten gerade nicht annehmen kann: Es ist zu ausgelastet, oder es kann den Schlüssel dieser Integration im Moment nicht prüfen. An Ihrem Konto oder dem Schlüssel hat sich nichts geändert. Die Messwerte werden zurückgehalten, auch über einen Neustart hinweg, und gesendet, sobald sie wieder angenommen werden; hält das an, werden die ältesten losgelassen und danach aus dem Recorder von Home Assistant zurückgelesen. Sie müssen nichts tun."
     },
+    "not_reached": {
+      "title": "Tag Historian ist noch nicht erreicht worden",
+      "description": "Unter {host} hat in den {minutes} Minuten seit dem Start dieser Integration nichts geantwortet. Die Messwerte werden zurückgehalten, auch über einen Neustart hinweg, und gesendet, sobald die Verbindung steht; hält das an, werden die ältesten losgelassen und danach aus dem Recorder von Home Assistant zurückgelesen, für die Entitäten, die er aufzeichnet. Prüfen Sie, ob Home Assistant eine Internetverbindung hat, ob nichts sie blockiert und ob die Adresse stimmt."
+    },
     "entity_renamed": {
       "title": "{old} wurde in Home Assistant in {new} umbenannt",
       "fix_flow": {

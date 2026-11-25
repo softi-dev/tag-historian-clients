@@ -190,6 +190,10 @@
       "title": "Tag Historian har inte tagit emot data",
       "description": "Skrivningarna har misslyckats i {minutes} minuter – Tag Historian har svarat att det inte kan ta emot dem just nu: det är för upptaget, eller så kan det för tillfället inte kontrollera integrationens nyckel. Ingenting har ändrats med ditt konto eller nyckeln. Mätvärdena hålls kvar, även över en omstart, och skickas när de tas emot igen; om det drar ut på tiden släpps de äldsta och läses tillbaka från Home Assistants recorder efteråt. Du behöver inte göra något."
     },
+    "not_reached": {
+      "title": "Tag Historian har inte gått att nå än",
+      "description": "Ingenting har svarat på {host} under de {minutes} minuter som gått sedan integrationen startade. Mätvärdena hålls kvar, även över en omstart, och skickas när det går att nå; om det drar ut på tiden släpps de äldsta och läses tillbaka från Home Assistants recorder efteråt, för de entiteter den sparar. Kontrollera att Home Assistant har internetanslutning, att inget blockerar den och att adressen stämmer."
+    },
     "entity_renamed": {
       "title": "{old} döptes om till {new} i Home Assistant",
       "fix_flow": {

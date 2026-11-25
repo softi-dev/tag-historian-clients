@@ -19,11 +19,13 @@ from unittest.mock import patch
 import pytest
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import async_fire_time_changed
 
 from custom_components.tag_historian import forwarder as forwarder_module
 from custom_components.tag_historian.api import (
+    TagHistorianAnsweredError,
     TagHistorianConnectionError,
     TagHistorianPermissionError,
     TagHistorianUnansweredError,
@@ -390,7 +392,7 @@ async def test_when_tag_historian_cannot_say_a_bounded_stretch_is_counted_not_se
     freezer.tick(timedelta(seconds=5))
     server.cannot_tell = TagHistorianPermissionError("/api/tags")
     again = await started(server)
-    await drain(hass, freezer)
+    await drain(hass, freezer, 130)  # an hour of it
     server.everything_once(10, 13)
     assert again.stats.dropped_inflight == 1, "11 may be there or not: counted, not sent again"
 
@@ -550,7 +552,7 @@ async def test_an_unknown_batch_tag_historian_cannot_say_about_is_counted_and_th
     server.before = time_out
     for value in (1, 2, 3):
         await put(hass, recorder, freezer, POWER, value, 0.05)
-    await drain(hass, freezer, 5)
+    await drain(hass, freezer, 130)
     assert forwarder.stats.dropped_inflight == 3
     await put(hass, recorder, freezer, POWER, 4)
     await drain(hass, freezer, 3)
@@ -767,6 +769,598 @@ async def test_what_the_recorder_has_not_written_yet_is_waited_for_but_not_for_e
 
 
 # --------------------------------------------------------------------------
+# The question itself gets errors
+# --------------------------------------------------------------------------
+
+BROKEN = TagHistorianAnsweredError("/api/tags answered 500")
+
+
+async def _error(_body):
+    return ERROR
+
+
+async def test_hours_of_errors_on_everything_drop_nothing(
+    hass: HomeAssistant, started, recorder, freezer
+) -> None:
+    server = Server()
+    forwarder = await started(server)
+    server.before, server.cannot_tell = _error, BROKEN
+    for value in range(1, 21):
+        await put(hass, recorder, freezer, POWER, value)
+    await drain(hass, freezer, 700)  # six hours
+    assert forwarder.stats.dropped_inflight == forwarder.stats.dropped_quota == 0
+    issues = {issue_id for _, issue_id in ir.async_get(hass).issues}
+    assert "service_unavailable_test_entry" in issues
+    server.before = server.cannot_tell = None
+    await drain(hass, freezer, 30)
+    server.everything_once(1, 20)
+
+
+async def test_killed_and_started_into_hours_of_errors_drops_nothing(
+    hass: HomeAssistant, started, recorder, freezer, hass_storage
+) -> None:
+    server = Server()
+    forwarder = await started(server)
+    for value in (10, 11):
+        await put(hass, recorder, freezer, POWER, value)
+        await later(hass)
+    kill(forwarder, hass_storage)
+    for value in (12, 13):
+        missed(recorder, freezer, POWER, value)
+    server.before, server.cannot_tell = _error, BROKEN
+    again = await started(server)
+    await put(hass, recorder, freezer, POWER, 14)
+    await drain(hass, freezer, 700)
+    assert again.stats.dropped_inflight == 0
+    server.before = server.cannot_tell = None
+    await drain(hass, freezer, 20)
+    server.everything_once(10, 14)
+
+
+async def test_a_day_of_errors_on_the_question_alone_is_the_end_of_it(
+    hass: HomeAssistant, started, recorder, freezer, monkeypatch
+) -> None:
+    monkeypatch.setattr(forwarder_module, "SERVER_ERROR_GIVE_UP_SECONDS", 600)
+    server = Server()
+    forwarder = await started(server)
+
+    async def time_out(_body):
+        server.before = None
+        raise TagHistorianUnansweredError("no answer within 10 seconds")
+
+    server.before, server.cannot_tell = time_out, BROKEN
+    for value in (1, 2):
+        await put(hass, recorder, freezer, POWER, value, 0.05)
+    await drain(hass, freezer, 15)
+    # A day without a connection is not a day of errors.
+    server.down = True
+    await drain(hass, freezer, 100)
+    assert forwarder.stats.dropped_inflight == 0
+    server.down = False
+    await drain(hass, freezer, 15)
+    assert forwarder.stats.dropped_inflight == 2
+    await put(hass, recorder, freezer, POWER, 3)
+    await drain(hass, freezer, 3)
+    server.everything_once(3, 3)
+
+
+async def test_a_single_403_on_the_question_is_not_the_end_of_it(
+    hass: HomeAssistant, started, recorder, freezer
+) -> None:
+    server = Server()
+    forwarder = await started(server)
+
+    async def time_out(_body):
+        server.before = None
+        raise TagHistorianUnansweredError("no answer within 10 seconds")
+
+    server.before = time_out
+    server.cannot_tell = TagHistorianPermissionError("/api/tags")
+    for value in range(1, 6):
+        await put(hass, recorder, freezer, POWER, value)
+    await drain(hass, freezer, 2)
+    server.cannot_tell = None
+    await drain(hass, freezer, 10)
+    server.everything_once(1, 5)
+    assert forwarder.stats.dropped_inflight == 0
+
+
+async def test_a_list_that_cannot_be_read_is_given_up_on_after_a_few_tries(
+    hass: HomeAssistant, started, recorder, freezer
+) -> None:
+    server = Server()
+    forwarder = await started(server)
+
+    async def time_out(_body):
+        server.before = None
+        raise TagHistorianUnansweredError("no answer within 10 seconds")
+
+    server.before, server.cannot_tell = time_out, KeyError("tags")
+    for value in (1, 2):
+        await put(hass, recorder, freezer, POWER, value, 0.05)
+    await drain(hass, freezer, 4)
+    assert forwarder.stats.dropped_inflight == 0
+    await drain(hass, freezer, 4)
+    assert forwarder.stats.dropped_inflight == 2
+
+
+async def test_killed_what_the_new_run_listened_to_is_sent_whatever_cannot_be_said(
+    hass: HomeAssistant, started, recorder, freezer, hass_storage
+) -> None:
+    server = Server()
+    forwarder = await started(server)
+    await put(hass, recorder, freezer, POWER, 10)
+    await later(hass)
+    kill(forwarder, hass_storage)
+    server.down = True
+    freezer.tick(timedelta(seconds=15))
+    again = await started(server)
+    for value in (11, 12, 13):
+        await put(hass, recorder, freezer, POWER, value)
+    server.down = False
+    server.cannot_tell = TagHistorianPermissionError("/api/tags")
+    await drain(hass, freezer, 130)
+    server.everything_once(10, 13)
+    # The one before the crash is there, but nobody can say so.
+    assert again.stats.dropped_inflight <= 1
+
+
+async def test_killed_a_reading_both_held_and_recorded_is_counted_once(
+    hass: HomeAssistant, started, recorder, freezer, hass_storage
+) -> None:
+    stamp = T0 + timedelta(seconds=20)
+    recorder.record(POWER, "1", stamp)
+    recorder.record(POWER, "2", stamp + timedelta(seconds=20))
+    _seed(
+        hass_storage,
+        clean=False,
+        sending_ok=True,
+        acked={POWER: T0.timestamp()},
+        queue=[],
+        held=[[POWER, stamp.timestamp(), "W,domain=sensor,entity_id=house_power value=1.0 5"]],
+        save_every=300,
+        saved_at=T0.isoformat(),
+    )
+    freezer.tick(timedelta(seconds=90))
+    server = Server()
+    server.cannot_tell = TagHistorianPermissionError("/api/tags")
+    again = await started(server)
+    await drain(hass, freezer, 130)
+    assert server.values() == []
+    assert again.stats.dropped_inflight == 2
+    await again.async_shutdown()
+    assert _saved(hass_storage)["doubt_all"] is False
+    assert _saved(hass_storage)["doubt_until"] == 0
+
+
+async def test_without_a_recorder_the_doubt_does_not_stay_in_the_file(
+    hass: HomeAssistant, started, freezer, hass_storage
+) -> None:
+    _seed(
+        hass_storage,
+        clean=False,
+        sending_ok=True,
+        acked={POWER: T0.timestamp(), "sensor.not_selected": T0.timestamp()},
+        queue=[],
+    )
+    freezer.tick(timedelta(seconds=90))
+    server = Server()
+    server.cannot_tell = KeyError("tags")
+    again = await started(server)
+    await drain(hass, freezer, 10)
+    await again.async_shutdown()
+    assert _saved(hass_storage)["doubt_all"] is False
+
+
+async def test_killed_a_held_reading_of_an_entity_not_selected_is_asked_about_by_its_own_tag(
+    hass: HomeAssistant, started, recorder, freezer, hass_storage
+) -> None:
+    stamp = int(T0.timestamp()) + 5
+    line = f"W,domain=sensor,entity_id=old_power value=7.0 {stamp}"
+    _seed(
+        hass_storage,
+        clean=False,
+        sending_ok=True,
+        acked={},
+        queue=[],
+        held=[["sensor.new_power", float(stamp), line, "sensor.old_power"]],
+    )
+    freezer.tick(timedelta(seconds=90))
+    server = Server()
+    server.stored = [line]
+    await started(server)
+    await drain(hass, freezer, 5)
+    assert server.stored == [line]
+
+
+async def test_killed_readings_of_the_same_second_as_the_newest_are_counted(
+    hass: HomeAssistant, started, recorder, freezer, hass_storage
+) -> None:
+    second = T0 + timedelta(seconds=30)
+    server = Server()
+    server.stored = [f"W,domain=sensor,entity_id=house_power value=1.0 {int(second.timestamp())}"]
+    for n in range(3):
+        recorder.record(POWER, str(n + 1), second + timedelta(seconds=n * 0.3))
+    recorder.record(POWER, "4", second + timedelta(seconds=5))
+    _seed(hass_storage, clean=False, sending_ok=True, acked={POWER: T0.timestamp()}, queue=[])
+    freezer.tick(timedelta(seconds=90))
+    again = await started(server)
+    await drain(hass, freezer, 5)
+    assert server.values() == [1.0, 4.0]
+    assert again.stats.dropped_inflight == 2, "two of three may be there or not"
+
+
+async def test_a_write_that_lands_after_the_question_is_not_sent_again(
+    hass: HomeAssistant, started, recorder, freezer
+) -> None:
+    server = Server()
+    await started(server)
+    late: list[str] = []
+
+    async def time_out(body):
+        server.before = None
+        late.extend(body.splitlines())
+        raise TagHistorianUnansweredError("no answer within 10 seconds")
+
+    server.before = time_out
+    for value in (1, 2, 3):
+        await put(hass, recorder, freezer, POWER, value, 0.05)
+    await drain(hass, freezer, 2)
+    assert server.asked == 1
+    assert server.stored == []
+    server.stored.extend(late)
+    await drain(hass, freezer, 10)
+    server.everything_once(1, 3)
+
+
+# --------------------------------------------------------------------------
+# The recorder
+# --------------------------------------------------------------------------
+
+
+def _locked(recorder, monkeypatch, times: int, entity: str = POWER) -> None:
+    left = times
+
+    async def read(hass, entity_id, start, end):
+        nonlocal left
+        if entity_id == entity and left > 0:
+            left -= 1
+            raise RuntimeError("database is locked")
+        return await recorder.read(hass, entity_id, start, end)
+
+    monkeypatch.setattr("custom_components.tag_historian.history.async_recorded_states", read)
+
+
+async def test_a_recorder_that_fails_is_asked_again_before_anything_newer_goes(
+    hass: HomeAssistant, started, recorder, freezer, monkeypatch
+) -> None:
+    server = Server()
+    entities = [POWER, DOOR]
+    forwarder = await started(server, entities=entities)
+    await put(hass, recorder, freezer, POWER, 10)
+    await put(hass, recorder, freezer, DOOR, "off", 1)
+    await later(hass)
+    await forwarder.async_shutdown()
+    for value in (11, 12, 13):
+        missed(recorder, freezer, POWER, value)
+    recorder.record(DOOR, "on", dt_util.utcnow())
+    freezer.tick(timedelta(seconds=20))
+    _locked(recorder, monkeypatch, 2)
+    again = await started(server, entities=entities)
+    await put(hass, recorder, freezer, POWER, 14)
+    await later(hass, 1)
+    assert server.values("back_door") == [0.0, 1.0], "the other entity is not held up"
+    assert server.values() == [10.0]
+    await drain(hass, freezer, 10)
+    server.everything_once(10, 14)
+    assert again.stats.gaps_not_read == 0
+
+
+async def test_a_recorder_that_never_answers_is_let_go_of_counted_and_kept(
+    hass: HomeAssistant, started, recorder, freezer, monkeypatch
+) -> None:
+    server = Server()
+    forwarder = await started(server)
+    await put(hass, recorder, freezer, POWER, 10)
+    await later(hass)
+    await forwarder.async_shutdown()
+    missed(recorder, freezer, POWER, 11)
+    freezer.tick(timedelta(seconds=20))
+    _locked(recorder, monkeypatch, 10_000)
+    again = await started(server)
+    await put(hass, recorder, freezer, POWER, 12)
+    await drain(hass, freezer, 20)
+    assert server.values() == [10.0, 12.0]
+    assert again.stats.gaps_not_read == 1
+    await again.async_shutdown()
+    third = await started(server)
+    assert third.stats.gaps_not_read == 1
+
+
+async def test_a_stop_while_the_recorder_is_retried_keeps_the_gap(
+    hass: HomeAssistant, started, recorder, freezer, monkeypatch
+) -> None:
+    server = Server()
+    forwarder = await started(server)
+    await put(hass, recorder, freezer, POWER, 10)
+    await later(hass)
+    await forwarder.async_shutdown()
+    missed(recorder, freezer, POWER, 11)
+    freezer.tick(timedelta(seconds=20))
+    _locked(recorder, monkeypatch, 1)
+    again = await started(server)
+    await put(hass, recorder, freezer, POWER, 12)
+    await later(hass, 1)
+    await again.async_shutdown()
+    await started(server)
+    await drain(hass, freezer, 5)
+    server.everything_once(10, 12)
+
+
+async def test_over_the_allowance_the_stretch_between_two_runs_is_still_read_back(
+    hass: HomeAssistant, started, recorder, freezer, monkeypatch
+) -> None:
+    monkeypatch.setattr(forwarder_module, "MAX_QUEUE_LENGTH", 5)
+    server = Server()
+    spent = True
+
+    async def allowance(_body):
+        return WriteResult(WriteOutcome.DAILY_QUOTA, retry_after=3600) if spent else None
+
+    forwarder = await started(server)
+    await put(hass, recorder, freezer, POWER, 10)
+    await later(hass)
+    server.before = allowance
+    for value in (11, 12):
+        await put(hass, recorder, freezer, POWER, value)
+    await later(hass)
+    await forwarder.async_shutdown()
+    for value in (13, 14, 15):
+        missed(recorder, freezer, POWER, value)
+    again = await started(server)
+    await later(hass)
+    for value in range(16, 26):
+        await put(hass, recorder, freezer, POWER, value)
+    await later(hass)
+    spent = False
+    freezer.tick(timedelta(hours=1))
+    await drain(hass, freezer, 20)
+    got = server.values()
+    assert {13.0, 14.0, 15.0} <= set(got), got
+    assert sorted(set(got)) == sorted(got), "nothing twice"
+    lost = {float(v) for v in range(10, 26)} - set(got)
+    assert len(lost) <= again.stats.dropped_overflow
+
+
+# --------------------------------------------------------------------------
+# The stop itself
+# --------------------------------------------------------------------------
+
+
+async def test_an_answer_that_comes_while_the_stop_saves_changes_nothing(
+    hass: HomeAssistant, started, recorder, freezer, monkeypatch, hass_storage
+) -> None:
+    monkeypatch.setattr(forwarder_module, "INFLIGHT_WAIT_SECONDS", -1)
+    server = Server()
+    forwarder = await started(server)
+    gate = asyncio.Event()
+    ask = server.async_get_newest_readings
+
+    async def slowly():
+        await gate.wait()
+        return await ask()
+
+    server.async_get_newest_readings = slowly
+
+    async def time_out(_body):
+        server.before = None
+        raise TagHistorianUnansweredError("no answer within 10 seconds")
+
+    server.before = time_out
+    await put(hass, recorder, freezer, POWER, 11)
+    await later(hass)
+    for value in (12, 13):
+        await put(hass, recorder, freezer, POWER, value)
+    freezer.tick(timedelta(seconds=200))
+    await later(hass, 0)
+    assert forwarder._flushing
+
+    save = forwarder._store.async_save
+
+    async def slow_save(data):
+        gate.set()
+        await spin(200)
+        await save(data)
+
+    forwarder._store.async_save = slow_save
+    await forwarder.async_shutdown()
+    await spin(200)
+    assert server.values() == [], "nothing is sent that has just been saved"
+
+    server.async_get_newest_readings = ask
+    again = await started(server)
+    await drain(hass, freezer, 10)
+    server.everything_once(11, 13)
+    assert again.stats.dropped_inflight == 0
+
+
+async def test_a_stop_cancelled_mid_write_still_saves(
+    hass: HomeAssistant, started, freezer, hass_storage
+) -> None:
+    server = Server()
+    forwarder = await started(server)
+
+    async def hang(_body):
+        await asyncio.Event().wait()
+
+    server.before = hang
+    for value in (1, 2):  # no recorder: the buffer is the only copy
+        freezer.tick(timedelta(seconds=20))
+        hass.states.async_set(POWER, str(value))
+    await spin()
+    stop = hass.async_create_task(forwarder.async_shutdown())
+    await spin(100)
+    saved = _saved(hass_storage)
+    assert saved["clean"], "and is on disk already, should it be killed"
+    assert saved["doubt_all"]
+    assert len(saved["queue"]) == 2
+    stop.cancel()
+    await asyncio.wait({stop})
+    saved = _saved(hass_storage)
+    assert saved["clean"]
+    assert len(saved["queue"]) == 2
+    assert saved["doubt"]
+
+    server.before = None
+    await started(server)
+    await drain(hass, freezer, 10)
+    server.everything_once(1, 2)
+
+
+@pytest.mark.parametrize("landed", [0, 1, 2])
+async def test_killed_during_the_last_flush_nothing_is_lost_or_doubled(
+    hass: HomeAssistant, started, freezer, hass_storage, monkeypatch, landed
+) -> None:
+    monkeypatch.setattr(forwarder_module, "MAX_POINTS_PER_REQUEST", 1)
+    server = Server()
+    forwarder = await started(server)
+
+    async def hang(_body):
+        if len(server.stored) >= landed:
+            await asyncio.Event().wait()
+
+    server.before = hang
+    for value in (1, 2, 3):
+        freezer.tick(timedelta(seconds=20))
+        hass.states.async_set(POWER, str(value))
+    await spin()
+    stop = hass.async_create_task(forwarder.async_shutdown())
+    await spin(200)
+    assert len(server.stored) == landed
+    disk = copy.deepcopy(hass_storage[KEY])
+    stop.cancel()
+    await asyncio.wait({stop})
+    hass_storage[KEY] = disk
+
+    server.before = None
+    await started(server)
+    await drain(hass, freezer, 10)
+    server.everything_once(1, 3)
+
+
+async def test_a_stop_starts_no_request_past_its_budget(
+    hass: HomeAssistant, started, freezer, monkeypatch, hass_storage
+) -> None:
+    monkeypatch.setattr(forwarder_module, "STOP_BUDGET_SECONDS", 0)
+    server = Server()
+    forwarder = await started(server)
+    for value in (1, 2, 3):
+        freezer.tick(timedelta(seconds=0.1))  # not yet time for a flush
+        hass.states.async_set(POWER, str(value))
+    await spin()
+    await forwarder.async_shutdown()
+    assert server.requests == 0
+    assert len(_saved(hass_storage)["queue"]) == 3
+
+
+async def test_a_second_stop_does_not_empty_the_file(
+    hass: HomeAssistant, started, freezer, hass_storage
+) -> None:
+    server = Server()
+    server.down = True
+    forwarder = await started(server)
+    hass.states.async_set(POWER, "1")
+    await spin()
+    await forwarder.async_shutdown()
+    await forwarder.async_shutdown()
+    assert len(_saved(hass_storage)["queue"]) == 1
+
+
+# --------------------------------------------------------------------------
+# Log, disk and repairs
+# --------------------------------------------------------------------------
+
+
+async def test_a_long_error_is_in_the_log_once_an_hour(
+    hass: HomeAssistant, started, recorder, freezer, caplog
+) -> None:
+    server = Server()
+    await started(server)
+    server.before = _error
+    await put(hass, recorder, freezer, POWER, 1)
+    await drain(hass, freezer, 230)  # two hours
+    assert caplog.text.count("with an error of its own") in (2, 3)
+
+
+async def test_a_connection_that_comes_and_goes_does_not_write_the_file_every_time(
+    hass: HomeAssistant, started, recorder, freezer
+) -> None:
+    server = Server()
+    forwarder = await started(server)
+    saves = 0
+    save = forwarder._store.async_save
+
+    async def counting(data):
+        nonlocal saves
+        saves += 1
+        await save(data)
+
+    forwarder._store.async_save = counting
+    for value in range(1, 41):  # forty minutes
+        server.down = value % 2 == 0
+        await put(hass, recorder, freezer, POWER, value, 29)
+        await drain(hass, freezer, 1)
+    assert saves <= 20
+
+
+@pytest.mark.parametrize("answers", [False, True])
+async def test_a_start_that_never_gets_the_quota(
+    hass: HomeAssistant, recorder, freezer, entry, monkeypatch, answers
+) -> None:
+    """Not reached at all is said on a card; an error from the quota alone holds nothing up."""
+    without_statistics(monkeypatch)
+    hass.config_entries.async_update_entry(
+        entry,
+        options={CONF_ENTITIES: [POWER], CONF_MIN_INTERVAL: 0, "import_on_setup": False},
+    )
+    server = Server()
+    client = make_client()
+    client.async_write = server.async_write
+    client.async_get_newest_readings = server.async_get_newest_readings
+    client.async_get_quota.side_effect = BROKEN if answers else DOWN
+    server.down = not answers
+    card = ("tag_historian", "not_reached_test_entry")
+
+    with patch("custom_components.tag_historian.TagHistorianClient", return_value=client):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        assert entry.state is ConfigEntryState.LOADED
+        await put(hass, recorder, freezer, POWER, 1)
+        await drain(hass, freezer, 20)
+        assert card not in ir.async_get(hass).issues
+        await drain(hass, freezer, 60)
+        if answers:
+            assert server.values() == [1.0]
+            assert card not in ir.async_get(hass).issues
+        else:
+            assert server.requests == 0
+            assert card in ir.async_get(hass).issues
+            # It answers now, if not with the numbers asked for.
+            server.down = False
+            client.async_get_quota.side_effect = BROKEN
+            await drain(hass, freezer, 5)
+            assert server.values() == [1.0]
+            assert card not in ir.async_get(hass).issues
+        client.async_get_quota.side_effect = DOWN
+        await hass.config_entries.async_reload(entry.entry_id)
+        await drain(hass, freezer, 80)
+        assert card in ir.async_get(hass).issues
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+        assert card not in ir.async_get(hass).issues
+
+
+# --------------------------------------------------------------------------
 # All of it at once
 # --------------------------------------------------------------------------
 
@@ -782,6 +1376,14 @@ async def test_any_order_of_outages_stops_and_kills_gives_every_reading_once(
     monkeypatch.setattr(forwarder_module, "INFLIGHT_WAIT_SECONDS", -1)
     dice = random.Random(seed)
     server = Server()
+    locked = True
+
+    async def read(hass, entity_id, start, end):
+        if locked and dice.random() < 0.15:
+            raise RuntimeError("database is locked")
+        return await recorder.read(hass, entity_id, start, end)
+
+    monkeypatch.setattr("custom_components.tag_historian.history.async_recorded_states", read)
     gates: list[asyncio.Event] = []
 
     async def trouble(body):
@@ -809,7 +1411,7 @@ async def test_any_order_of_outages_stops_and_kills_gives_every_reading_once(
     entities = [POWER, DOOR]
     forwarder = await started(server, entities=entities)
     for _ in range(60):
-        step = dice.choice(["put"] * 5 + ["time"] * 4 + ["down", "up", "stop", "kill", "answer"])
+        step = dice.choice(["put"] * 5 + ["time"] * 4 + ["down", "up", "stop", "kill", "answer", "ask"])
         if step == "put":
             value += 1
             if dice.random() < 0.3:
@@ -820,12 +1422,18 @@ async def test_any_order_of_outages_stops_and_kills_gives_every_reading_once(
             await drain(hass, freezer, 1)
         elif step in ("down", "up"):
             server.down = step == "down"
+        elif step == "ask":
+            server.cannot_tell = None if server.cannot_tell else BROKEN
         elif step == "answer" and gates:
             gates.pop().set()
             await spin()
         elif step in ("stop", "kill"):
             if step == "stop":
-                await forwarder.async_shutdown()
+                stop = hass.async_create_task(forwarder.async_shutdown())
+                if dice.random() < 0.5:
+                    await spin(dice.randrange(40))
+                    stop.cancel()  # Home Assistant runs out of patience
+                await asyncio.wait({stop})
             else:
                 kill(forwarder, hass_storage)
             for _ in range(dice.randrange(3)):
@@ -837,9 +1445,11 @@ async def test_any_order_of_outages_stops_and_kills_gives_every_reading_once(
         assert len(forwarder._queue) <= 8
     for gate in gates:
         gate.set()
-    server.before = None
+    server.before = server.cannot_tell = None
     server.down = False
+    locked = False
     await drain(hass, freezer, 60)
+    assert forwarder.stats.gaps_not_read == 0
     assert (forwarder.stats.dropped_quota, forwarder.stats.dropped_inflight) == (0, 0)
     assert forwarder.stats.queued == 0
     server.everything_once(1, value)
