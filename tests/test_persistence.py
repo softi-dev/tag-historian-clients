@@ -264,7 +264,8 @@ async def test_after_a_crash_during_an_outage_the_outage_is_read_back(
     """While writes were failing nothing was acknowledged, so the watermark is exact."""
     _seed(hass_storage, clean=False, sending_ok=False, acked={POWER: T0.timestamp()}, queue=[])
     recorder.record(POWER, "1400", T0)  # the acknowledged reading itself
-    recorder.record(POWER, "1500", T0 + timedelta(seconds=5))  # inside the minimum interval
+    recorder.record(POWER, "1450", T0 + timedelta(seconds=5))  # inside the minimum interval
+    recorder.record(POWER, "1500", T0 + timedelta(seconds=8))  # so is this, then silence
     recorder.record(POWER, "1600", T0 + timedelta(seconds=30))
     recorder.record(POWER, "unavailable", T0 + timedelta(seconds=40))
     recorder.record(POWER, "1700", T0 + timedelta(seconds=90))
@@ -275,12 +276,12 @@ async def test_after_a_crash_during_an_outage_the_outage_is_read_back(
     await _tick(hass, 2)
     await _tick(hass, 2)
 
-    assert client.values == ["1600.0", "1700.0"], (
-        "after the acknowledged reading, by the live path's own rules: the minimum "
-        "interval holds and an unavailable state is a gap"
+    assert client.values == ["1500.0", "1600.0", "1700.0"], (
+        "after the acknowledged reading, by the live path's own rules: the minimum interval "
+        "holds, the last reading held back by it goes, and an unavailable state is a gap"
     )
-    assert forwarder.stats.backfilled == 2
-    assert forwarder.stats.sent == 2
+    assert forwarder.stats.backfilled == 3
+    assert forwarder.stats.sent == 3
 
 
 async def test_a_gap_is_read_back_at_the_power_sensors_own_pace(
@@ -301,8 +302,9 @@ async def test_a_gap_is_read_back_at_the_power_sensors_own_pace(
     await _tick(hass, 2)
     await _tick(hass, 2)
 
-    assert client.values[:2] == ["4500.0", "4510.0"], (
-        "with one interval for everything only a reading ten seconds on would have been read back"
+    # 1500 and 4500 are held until their two seconds are up; 4510 is replaced as they are.
+    assert client.values[:3] == ["1500.0", "4500.0", "1500.0"], (
+        "with one interval for everything only the last of them would have been read back"
     )
 
 
@@ -311,7 +313,7 @@ async def test_a_gap_that_only_held_throttled_readings_stays_empty(
 ) -> None:
     """In ordinary running a backfill pass finds nothing: everything between two
     sent readings was skipped on purpose."""
-    held = T0 + timedelta(seconds=12)
+    held = T0 + timedelta(seconds=8)
     _seed(
         hass_storage,
         clean=True,

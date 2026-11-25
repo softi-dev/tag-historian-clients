@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import os
 import random
 from collections import Counter
 from datetime import timedelta
@@ -1647,15 +1648,125 @@ async def test_killed_an_entity_first_delivered_in_the_second_it_was_last_read_u
 
 
 # --------------------------------------------------------------------------
+# The reading the minimum interval holds back
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("stopped", ["killed", "stopped", "killed soon"])
+async def test_the_reading_held_back_when_home_assistant_goes_is_sent_once(
+    hass: HomeAssistant, started, recorder, freezer, hass_storage, stopped
+) -> None:
+    server = Server()
+    forwarder = await started(server, min_interval=60)
+    await put(hass, recorder, freezer, POWER, 860, 1)
+    await later(hass)
+    await put(hass, recorder, freezer, POWER, 70, 3)
+    await put(hass, recorder, freezer, POWER, 0, 3)
+    assert server.values() == [860]
+    if stopped == "stopped":
+        await forwarder.async_shutdown()
+    else:
+        kill(forwarder, hass_storage)
+    freezer.tick(timedelta(seconds=10 if stopped == "killed soon" else 3600))
+    forwarder = await started(server, min_interval=60)
+    await spin(100)
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=2))
+    await spin(100)
+    if stopped == "killed soon":
+        assert server.values() == [860], "its minute is not up yet"
+    await drain(hass, freezer, 5)
+    assert server.values() == [860, 0]
+
+
+async def test_one_read_back_before_its_interval_is_up_gives_way_to_a_newer_one(
+    hass: HomeAssistant, started, recorder, freezer, hass_storage
+) -> None:
+    server = Server()
+    forwarder = await started(server, min_interval=60)
+    await put(hass, recorder, freezer, POWER, 860, 1)
+    await later(hass)
+    await put(hass, recorder, freezer, POWER, 70, 3)
+    kill(forwarder, hass_storage)
+    freezer.tick(timedelta(seconds=10))
+    forwarder = await started(server, min_interval=60)
+    await drain(hass, freezer, 0)
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=2))
+    await spin(100)
+    await put(hass, recorder, freezer, POWER, 5, 3)
+    await drain(hass, freezer, 5)
+    assert server.values() == [860, 5]
+    assert forwarder.stats.dropped_throttled == 1
+
+
+async def test_one_held_back_is_not_read_back_as_well(
+    hass: HomeAssistant, started, recorder, freezer, monkeypatch
+) -> None:
+    """A pass that runs while a reading is held back ends at it."""
+    server = Server()
+    forwarder = await started(server, min_interval=60)
+    await put(hass, recorder, freezer, POWER, 860, 1)
+    await later(hass)
+    await put(hass, recorder, freezer, POWER, 0, 59.5)
+    # Late: the pass runs when its minute is up, and before its timer does.
+    freezer.tick(timedelta(seconds=30))
+    forwarder._request_backfill()
+    await spin(200)
+    await drain(hass, freezer, 4)
+    assert server.values() == [860, 0]
+
+
+async def test_a_held_reading_released_into_a_full_buffer_at_a_stop_loses_nothing(
+    hass: HomeAssistant, started, recorder, freezer, monkeypatch, hass_storage
+) -> None:
+    """The one it puts out is the next start's to read back, so nothing newer goes before it."""
+    monkeypatch.setattr(forwarder_module, "MAX_QUEUE_LENGTH", 3)
+    server = Server()
+    forwarder = await started(server, min_interval=10)
+    server.down = True
+    for value in (1, 2, 3):
+        await put(hass, recorder, freezer, POWER, value, 20)
+    await put(hass, recorder, freezer, POWER, 4, 5)
+    server.down = False
+    await forwarder.async_shutdown()
+    freezer.tick(timedelta(seconds=60))
+    await started(server, min_interval=10)
+    await drain(hass, freezer, 5)
+    server.everything_once(1, 4)
+
+
+async def test_killed_a_held_reading_of_the_second_tag_historian_has_is_counted_once(
+    hass: HomeAssistant, started, recorder, freezer, hass_storage
+) -> None:
+    """Its newest is of that second: it may be either, and it is not sent twice to find out."""
+    server = Server()
+    forwarder = await started(server, min_interval=10)
+    await put(hass, recorder, freezer, POWER, 860, 1.1)
+    await later(hass)
+    for value in (90, 50, 0):
+        await put(hass, recorder, freezer, POWER, value, 0.2)
+    kill(forwarder, hass_storage)
+    freezer.tick(timedelta(seconds=60))
+    forwarder = await started(server, min_interval=10)
+    await drain(hass, freezer, 5)
+    assert server.values() == [860]
+    assert forwarder.stats.dropped_inflight == 1
+
+
+# --------------------------------------------------------------------------
 # All of it at once
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("seed", range(40))
+@pytest.mark.parametrize("seed", range(int(os.environ.get("NO_LOSS_SEEDS", "40"))))
+@pytest.mark.parametrize("interval", [0, 10, 60])
 async def test_any_order_of_outages_stops_and_kills_gives_every_reading_once(
-    hass: HomeAssistant, started, recorder, freezer, monkeypatch, hass_storage, seed
+    hass: HomeAssistant, started, recorder, freezer, monkeypatch, hass_storage, seed, interval
 ) -> None:
-    """Everything the recorder has, once and nothing twice - whatever happened on the way."""
+    """Everything the recorder has, once and nothing twice - whatever happened on the way.
+
+    With a minimum interval: nothing twice, and every reading that stood for
+    longer than the interval - the one an entity ended on before a silence.
+    """
     monkeypatch.setattr(forwarder_module, "MAX_QUEUE_LENGTH", 8)
     monkeypatch.setattr(forwarder_module, "MAX_POINTS_PER_REQUEST", 3)
     monkeypatch.setattr(forwarder_module, "BACKFILL_BATCH_SIZE", 2)
@@ -1695,15 +1806,25 @@ async def test_any_order_of_outages_stops_and_kills_gives_every_reading_once(
     value = 0
     door = False
     entities = [POWER, DOOR]
-    forwarder = await started(server, entities=entities)
+    forwarder = await started(server, entities=entities, min_interval=interval)
+
+    async def made(entity_id, value, seconds) -> None:
+        if interval and seconds > interval + 2:
+            # Home Assistant's clock does not stand still: what is held back goes meanwhile.
+            freezer.tick(timedelta(seconds=interval + 1))
+            async_fire_time_changed(hass)
+            await spin()
+            seconds -= interval + 1
+        await put(hass, recorder, freezer, entity_id, value, seconds)
+
     for _ in range(60):
         step = dice.choice(["put"] * 5 + ["time"] * 4 + ["down", "up", "stop", "kill", "answer", "ask"])
         if step == "put":
             value += 1
             if dice.random() < 0.3:
                 door = not door  # Home Assistant says nothing of a state that stays
-                await put(hass, recorder, freezer, DOOR, "on" if door else "off", 7)
-            await put(hass, recorder, freezer, POWER, value, dice.choice([2, 20, 400]))
+                await made(DOOR, "on" if door else "off", 7)
+            await made(POWER, value, dice.choice([2, 20, 400]))
         elif step == "time":
             await drain(hass, freezer, 1)
         elif step in ("down", "up"):
@@ -1726,7 +1847,7 @@ async def test_any_order_of_outages_stops_and_kills_gives_every_reading_once(
                 value += 1
                 missed(recorder, freezer, POWER, value, dice.choice([2, 90]))
             freezer.tick(timedelta(seconds=dice.choice([1, 45])))
-            forwarder = await started(server, entities=entities)
+            forwarder = await started(server, entities=entities, min_interval=interval)
             await spin()
         assert len(forwarder._queue) <= 8
     for gate in gates:
@@ -1738,6 +1859,32 @@ async def test_any_order_of_outages_stops_and_kills_gives_every_reading_once(
     assert forwarder.stats.gaps_not_read == 0
     assert (forwarder.stats.dropped_quota, forwarder.stats.dropped_inflight) == (0, 0)
     assert forwarder.stats.queued == 0
+    if interval:
+        for entity_id, name in ((POWER, "house_power"), (DOOR, "back_door")):
+            made_at = [state.last_updated.timestamp() for state in recorder.states.get(entity_id, [])]
+            got = [
+                float(line.rsplit(" ", 1)[1]) for line in server.stored if f"entity_id={name} " in line
+            ]
+            assert len(got) == len(set(got)), "sent twice"
+            assert got == sorted(got)
+            stood = {
+                at
+                for at, then in zip(made_at, [*made_at[1:], float("inf")], strict=False)
+                if then - at > interval
+            }
+            if entity_id == DOOR:
+                # Between two of the same there is nothing to tell apart.
+                values = {
+                    state.last_updated.timestamp(): state.state
+                    for state in recorder.states.get(entity_id, [])
+                }
+                for at in sorted(stood):
+                    before = [sent for sent in got if sent <= at]
+                    assert before and values[before[-1]] == values[at]
+            else:
+                assert stood <= set(got)
+            assert set(got) <= set(made_at)
+        return
     server.everything_once(1, value)
     doors = [line.rsplit(" ", 1)[1] for line in server.stored if "back_door" in line]
     assert len(doors) == len(set(doors)) == len(recorder.states.get(DOOR, []))

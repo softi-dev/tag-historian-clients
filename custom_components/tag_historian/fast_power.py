@@ -20,7 +20,8 @@ It is kept in two places, with the same arithmetic (``FastPowerSum``):
   and at every quota poll. When it no longer fits, every entity goes back to
   the minimum interval, a warning is logged once and a repair card says why;
   when it fits again, the power sensors go back to two seconds and the card
-  goes away.
+  goes away. A start during an outage goes by the allowance the plan had when
+  it was last read (saved by the forwarder), until it is read again.
 
 Every number in the sum comes from the account (``GET /api/usage/limits``) and
 from Home Assistant; nothing about a plan is typed here.
@@ -207,10 +208,22 @@ class FastPowerGuard:
 
     @callback
     def async_check(self) -> None:
-        """Do the sum with the plan and the states as they are now, and act on it."""
+        """Do the sum with the plan and the states as they are now, and act on it.
+
+        Before the plan has been read - a start during an outage - with the
+        allowance it had when it last was, and then with no card and no
+        warning: whether that is still the plan is not known. With none known
+        either, every entity stays at the minimum interval.
+        """
         quota = self._coordinator.data
         if quota is None:
+            limit = self._forwarder.daily_limit
+            fits = limit is not None and (
+                fast_power_sum(self.hass, self._selected, self._min_interval, limit).fits
+            )
+            self._forwarder.set_power_interval(FAST_POWER_INTERVAL_SECONDS if fits else None)
             return
+        self._forwarder.remember_daily_limit(quota.measurements_per_day_limit)
         total = fast_power_sum(
             self.hass, self._selected, self._min_interval, quota.measurements_per_day_limit
         )

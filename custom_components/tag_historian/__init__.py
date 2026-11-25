@@ -323,10 +323,27 @@ async def async_setup_entry(
     # and bound for the tag it sends to now. And it listens before Tag
     # Historian is asked anything, so a slow or dead connection costs nothing.
     await forwarder.async_restore()
+    # Power sensors more often, when asked for and only while the sum fits the
+    # plan's daily readings allowance (fast_power.py). Before it listens: until
+    # the plan has been read, by what the last run knew of it, so that a start
+    # during an outage does not thin them out to the minimum interval.
+    guard: FastPowerGuard | None = None
+    if options.get(CONF_FAST_POWER, False):
+        guard = FastPowerGuard(hass, entry, forwarder, coordinator, selected, min_interval)
+        guard.async_check()
     forwarder.async_listen()
     try:
         return await _async_set_up_the_rest(
-            hass, entry, client, coordinator, forwarder, options, selected, renamed, min_interval
+            hass,
+            entry,
+            client,
+            coordinator,
+            forwarder,
+            guard,
+            options,
+            selected,
+            renamed,
+            min_interval,
         )
     except BaseException:
         # Nobody will unload an entry that did not set up.
@@ -340,6 +357,7 @@ async def _async_set_up_the_rest(
     client: TagHistorianClient,
     coordinator: QuotaCoordinator,
     forwarder: StateForwarder,
+    guard: FastPowerGuard | None,
     options: Mapping[str, Any],
     selected: list[str],
     renamed: dict[str, str],
@@ -369,13 +387,10 @@ async def _async_set_up_the_rest(
             err.__cause__ or cause,
         )
 
-    # Power sensors more often, when asked for and only while the sum fits the
-    # plan's daily readings allowance (fast_power.py): the guard sets the
-    # forwarder's power interval now, before the catch-up is read back, and
-    # again whenever the plan or the states change. An entry from before the
-    # option has no such key and keeps one interval for everything.
-    if options.get(CONF_FAST_POWER, False):
-        guard = FastPowerGuard(hass, entry, forwarder, coordinator, selected, min_interval)
+    # The guard sets the forwarder's power interval now, before the catch-up is
+    # read back, and again whenever the plan or the states change. An entry
+    # from before the option has none and keeps one interval for everything.
+    if guard is not None:
         entry.async_on_unload(guard.async_start())
     else:
         async_clear_fast_power_issue(hass, entry)

@@ -57,13 +57,15 @@ well as the ones still queued - see :meth:`StateForwarder.async_flush`, whose
 ``finally`` is the only thing standing between a cancelled request and forty
 readings nobody can account for.
 
-A METER is not left on a dropped reading. The minimum interval drops a reading
-that follows the last one too soon, and for a measurement that is the point.
-For a meter (state class ``total`` or ``total_increasing``) the newest reading
-held back is sent once the interval is up instead
-(:meth:`StateForwarder._hold_trailing`), so a burst ends on the reading the
-meter really ended on, and Tag Historian's increase for that hour is the real
-one.
+NO ENTITY is left on a dropped reading. The minimum interval is about how many
+readings are sent, never about which value an entity ends on: Home Assistant
+says nothing more of a state that stays, so a reading dropped for coming too
+soon could be the last one for hours - a power that went to 0 W a moment later
+and stood at what it was before, the door that closed again.
+So the newest reading held back is sent once the interval is up, with its own
+time (:meth:`StateForwarder._hold_trailing`), and the catch-up from the
+recorder does the same (:meth:`StateForwarder._async_backfill_entity`). It is
+still at most one reading per interval.
 
 Timing note: everything scheduled here goes through ``async_call_later``, and
 throttling compares the readings' OWN timestamps rather than a wall clock. Both
@@ -238,8 +240,8 @@ INFLIGHT_WAIT_SECONDS = 5
 MAX_UNSTORABLE_NAMES = 10
 
 # The state classes of a meter: a reading that only grows, or one that grows
-# and starts over (Home Assistant's SensorStateClass). A meter's last reading
-# before it goes quiet is worth a trailing send (StateForwarder._hold_trailing).
+# and starts over (Home Assistant's SensorStateClass). A meter's held reading
+# goes out even when its value is the one sent last: its last reset may not be.
 METER_STATE_CLASSES = frozenset({"total", "total_increasing"})
 
 # The last microsecond of one.
@@ -249,6 +251,15 @@ END_OF_SECOND = 1 - 1e-6
 def _is_meter(state: State) -> bool:
     """Whether Home Assistant says this entity is a meter (its state_class)."""
     return str(state.attributes.get("state_class") or "") in METER_STATE_CLASSES
+
+
+def _says_nothing_new(state: State, value: float, last_value: float | None) -> bool:
+    """Whether a reading held back is only what was sent last, over again.
+
+    Only an attribute changed, or it went and came back within the interval:
+    Tag Historian is on that value already.
+    """
+    return value == last_value and not _is_meter(state)
 
 
 def _floats(saved: Any) -> dict[str, float]:
@@ -415,6 +426,9 @@ class StateForwarder:
         # daily allowance (fast_power.FastPowerGuard, through
         # set_power_interval). Never longer than the minimum interval.
         self._power_interval = power_interval
+        # The plan's daily allowance as last read, kept across a restart: the
+        # guard goes by it until it is read again.
+        self.daily_limit: int | None = None
         # Where the buffer goes when the forwarder stops, and where the
         # acknowledged watermark is kept across a restart. None only in tests
         # that are about something else; Home Assistant always gets one.
@@ -436,7 +450,9 @@ class StateForwarder:
         # the registry no longer knows the old one.
         self._registry_ids: dict[str, str] = {}
         self._last_sent: dict[str, datetime] = {}
-        # Per meter, the newest reading the minimum interval held back and the
+        # The value of the newest one, to tell a held reading that says no more.
+        self._last_value: dict[str, float] = {}
+        # Per entity, the newest reading the interval held back and the
         # timer that sends it (_hold_trailing). At most one of each per
         # selected entity; both go when it is sent, let go of, or stopped.
         self._trailing: dict[str, tuple[State, float]] = {}
@@ -615,6 +631,9 @@ class StateForwarder:
             saved = {}
         self._add_saved_counters(saved.get("counters"))
         now = dt_util.utcnow().timestamp()
+        limit = saved.get("daily_limit")
+        if isinstance(limit, int) and not isinstance(limit, bool):
+            self.daily_limit = limit
 
         saved_ids = {str(k): str(v) for k, v in (saved.get("registry_ids") or {}).items()}
         renamed = renamed_since(self.hass, saved_ids, self._entity_ids)
@@ -910,8 +929,8 @@ class StateForwarder:
             return
         self._begin_stop()
         self._stop_by = self.hass.loop.time() + STOP_BUDGET_SECONDS
-        # A meter's reading still held back goes with the last flush, or is
-        # saved with the buffer: it is the reading its burst ended on.
+        # A reading still held back goes with the last flush, or is saved with
+        # the buffer: it is the one its burst ended on.
         self._release_trailing()
         try:
             if self._queue or self._inflight:
@@ -1102,6 +1121,7 @@ class StateForwarder:
             "suspect": list(self._suspect[:2]) if self._suspect is not None else None,
             "since": {e: s for e, s in self._since.items() if e not in self._acked},
             "save_every": WATERMARK_SAVE_SECONDS,
+            "daily_limit": self.daily_limit,
             "counters": {name: getattr(self.stats, name) for name in SAVED_COUNTERS},
         }
         on_disk = self._disk_sending_ok
@@ -1180,8 +1200,20 @@ class StateForwarder:
         For fast_power.FastPowerGuard, which keeps the option inside the plan's
         daily allowance. A reading already held is sent as it is; only what
         arrives from now on, and the next catch-up, is judged by the new pace.
+        So is when one held back by the interval goes out.
         """
+        if power_interval == self._power_interval:
+            return
         self._power_interval = power_interval
+        for entity_id in list(self._trailing_timers):
+            self._time_trailing(entity_id)
+
+    @callback
+    def remember_daily_limit(self, limit: int) -> None:
+        """The plan's daily allowance, for the next start to go by until it is read again."""
+        if limit != self.daily_limit:
+            self.daily_limit = limit
+            self._save_within(WATERMARK_SAVE_SECONDS)
 
     def _interval_for(self, entity_id: str, state: State | None = None) -> float:
         """The fewest seconds between two readings of this entity.
@@ -1226,17 +1258,19 @@ class StateForwarder:
 
         stamp = new_state.last_updated
         last = self._last_sent.get(entity_id)
-        if (
-            last is not None
-            and (stamp - last).total_seconds() < self._interval_for(entity_id, new_state)
-        ):
+        interval = self._interval_for(entity_id, new_state)
+        if last is not None and entity_id in self._trailing:
+            due = last + timedelta(seconds=interval)
+            if stamp > due:
+                # Its interval was up before this one was made, and its timer
+                # has not got to it: a busy loop, a machine that slept.
+                self._send_held(entity_id, due)
+                last = due
+        if last is not None and (stamp - last).total_seconds() < interval:
             # Deliberate. The daily quota counts every point SENT, including
             # ones deadband compression later discards server-side, so the only
             # place a reading can be saved is here.
-            if _is_meter(new_state):
-                self._hold_trailing(new_state, value, last)
-                return
-            self.stats.dropped_throttled += 1
+            self._hold_trailing(new_state, value)
             return
         # A reading of it goes out now, so one held back is older than it and
         # has nothing left to say.
@@ -1245,49 +1279,63 @@ class StateForwarder:
         self._enqueue(new_state, value)
 
     @callback
-    def _hold_trailing(self, state: State, value: float, last: datetime) -> None:
-        """A meter's reading the minimum interval holds back: sent when the interval is up, if still the newest.
+    def _hold_trailing(self, state: State, value: float) -> None:
+        """A reading the interval holds back: sent when the interval is up, if still the newest.
 
-        A meter that goes quiet after a burst - the dishwasher's last kWh,
-        the water meter after a shower - would otherwise end its burst on a
-        reading the throttle dropped, and Tag Historian would put the hour's
-        end, and the hour's use, at the reading before. Only the newest held
-        reading is kept, one per meter, and it goes out at ``last +
-        min_interval`` with its own timestamp - a real value at its real time.
-        A newer reading that is not held back first lets it go.
+        An entity that goes quiet after a burst - the dishwasher's last kWh,
+        the export that stops, a door opened and closed - would otherwise end
+        its burst on a reading it was already past, for as long as it is
+        quiet. Only the newest held reading is kept, one per entity, and it
+        goes out once the interval has passed since the last one sent, with
+        its own timestamp - a real value at its real time.
         """
         entity_id = state.entity_id
+        if _says_nothing_new(state, value, self._last_value.get(entity_id)):
+            self._let_trailing_go(entity_id)
+            self.stats.dropped_throttled += 1
+            return
         if entity_id in self._trailing:
             # Replaced by a newer one before it went out: throttled after all.
             self.stats.dropped_throttled += 1
         self._trailing[entity_id] = (state, value)
-        if entity_id in self._trailing_timers:
-            return
-        due = (last + timedelta(seconds=self._min_interval) - dt_util.utcnow()).total_seconds()
+        if entity_id not in self._trailing_timers:
+            self._time_trailing(entity_id)
+
+    @callback
+    def _time_trailing(self, entity_id: str) -> None:
+        """(Re)start the timer of an entity's held reading."""
+        if (unsub := self._trailing_timers.get(entity_id)) is not None:
+            unsub()
+        interval = self._interval_for(entity_id, self._trailing[entity_id][0])
+        due = self._last_sent[entity_id] + timedelta(seconds=interval) - dt_util.utcnow()
         self._trailing_timers[entity_id] = async_call_later(
             self.hass,
-            max(0.0, due),
+            max(0.0, due.total_seconds()),
             HassJob(partial(self._send_trailing, entity_id), "tag_historian_trailing_send"),
         )
 
     @callback
     def _send_trailing(self, entity_id: str, _now: object) -> None:
-        """The interval is up: send the meter's newest held reading."""
+        """The interval is up: send the entity's newest held reading."""
         self._trailing_timers.pop(entity_id, None)
-        held = self._trailing.pop(entity_id, None)
-        if held is None or self._closed:
-            return
-        state, value = held
+        if entity_id in self._trailing and not self._closed:
+            self._send_held(entity_id, dt_util.utcnow())
+
+    @callback
+    def _send_held(self, entity_id: str, at: datetime) -> None:
+        if (unsub := self._trailing_timers.pop(entity_id, None)) is not None:
+            unsub()
+        state, value = self._trailing.pop(entity_id)
         # The throttle runs from the moment it went out rather than from the
-        # reading's own time, so a meter sends at most one reading per
-        # minimum interval, trailing ones included - the rate the review
-        # screen's arithmetic promises.
-        self._last_sent[entity_id] = max(state.last_updated, dt_util.utcnow())
+        # reading's own time, so an entity sends at most one reading per
+        # interval, trailing ones included - the rate the review screen's
+        # arithmetic promises.
+        self._last_sent[entity_id] = max(state.last_updated, at)
         self._enqueue(state, value)
 
     @callback
     def _let_trailing_go(self, entity_id: str) -> None:
-        """Forget a meter's held reading, counted as throttled; it never went out."""
+        """Forget an entity's held reading, counted as throttled; it never went out."""
         if (unsub := self._trailing_timers.pop(entity_id, None)) is not None:
             unsub()
         if self._trailing.pop(entity_id, None) is not None:
@@ -1295,7 +1343,7 @@ class StateForwarder:
 
     @callback
     def _release_trailing(self) -> None:
-        """Stopping: every held meter reading goes into the buffer, for the last flush or the saved buffer."""
+        """Stopping: every held reading goes into the buffer, for the last flush or the saved buffer."""
         for unsub in self._trailing_timers.values():
             unsub()
         self._trailing_timers.clear()
@@ -1309,6 +1357,7 @@ class StateForwarder:
         """One reading into the buffer, encoded for the tag its entity sends to."""
         entity_id = state.entity_id
         stamp = state.last_updated
+        self._last_value[entity_id] = value
         # The unit and the friendly name ride along on every reading, so the
         # tag in Tag Historian carries what Home Assistant shows - "Living room
         # temperature", 21.5 °C - and follows a rename here. The attribute,
@@ -1414,11 +1463,18 @@ class StateForwarder:
         return len(self._queue) + len(self._backfill)
 
     def _oldest_held(self, entity_id: str) -> float | None:
-        """The timestamp of the oldest LIVE reading of this entity still in the buffer."""
-        return min(
+        """The timestamp of the oldest LIVE reading of this entity still held.
+
+        In the buffer or, when none is there, held back by the interval: that
+        one is newer than any that is.
+        """
+        oldest = min(
             (item.timestamp for item in self._queue if item.entity_id == entity_id),
             default=None,
         )
+        if oldest is None and (held := self._trailing.get(entity_id)) is not None:
+            return held[0].last_updated.timestamp()
+        return oldest
 
     def _newest_accounted(self, entity_id: str) -> float | None:
         """The newest reading of this entity answered for, read back, or on the wire from a read-back."""
@@ -1456,8 +1512,8 @@ class StateForwarder:
             for item in [*self._queue, *self._backfill, *(self._inflight or [])]
             if item.entity_id == entity_id
         ]
-        # A meter's reading held back for its trailing send is the
-        # forwarder's to deliver as well.
+        # A reading held back for its trailing send is the forwarder's to
+        # deliver as well.
         if (held := self._trailing.get(entity_id)) is not None:
             candidates.append(held[0].last_updated.timestamp())
         if entity_id not in self._acked:
@@ -1476,6 +1532,10 @@ class StateForwarder:
         # Not gone: the recorder still has it, and once Tag Historian answers
         # again a backfill pass reads it back.
         self._backfill_wanted = True
+        if self._stopping:
+            # A held reading released into a full buffer. The next start reads
+            # it, and what is newer must not go before then.
+            self._cut_short = self._cut_short or history.recorder_ready(self.hass)
         self._request_backfill()
 
     def _forfeit(self, item: Queued) -> None:
@@ -1551,9 +1611,10 @@ class StateForwarder:
         this forwarder started listening - to the oldest live reading still
         held, or, when none is, to the moment this pass began. Inside it, the
         same rules as a live reading: numbers and the two-state words only,
-        ``unavailable`` is a gap, and the minimum interval holds - measured
-        from the acknowledged reading, and kept clear of the held one - so a
-        gap that only ever held throttled readings stays empty.
+        ``unavailable`` is a gap, and the minimum interval holds, measured
+        from the acknowledged reading - and the last one before a silence is
+        sent when it is up - so a gap that only ever held throttled readings
+        stays empty.
 
         "When none is held" ended at the moment this forwarder started
         listening, once. That is the same moment at startup, and hours or days
@@ -1715,7 +1776,12 @@ class StateForwarder:
             and recorded_state_value(state.entity_id, state.state) is not None
         }
         del self._same_second[entity_id]
-        self._count_mid_write(len(stamps) - (0 if acked >= second else 1))
+        missing = len(stamps) - (0 if acked >= second else 1)
+        if self._interval_for(entity_id) >= 1:
+            # The interval held all but one of them back - and the newest of
+            # those may or may not have gone out when it was up.
+            missing = min(missing, 1)
+        self._count_mid_write(missing)
 
     def _count_mid_write(self, missing: int) -> None:
         if missing <= 0:
@@ -1732,7 +1798,13 @@ class StateForwarder:
         end_is_held: bool,
         throttle_from: float | None,
     ) -> int:
-        """Queue what the recorder has in the gap. How many readings that is."""
+        """Queue what the recorder has in the gap. How many readings that is.
+
+        Judged as the live path would have judged them, the trailing send of
+        a held reading included (:meth:`_hold_trailing`). One whose interval
+        is not up yet when the gap has been read is handed to the live path,
+        which sends it when it is - or drops it for a newer one.
+        """
         window = timedelta(hours=RECORDER_WINDOW_HOURS)
         cursor = datetime.fromtimestamp(start, UTC)
         stop = datetime.fromtimestamp(end, UTC)
@@ -1740,6 +1812,8 @@ class StateForwarder:
         # with none had nothing before its first live reading to be throttled
         # against, and neither has its first recorded one here.
         last = None if throttle_from is None else _throttle_from(throttle_from)
+        last_value: float | None = None
+        waiting: tuple[State, float] | None = None
         found = 0
         # A power sensor sent more often live is caught up at the same pace,
         # so a gap an outage left has the readings Loads looks for.
@@ -1765,47 +1839,27 @@ class StateForwarder:
                 value = recorded_state_value(state.entity_id, state.state)
                 if value is None:
                     continue
-                if last is not None and stamp - last < interval:
-                    continue
-                if end_is_held and end - stamp < interval:
-                    continue
-                last = stamp
-                if stamp <= self._doubtful_until.get(entity_id, float("-inf")):
-                    if stamp in self._counted.get(entity_id, ()):
+                if last is not None:
+                    if waiting is not None and stamp - last > interval:
+                        # Its interval was up before this one was made.
+                        found += await self._async_read_back(entity_id, *waiting)
+                        last, last_value, waiting = last + interval, waiting[1], None
+                    if stamp - last < interval:
+                        waiting = (state, value)
+                        if _says_nothing_new(state, value, last_value):
+                            waiting = None
                         continue
-                    self.stats.dropped_inflight += 1
-                    self.stats.last_error = "readings from before a crash may be missing"
-                    continue
-
-                while len(self._backfill) >= BACKFILL_BATCH_SIZE and not self._closed:
-                    self._backfill_room.clear()
-                    self._schedule_flush()
-                    await self._backfill_room.wait()
+                last, last_value, waiting = stamp, value, None
+                found += await self._async_read_back(entity_id, state, value)
                 if self._closed:
                     return found
-
-                # Into the tag a live reading of it goes to: a renamed entity's
-                # gap is part of the history its live readings carry on.
-                self._backfill.append(
-                    Queued(
-                        entity_id,
-                        stamp,
-                        encode_point(
-                            self._send_as.get(entity_id, entity_id),
-                            value,
-                            state.last_updated,
-                            state.attributes.get("unit_of_measurement"),
-                            state.attributes.get("friendly_name"),
-                            state.attributes.get("state_class"),
-                            state.attributes.get("last_reset"),
-                        ),
-                        self._send_as.get(entity_id, ""),
-                    )
-                )
-                found += 1
-                self.stats.backfilled += 1
-                self.stats.queued = self._held()
             cursor = window_end
+            self._schedule_flush()
+
+        if last is not None and not self._closed:
+            found += await self._async_read_back_last(
+                entity_id, waiting, last, interval, end if end_is_held else None
+            )
             self._schedule_flush()
 
         if found:
@@ -1815,6 +1869,83 @@ class StateForwarder:
                 entity_id,
             )
         return found
+
+    async def _async_read_back_last(
+        self,
+        entity_id: str,
+        waiting: tuple[State, float] | None,
+        last: float,
+        interval: float,
+        held: float | None,
+    ) -> int:
+        """Where the gap ends: the reading still waiting for its interval, if there is one."""
+        due = last + interval
+        up = False
+        if waiting is not None:
+            newer = held if held is not None else self._oldest_held(entity_id)
+            up = due < (newer if newer is not None else dt_util.utcnow().timestamp())
+            if not up and (newer is not None or self._stopping):
+                waiting = None  # a newer one took its place, or the next start reads it
+        # The live path goes on from here.
+        sent_at = datetime.fromtimestamp(due if up else last, UTC)
+        if (known := self._last_sent.get(entity_id)) is None or sent_at > known:
+            self._last_sent[entity_id] = sent_at
+        if waiting is None:
+            return 0
+        state, value = waiting
+        doubtful = self._doubtful_until.get(entity_id, float("-inf"))
+        if up or state.last_updated.timestamp() <= doubtful:
+            return await self._async_read_back(entity_id, state, value)
+        self._hold_trailing(
+            # Under its id as it is now; it may be recorded under a former one.
+            State(
+                entity_id,
+                state.state,
+                state.attributes,
+                last_changed=state.last_changed,
+                last_updated=state.last_updated,
+            ),
+            value,
+        )
+        return 0
+
+    async def _async_read_back(self, entity_id: str, state: State, value: float) -> int:
+        """Queue one recorded reading, when there is room. 1 if it was, 0 if not."""
+        stamp = state.last_updated.timestamp()
+        if stamp <= self._doubtful_until.get(entity_id, float("-inf")):
+            if stamp not in self._counted.get(entity_id, ()):
+                self.stats.dropped_inflight += 1
+                self.stats.last_error = "readings from before a crash may be missing"
+            return 0
+
+        while len(self._backfill) >= BACKFILL_BATCH_SIZE and not self._closed:
+            self._backfill_room.clear()
+            self._schedule_flush()
+            await self._backfill_room.wait()
+        if self._closed:
+            return 0
+
+        # Into the tag a live reading of it goes to: a renamed entity's gap is
+        # part of the history its live readings carry on.
+        self._backfill.append(
+            Queued(
+                entity_id,
+                stamp,
+                encode_point(
+                    self._send_as.get(entity_id, entity_id),
+                    value,
+                    state.last_updated,
+                    state.attributes.get("unit_of_measurement"),
+                    state.attributes.get("friendly_name"),
+                    state.attributes.get("state_class"),
+                    state.attributes.get("last_reset"),
+                ),
+                self._send_as.get(entity_id, ""),
+            )
+        )
+        self.stats.backfilled += 1
+        self.stats.queued = self._held()
+        return 1
 
     # ------------------------------------------------------------------
     # The wire
@@ -2168,7 +2299,7 @@ class StateForwarder:
             ):
                 # To the second it is sent in: all of that second.
                 before_stored[pair] = at + END_OF_SECOND
-                if selected and current and self._interval_for(entity_id) < 1:
+                if selected and current:
                     acked = self._acked.get(entity_id, float("-inf"))
                     self._same_second[entity_id] = (at, acked, set())
                 if current:

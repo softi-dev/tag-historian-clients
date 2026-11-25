@@ -11,6 +11,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.tag_historian.api import TagHistorianConnectionError
 from custom_components.tag_historian.const import (
     CONF_API_KEY,
     CONF_ENTITIES,
@@ -191,3 +192,90 @@ async def test_unticking_the_box_clears_the_card(hass: HomeAssistant, house) -> 
 
     assert await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
+
+
+async def test_a_start_during_an_outage_goes_by_the_plan_as_it_was_last_read(
+    hass: HomeAssistant, house, hass_storage, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Power sensors stay at two seconds until the plan answers, and then go by the answer."""
+    entry = _entry(hass)
+    with patch(CLIENT_PATH, return_value=make_client(quota=_quota_allowing(120_000))):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+    client = make_client()
+    client.async_get_quota.side_effect = TagHistorianConnectionError("down")
+    with patch(CLIENT_PATH, return_value=client):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        forwarder = entry.runtime_data.forwarder
+        assert forwarder.holding
+        assert forwarder._interval_for("sensor.house_power") == 2
+        assert forwarder._interval_for("sensor.phone_battery") == 10
+        assert _issue(hass, entry) is None
+
+        # It still does after one more stop in the same outage.
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        assert entry.runtime_data.forwarder._interval_for("sensor.house_power") == 2
+
+        # The plan is smaller now than it was: the answer is what counts.
+        client.async_get_quota.side_effect = None
+        client.async_get_quota.return_value = _quota_allowing(55_000)
+        await entry.runtime_data.coordinator.async_refresh()
+        await hass.async_block_till_done()
+        assert entry.runtime_data.forwarder._interval_for("sensor.house_power") == 10
+        assert _issue(hass, entry) is not None
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+    # And the next start in an outage goes by that one, without a card: it may be old.
+    client = make_client()
+    client.async_get_quota.side_effect = TagHistorianConnectionError("down")
+    with patch(CLIENT_PATH, return_value=client):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        assert entry.runtime_data.forwarder._interval_for("sensor.house_power") == 10
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_a_first_start_during_an_outage_keeps_the_minimum_interval(
+    hass: HomeAssistant, house
+) -> None:
+    """No plan has ever been read: nothing says two seconds fit."""
+    entry = _entry(hass)
+    client = make_client()
+    client.async_get_quota.side_effect = TagHistorianConnectionError("down")
+    with patch(CLIENT_PATH, return_value=client):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        assert entry.runtime_data.forwarder._interval_for("sensor.house_power") == 10
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_more_power_sensors_than_the_plan_last_read_has_room_for_stay_slow(
+    hass: HomeAssistant, house, hass_storage
+) -> None:
+    """Chosen since: the sum is done with what is selected now."""
+    entry = _entry(hass)
+    with patch(CLIENT_PATH, return_value=make_client(quota=_quota_allowing(61_000))):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        assert entry.runtime_data.forwarder._interval_for("sensor.house_power") == 2
+        assert await hass.config_entries.async_unload(entry.entry_id)
+    hass.states.async_set(
+        "sensor.phone_battery", "5", {"device_class": "power", "unit_of_measurement": "W"}
+    )
+    client = make_client()
+    client.async_get_quota.side_effect = TagHistorianConnectionError("down")
+    with patch(CLIENT_PATH, return_value=client):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        assert entry.runtime_data.forwarder._interval_for("sensor.house_power") == 10
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()

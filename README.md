@@ -205,7 +205,8 @@ Four screens:
    the sun — are not in the list until you tick **Show every entity**, which
    puts every entity in the install back in it, unfiltered. There is also a
    minimum interval, which is how you stop a chatty sensor spending your daily
-   reading allowance, and **Send power sensors more often**, which is off
+   reading allowance (the newest reading it holds back is sent when the interval
+   is up, so an entity never stays on a value it has left), and **Send power sensors more often**, which is off
    until you tick it ([what it does and costs](#power-sensors-more-often)).
 
    The same screen has **Use my approximate location (about 10 km) for
@@ -364,8 +365,15 @@ whether it is a meter: its state class, and a `total`'s last reset. A
 `total_increasing` sensor, and a `total` with a last reset, becomes a meter
 in Tag Historian by itself, with its use per hour, day and month; a `total`
 without one may go down as well as up — energy bought less energy sold — and
-stays a level. A meter's last reading before it goes quiet is never one the
-minimum interval skipped: it is sent once the interval is up. A reading is
+stays a level. An entity's last reading before it goes quiet is never one the
+minimum interval skipped. The newest one held back is sent once the interval is
+up, with its own time: a power that went to 0 is 0 rather than what it was a few
+seconds earlier, and the door that was opened and closed is closed. (One whose
+value is the one sent last is not, except a meter's: it says nothing new.) It is
+still at most one reading per interval and entity, so the review screen's sum
+holds - but a sensor that changes about as often as the interval, or in short
+bursts, sends more than it did before this version, at most twice as many. A
+reading is
 therefore a number, or one of a small set of words that *are* a number in
 disguise: `on`/`off` for a light, a switch, a fan, an automation, a helper or a
 binary sensor, `open`/`closed` for a cover, `above_horizon`/`below_horizon` for
@@ -448,6 +456,10 @@ the minimum interval, power sensors too; the log says so once and a card in
 power sensors go back to every 2 seconds by themselves and the card goes away.
 
 The catch-up after an outage reads a power sensor back at the same 2 seconds.
+When Home Assistant starts while Tag Historian cannot be reached, the sum is
+done with your plan's allowance as it was last read, so power sensors are not
+thinned out to the minimum interval until it answers; from then on the answer is
+what counts. Before any plan has been read, they keep the minimum interval.
 The history import does not: it keeps the minimum interval for every entity.
 
 ## When you rename an entity
@@ -566,7 +578,9 @@ reading can fail to become history:
 `entities_storing_nothing` names the entities behind that last one, so a chart
 that stays empty says why. `dropped_rate_limited` is on the attributes too but
 is deliberately *not* in the total — those are the readings your minimum
-interval skipped, which is what you asked it to do. Two more attributes are not
+interval skipped for a newer one, or that only repeated the value sent last,
+which is what you asked it to do. A reading held back and then sent is not among
+them. Two more attributes are not
 losses but what happened next: `backfilled_from_recorder`, readings read back
 from the recorder to fill a gap, and `restored_after_restart`, readings saved
 at the last stop and sent after it. `gaps_not_read_back` counts gaps, of one
@@ -681,7 +695,8 @@ it has in the same way, and everything newer is read back from the recorder.
 of an entity you have excluded from it cannot be read back. With a minimum
 interval of 0, an entity with several readings in the very second of Tag
 Historian's newest may have only one of them there; the others are counted as
-`dropped_mid_write`. And a request that was on its way when Home Assistant
+`dropped_mid_write`. With a longer one, the same goes for one reading the
+interval held back within that second. And a request that was on its way when Home Assistant
 crashed, and is held up by a gateway until after the question, is stored
 twice.) If Tag Historian
 cannot say, what may have been sent since the last save — at most about six
